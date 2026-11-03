@@ -65,7 +65,7 @@ async function harness(options = {}) {
   const noop = () => {};
   const dummy = new Proxy(function () {}, { get: () => dummy, apply: () => dummy, construct: () => dummy });
   const exportsByModule = {
-    "gpui-kit": { View: class View {}, div: dummy },
+    "gpui-kit": { View: class View {}, div: dummy, svg: dummy, image: dummy },
     "gpui-base": Object.fromEntries(["v_flex", "h_flex", "InputState", "Input", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
     "fs/promises": { readFile: async () => "{}", writeFile: async () => {} },
     "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, validateRepository: async target => {
@@ -106,7 +106,7 @@ async function harness(options = {}) {
   await module.link(link);
   await module.evaluate();
   const mainStubs = {
-    "./model.js": Object.fromEntries(["issueKey", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, noop])),
+    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, noop])),
     "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf"].map(name => [name, noop])),
     "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "delegateCounts"].map(name => [name, noop])),
     "./config.js": { normalizeConfig: noop },
