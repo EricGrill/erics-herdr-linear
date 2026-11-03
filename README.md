@@ -28,6 +28,9 @@ unlinked work; the issue header identifies spaces that have no ticket.
 
 ## Choose where a task runs
 
+New, unplaced work defaults to **This computer**, even while a remote space is focused.
+Saved ticket targets and project preferences still restore the computer you explicitly
+selected; existing linked workspaces still open where they already run.
 In New task, select **Computer**, then **Repository**. The repository list comes from
 the selected computer's own `~/code`; it does not create or clone a missing repository.
 Installed-agent choices are refreshed for that computer. Changing computers clears
