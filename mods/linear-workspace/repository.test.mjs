@@ -17,7 +17,8 @@ async function harness(options = {}) {
     exec: async (command, args, config) => {
       calls.push({ command, args, config });
       if (options.exec) return options.exec(command, args, config);
-      const result = await run(command, args, { env: { ...process.env, HOME: options.home } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
+      // Do not inherit the runner's XDG/plugin paths into the target-home fixture.
+      const result = await run(command, args, { env: { PATH: process.env.PATH, HOME: options.home } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
       return result;
     },
   };
