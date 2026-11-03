@@ -6,6 +6,7 @@ import { taskContext } from "./model.js";
 
 const source = await readFile(new URL("./client.js", import.meta.url), "utf8");
 const targetSource = await readFile(new URL("./execution-target.js", import.meta.url), "utf8");
+const mainSource = await readFile(new URL("./main.js", import.meta.url), "utf8");
 const ticket = {
   id: "issue-one", identifier: "DEMO-3785", title: "Research newly starred repos",
   url: "https://linear.app/example/issue/DEMO-3785", branch: "sample-user/demo-3785-research",
@@ -56,7 +57,7 @@ async function harness(options = {}) {
       path: options.worktreePath ?? "/repos/worktrees/demo-3785", created: options.created ?? false,
       prompt: "Backend prompt", note: "Worktree ready",
     } };
-    else if (request.op === "detail") result = { issue: ticket, description: options.description ?? "" };
+    else if (request.op === "detail") result = options.detailReply ? await options.detailReply(request) : options.detailError ? { error: options.detailError } : { issue: ticket, description: options.description ?? "" };
     else if (request.op === "start") result = options.failStart ? { error: "Issue could not be started" } : { note: "Issue started" };
     else throw new Error(`Unexpected backend operation ${request.op}`);
     return { code: result.error ? 1 : 0, stdout: JSON.stringify(result), stderr: "" };
@@ -67,7 +68,7 @@ async function harness(options = {}) {
     "gpui-kit": { View: class View {}, div: dummy },
     "gpui-base": Object.fromEntries(["v_flex", "h_flex", "InputState", "Input", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
     "fs/promises": { readFile: async () => "{}", writeFile: async () => {} },
-    "./repository.js": { validateRepository: async target => {
+    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, validateRepository: async target => {
       validations.push({ ...target });
       if (options.validationError) throw new Error(options.validationError);
       return target.folder;
@@ -76,7 +77,7 @@ async function harness(options = {}) {
       if (options.routingError) throw new Error(options.routingError);
     } },
     "herdr": {
-      shared: key => sharedStore.get(key), setShared: (key, value) => sharedStore.set(key, value),
+      shared: key => sharedStore.get(key), setShared: (key, value) => sharedStore.set(key, value), setAgentOrder: noop,
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
       run: (name, args) => { commands.push({ name, args }); return {}; }, exec, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
@@ -104,6 +105,22 @@ async function harness(options = {}) {
   };
   await module.link(link);
   await module.evaluate();
+  const mainStubs = {
+    "./model.js": Object.fromEntries(["issueKey", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, noop])),
+    "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf"].map(name => [name, noop])),
+    "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "delegateCounts"].map(name => [name, noop])),
+    "./config.js": { normalizeConfig: noop },
+  };
+  const mainModule = new vm.SourceTextModule(mainSource, { context });
+  await mainModule.link(async specifier => {
+    if (specifier === "./client.js") return module;
+    const exports = mainStubs[specifier];
+    if (!exports) return link(specifier);
+    return new vm.SyntheticModule(Object.keys(exports), function () {
+      for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
+    }, { context });
+  });
+  await mainModule.evaluate();
   const pending = [];
   const cx = {
     notify: noop,
@@ -116,11 +133,13 @@ async function harness(options = {}) {
   Object.assign(client, {
     ws: "workspace-one", on: "", workspaces: [{ id: "workspace-one", name: "Workspace", urlKey: "example" }],
     demo: false, trees: {}, lists: {}, screen: "issue", cur: ticket, busy: "", err: "", flash: "",
+    issueTargetState: { key: "workspace-one/issue-one", request: 0, status: "ready" },
     launchTarget: Object.hasOwn(options, "launchTarget") ? options.launchTarget : { folder: sourceSpace.folder, machine: null },
     agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars" },
     desc: { value: () => "Reproduce the missing scheduled research." },
     form: { team: { id: "team-one" }, project: "project-one", state: "state-one", priority: 2, assignToMe: true },
     replaceRow: noop,
+    records: () => [], publish: noop,
     keys: { focus: noop },
     loadAll: noop,
     openIssue: function (issue) { this.cur = issue; },
@@ -132,7 +151,7 @@ async function harness(options = {}) {
     let read = 0;
     while (read < pending.length) { const batch = pending.slice(read); read = pending.length; await Promise.all(batch); }
   };
-  return { client, cx, flush, requests, commands, agentChecks, links, modes, validations, routingChecks, sharedStore, openIssue: module.namespace.default.prototype.openIssue };
+  return { client, cx, flush, requests, commands, agentChecks, links, modes, validations, routingChecks, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
@@ -478,4 +497,95 @@ test("failed canonical identification prevents issue creation", async () => {
   assert.match(h.client.err, /Cannot identify/);
   assert.deepEqual(h.requests, []);
   assert.deepEqual(h.commands, []);
+});
+
+
+const delay = () => { let resolve; const promise = new Promise(ok => { resolve = ok; }); return { promise, resolve }; };
+const remoteDescription = () => '```json\n' + JSON.stringify({ ericsHerdrLinearExecutionTarget: { version: 1,
+  computerId: "core-remote", computerName: "remote-origin", folder: "/remote/code/canonical" } }) + '\n```';
+
+for (const key of ["s", "w"]) test(`keyboard ${key} and shared worktree boundary cannot launch while canonical placement is pending`, async () => {
+  const detail = delay();
+  const h = await harness({ detailReply: () => detail.promise,
+    registry: [{ id: "core-remote", name: "remote" }], launchTarget: { machine: null, folder: "/wrong/local-default" } });
+  h.client.openIssue = h.main.openIssue;
+  h.client.worktree = h.main.worktree;
+  h.client.chooseComputer = (machine, _cx, target) => {
+    h.client.targetGeneration = (h.client.targetGeneration ?? 0) + 1;
+    h.client.launchTarget = { ...target, machine }; h.client.agentKey = "codex";
+    h.client.agentChoices = [selectedAgent]; h.client.agentsChecked = true;
+  };
+  h.client.openIssue(ticket, h.cx);
+  h.client.issueKey(key, h.cx);
+  const flushing = h.flush();
+  await new Promise(setImmediate);
+  assert.deepEqual(h.requests.map(r => r.request.op), ["detail"]);
+  assert.deepEqual(h.validations, []);
+  assert.deepEqual(h.commands, []);
+  detail.resolve({ issue: ticket, description: remoteDescription() });
+  await flushing;
+  assert.equal(h.client.launchTarget.machine, "remote");
+  assert.equal(h.client.launchTarget.folder, "/remote/code/canonical");
+  h.client.issueKey(key, h.cx);
+  await h.flush();
+  assert.equal(h.requests.find(r => r.request.op === "worktree").on, "remote");
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "remote");
+});
+
+test("failed issue detail cannot launch using a still-valid default computer", async () => {
+  const h = await harness({ detailError: "Linear detail unavailable", launchTarget: { machine: null, folder: "/wrong/local-default" } });
+  h.client.openIssue = h.main.openIssue; h.client.worktree = h.main.worktree;
+  h.client.openIssue(ticket, h.cx);
+  await h.flush();
+  h.client.issueKey("s", h.cx);
+  await h.flush();
+  assert.match(h.client.err, /Cannot launch before issue details are loaded/);
+  assert.deepEqual(h.requests.map(r => r.request.op), ["detail"]);
+  assert.deepEqual(h.commands, []);
+});
+
+test("Create & start crosses the real subclass bridge using its validated request snapshot while detail is pending", async () => {
+  const detail = delay();
+  const h = await harness({ detailReply: () => detail.promise,
+    launchTarget: { machine: "remote", folder: "/remote/code/selected" } });
+  h.client.worktree = h.main.worktree;
+  h.client.afterCreate = h.main.afterCreate;
+  h.client.openIssue = function (issue, cx) {
+    h.main.openIssue.call(this, issue, cx);
+    // Model target restoration/UI state changing during the redundant detail read.
+    this.launchTarget = { machine: null, folder: "/wrong/local-default" };
+    this.agentKey = "wrong-agent"; this.agentsChecked = false;
+  };
+  h.client.submit(h.cx, true);
+  const flushing = h.flush();
+  await new Promise(setImmediate);
+  const worktree = h.requests.find(r => r.request.op === "worktree");
+  assert.ok(worktree);
+  assert.equal(worktree.on, "remote");
+  assert.deepEqual(worktree.request.dirs, ["/remote/code/selected"]);
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "remote");
+  assert.equal(h.commands.find(c => c.name === "space.new").args.argv[0], "codex");
+  assert.equal(h.client.createdLaunch, null);
+  const launches = h.commands.length;
+  h.client.issueKey("s", h.cx);
+  assert.equal(h.commands.length, launches);
+  detail.resolve({ issue: ticket, description: "" });
+  await flushing;
+});
+
+test("a late old-issue detail response cannot mark a newer issue placement ready", async () => {
+  const old = delay(), next = { ...ticket, id: "issue-next", identifier: "DEMO-2" };
+  const h = await harness({ detailReply: request => request.issue === ticket.id ? old.promise : { issue: next, description: "" } });
+  h.client.openIssue = h.main.openIssue;
+  h.client.openIssue(ticket, h.cx);
+  h.client.openIssue(next, h.cx);
+  const flushing = h.flush();
+  await new Promise(setImmediate);
+  assert.equal(h.client.issueTargetState.key, "workspace-one/issue-next");
+  assert.equal(h.client.issueTargetState.status, "ready");
+  old.resolve({ issue: ticket, description: remoteDescription() });
+  await flushing;
+  assert.equal(h.client.cur.id, next.id);
+  assert.equal(h.client.issueTargetState.key, "workspace-one/issue-next");
+  assert.equal(h.client.detail.issue.id, next.id);
 });

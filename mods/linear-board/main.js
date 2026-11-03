@@ -352,6 +352,7 @@ export default class LinearWorkspace extends LinearClient {
   worktree(cx, start, what = { issue: this.cur }) {
     if (this.busy) return;
     if (!what.issue) return this.say("Choose an issue before starting work.", cx, true);
+    if (this.createdLaunchFor(what.issue, start) || !this.launchIssueReady(what.issue, start)) return super.worktree(cx, start, what);
     const linked = this.records().find(r => r.issue?.id === what.issue.id);
     if (linked) { this.selectWork(linked); this.dismiss(); return; }
     if (!this.launchTarget?.folder) return this.say("Choose the repository folder first.", cx, true);

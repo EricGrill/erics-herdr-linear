@@ -42,6 +42,9 @@ It contains placement metadata, not credentials.
 Choosing **This computer** explicitly targets the local machine even while a remote
 space is focused. A saved target that cannot be resolved must be chosen explicitly;
 the launcher must not silently substitute a different computer.
+Launch actions, including keyboard shortcuts, are gated until the issue's saved
+placement is ready. Create & start retains its validated request target while the
+new issue's details load.
 
 ## Install
 

@@ -527,20 +527,40 @@ export default class Linear extends View {
   loadDetail(cx) {
     const is = this.cur;
     const targetGeneration = this.targetGeneration ?? 0;
+    const request = this.detailGeneration = (this.detailGeneration ?? 0) + 1;
+    const key = `${this.ws}/${is.id}`;
+    this.issueTargetState = { key, request, status: "pending" };
     cx.spawn(async (cx) => {
+      const current = () => this.cur?.id === is.id && this.issueTargetState?.key === key && this.issueTargetState.request === request;
       try {
         const d = await this.linear({ op: "detail", issue: is.id });
-        if (this.cur?.id !== is.id) return;
+        if (!current()) return;
         await this.restoreLaunchTarget(is, d.description, cx, targetGeneration);
-        if (this.cur?.id !== is.id) return;
+        if (!current()) return;
         this.detail = d;
         this.cur = d.issue;
         this.replaceRow(d.issue);
+        this.issueTargetState = { key, request, status: "ready" };
       } catch (e) {
-        if (this.cur?.id === is.id) this.err = String(e?.message ?? e);
+        if (current()) {
+          this.err = String(e?.message ?? e);
+          this.issueTargetState = { key, request, status: "failed", error: this.err };
+        }
       }
+      if (current() && this.flash === this.launchWaitNotice) this.flash = "";
       cx.notify();
     });
+  }
+
+  createdLaunchFor(is, start) {
+    const launch = this.createdLaunch;
+    return start && launch?.key === `${this.ws}/${is?.id}` ? launch : null;
+  }
+
+  launchIssueReady(is, start) {
+    if (this.demo || this.createdLaunchFor(is, start)) return true;
+    const state = this.issueTargetState;
+    return state?.key === `${this.ws}/${is?.id}` && state.status === "ready" && !this.repositoriesLoading;
   }
 
   replaceRow(is) {
@@ -738,8 +758,20 @@ export default class Linear extends View {
     const pr = what.project;
     if (!is && !pr) return;
     if (this.busy) return;
-    const execution = this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
-    const agentKey = this.agentKey;
+    if (is && !this.launchIssueReady(is, start)) {
+      const key = `${this.ws}/${is.id}`;
+      const state = this.issueTargetState;
+      if (state?.key !== key) this.openIssue(is, cx);
+      if (state?.key === key && state.status === "failed") return this.say(`Cannot launch before issue details are loaded: ${state.error}. Reload the issue and try again.`, cx, true);
+      this.launchWaitNotice = "Loading the issue's computer and repository. Wait for its details, then launch again.";
+      return this.say(this.launchWaitNotice, cx);
+    }
+    // Only Create & start may skip the redundant detail reload: its exact
+    // request-scoped placement was already validated and identified before create.
+    const created = this.createdLaunchFor(is, start);
+    const execution = created ? { ...created.execution } : this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
+    const agentKey = created ? created.agentKey : this.agentKey;
+    if (created) this.createdLaunch = null;
     const name = is ? is.identifier : pr.name;
     this.busy = start ? `Starting ${name}…` : `Opening ${name}'s worktree…`;
     this.menu = null;
@@ -945,6 +977,7 @@ export default class Linear extends View {
     if (!title) return this.say("Give it a title first.", cx, true);
     if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
     const description = this.desc.value();
+    const creationAgentKey = this.agentKey;
     const attaching = Boolean(props()?.attachSpace);
     const execution = this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
     if (!this.demo && !attaching && !execution?.folder) return this.say("Choose a computer and an existing repository first.", cx, true);
@@ -966,9 +999,13 @@ export default class Linear extends View {
         this.busy = "";
         this.lists.recent = null;
         this.loadAll(cx);
+        this.createdLaunch = startAfterCreate && !attaching && execution
+          ? { key: `${this.ws}/${res.issue.id}`, execution: { ...execution }, agentKey: creationAgentKey } : null;
         this.openIssue(res.issue, cx);
         this.say(res.note, cx);
         this.afterCreate?.(res.issue, cx, startAfterCreate);
+        // A handler that did not start work must not leave a future bypass behind.
+        this.createdLaunch = null;
       } catch (e) {
         this.busy = "";
         this.say(String(e?.message ?? e), cx, true);
