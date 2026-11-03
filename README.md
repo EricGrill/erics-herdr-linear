@@ -54,6 +54,11 @@ Launch actions, including keyboard shortcuts, are gated until the issue's saved
 placement is ready. Create & start retains its validated request target while the
 new issue's details load.
 
+Codex started from either Linear layout uses `--yolo`, including added agent tabs in
+linked workspaces. This bypasses Codex approval prompts and its command sandbox.
+Configured arguments are retained; an existing `--yolo` or its full bypass flag is
+not duplicated. Other agents keep their configured launch commands.
+
 ## Install
 
 Install and open Herdr once first. This layout has been exercised with **Herdr 0.1.12** on

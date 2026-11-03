@@ -227,7 +227,7 @@ test("reopened worktree starts the selected agent with its ticket context", asyn
   await h.flush();
   const opened = h.commands.find(c => c.name === "space.new");
   assert.ok(opened, h.client.err);
-  assert.deepEqual(JSON.parse(JSON.stringify(opened.args.argv)), ["codex"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(opened.args.argv)), ["codex", "--yolo"]);
   assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
   assert.match(opened.args.task, /Work on Linear issue DEMO-3785/);
   assert.ok(opened.args.task.includes(ticket.url));
@@ -864,3 +864,32 @@ test("real New Task submit uses configured authentication and retains selected p
   assert.equal(h.requests.length, 0);
   assert.equal(h.commands.length, 0, "ordinary Create does not create a terminal or agent");
 });
+
+for (const machine of [null, "remote"]) {
+  for (const [key, argv, expected] of [
+    ["codex", ["codex"], ["codex", "--yolo"]],
+    ["codex", ["/opt/bin/codex", "--model", "chosen"], ["/opt/bin/codex", "--yolo", "--model", "chosen"]],
+    ["codex", ["codex", "--yolo"], ["codex", "--yolo"]],
+    ["codex", ["codex", "--dangerously-bypass-approvals-and-sandbox"], ["codex", "--dangerously-bypass-approvals-and-sandbox"]],
+    ["claude", ["claude", "--model", "chosen"], ["claude", "--model", "chosen"]],
+  ]) {
+    for (const launch of ["worktree", "continue"]) {
+      test(`${launch} on ${machine ?? "local"} uses Codex yolo policy for ${argv.join(" ")}`, async () => {
+        const agent = { key, name: key, installed: true, run: Object.freeze([...argv]) };
+        const h = await harness({ agents: [agent], launchTarget: { folder: "/repos/sampleWorkspace", machine } });
+        h.client.agentKey = key;
+        h.client.agentsChecked = true;
+        if (launch === "worktree") h.client.worktree(h.cx, true, { issue: ticket });
+        else h.main.continueAgent.call(h.client, { space: { id: "linked", machine } }, ticket, agent, h.cx);
+        await h.flush();
+        const opened = h.commands.find(c => c.name === (launch === "worktree" ? "space.new" : "tab.new"));
+        assert.ok(opened, h.client.err);
+        assert.deepEqual(Array.from(opened.args.argv), expected);
+        assert.deepEqual(agent.run, argv);
+        assert.deepEqual(h.agentChecks, [machine]);
+        if (launch === "worktree") assert.equal(opened.args.machine, machine ?? "");
+        else assert.equal(opened.args.space, "linked");
+      });
+    }
+  }
+}

@@ -892,7 +892,7 @@ export default class Linear extends View {
         // Empty explicitly means this computer; omission inherits focused space.
         const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
-          spec.argv = selectedAgent.run;
+          spec.argv = this.agentArgv(selectedAgent);
           spec.task = this.taskFor?.(fresh) ?? res.prompt;
         }
         this.busy = "Opening its space…";
@@ -906,6 +906,12 @@ export default class Linear extends View {
         this.say(String(e?.message ?? e), cx, true);
       }
     });
+  }
+
+  agentArgv(agent) {
+    const argv = agent.run;
+    if (agent.key !== "codex" || argv.includes("--yolo") || argv.includes("--dangerously-bypass-approvals-and-sandbox")) return argv;
+    return [argv[0], "--yolo", ...argv.slice(1)];
   }
 
   // The agents working on an issue: those in a pane on its branch.
