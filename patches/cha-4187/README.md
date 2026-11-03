@@ -1,7 +1,10 @@
 # CHA-4187: exact repository paths
 
 These are reviewable, tested patches, **not an installed or released fix**. The active
-clients still pin upstream v0.14.2 and retain the path/routing guards. Do not apply the
+clients still pin upstream v0.14.2 and retain the path/routing guards. The upstream
+route was selected and the backend fix was submitted as
+[mrolafsson/herdr-linear#1](https://github.com/mrolafsson/herdr-linear/pull/1).
+Do not apply the
 client patch to a distributed build until its backend pin is changed to a published,
 compatible release. v0.14.2 silently ignores the new `repo` field.
 
@@ -45,8 +48,9 @@ read credentials, create tickets or launch agents.
 `client-adoption.patch` applies to this repository at `f12d082`. It is deliberately
 unapplied and does **not** invent a release version. Adoption must be one atomic
 change with a compatible backend pin and its real release checksums/download URL.
-If a fork is chosen, also update provisioning's source/cache identity and the
-third-party notice; a fork must not reuse the upstream v0.14.2 binary cache.
+The contribution branch is
+[EricGrill/herdr-linear:fix/exact-app-worktree-repository](https://github.com/EricGrill/herdr-linear/tree/fix/exact-app-worktree-repository).
+It exists to contribute upstream; the client continues to download upstream releases.
 
 The patch sends `repo: execution.folder` from both clients and preserves the original
 Linear team/workspace identity. It removes the empty-team routing workaround, the
@@ -82,7 +86,8 @@ as a test.
   and both native mod checks passed.
 - Active, unchanged clients: 397 tests, 15 installer tests and structure check passed.
 
-The remaining dependency is a published compatible release and the release-source
-choice (upstream contribution versus maintained fork). No version, deployment,
-upstream submission or issue completion is claimed by these artifacts. Keep progress
-on CHA-4187; do not mark it Done when an agent run ends.
+The remaining dependency is maintainer merge of upstream PR #1 and a published
+compatible upstream release. The GitHub connection has no merge/write access to
+`mrolafsson/herdr-linear`. No new version, deployment or issue completion is claimed
+by these artifacts. Keep progress on CHA-4187; do not mark it Done when an agent
+run ends or when the preservation PR merges.
