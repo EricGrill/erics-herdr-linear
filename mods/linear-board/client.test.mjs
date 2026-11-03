@@ -41,6 +41,11 @@ async function harness(options = {}) {
       return { code: 0, stdout: JSON.stringify({ core }), stderr: "" };
     }
     assert.equal(command, "sh");
+    if (args[1].includes("HERDR_BOARD_QUERY")) {
+      const body = JSON.parse(args[1].split("<<'HERDR_BOARD_QUERY'\n")[1].split("\nHERDR_BOARD_QUERY")[0]);
+      if (!options.apiReply) return { code: 4, stdout: "", stderr: "no Linear API key available" };
+      return { code: 0, stdout: JSON.stringify(await options.apiReply(body)), stderr: "" };
+    }
     if (args[1] !== 'exec "$0" app "$1"') {
       assert.ok(args[1].includes('dest="$HOME/.local/share/herdr-linear/app/$v"'), "only the existing provision boundary is stubbed");
       return { code: 0, stdout: "/fake/herdr-linear", stderr: "" };
@@ -48,7 +53,10 @@ async function harness(options = {}) {
     const request = JSON.parse(args[3]);
     requests.push({ request, on: config?.on ?? null });
     let result;
-    if (request.op === "check-start") result = { issue: ticket };
+    if (request.op === "status") result = options.statusReply ?? { workspaces: [] };
+    else if (request.op === "teams") result = options.teamsReply ? await options.teamsReply() : { teams: options.teams ?? [] };
+    else if (request.op === "states") result = { states: [] };
+    else if (request.op === "check-start") result = { issue: ticket };
     else if (request.op === "create") {
       createCalls += 1;
       result = options.failCreateAt === createCalls ? { error: "Linear create failed" } : { issue: ticket, note: "Created ticket" };
@@ -67,7 +75,7 @@ async function harness(options = {}) {
   const exportsByModule = {
     "gpui-kit": { View: class View {}, div: dummy, svg: dummy, image: dummy },
     "gpui-base": Object.fromEntries(["v_flex", "h_flex", "InputState", "Input", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
-    "fs/promises": { readFile: async () => "{}", writeFile: async () => {} },
+    "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
     "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, validateRepository: async target => {
       validations.push({ ...target });
       if (options.validationError) throw new Error(options.validationError);
@@ -92,6 +100,11 @@ async function harness(options = {}) {
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
   const link = async specifier => {
+    if (["./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js"].includes(specifier)) {
+      const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
+      await real.link(link);
+      return real;
+    }
     if (specifier === "./execution-target.js") {
       const targetModule = new vm.SourceTextModule(targetSource, { context });
       await targetModule.link(link);
@@ -136,8 +149,9 @@ async function harness(options = {}) {
     demo: false, trees: {}, lists: {}, screen: "issue", cur: ticket, busy: "", err: "", flash: "",
     issueTargetState: { key: "workspace-one/issue-one", request: 0, status: "ready" },
     launchTarget: Object.hasOwn(options, "launchTarget") ? options.launchTarget : { folder: sourceSpace.folder, machine: null },
-    agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars" },
-    desc: { value: () => "Reproduce the missing scheduled research." },
+    agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars", set_value: noop },
+    projSearch: { set_value: noop },
+    desc: { value: () => "Reproduce the missing scheduled research.", set_value: noop },
     form: { team: { id: "team-one" }, project: "project-one", state: "state-one", priority: 2, assignToMe: true },
     replaceRow: noop,
     records: () => [], publish: noop,
@@ -589,4 +603,264 @@ test("a late old-issue detail response cannot mark a newer issue placement ready
   assert.equal(h.client.cur.id, next.id);
   assert.equal(h.client.issueTargetState.key, "workspace-one/issue-next");
   assert.equal(h.client.detail.issue.id, next.id);
+});
+
+const defaultsKey = "linear-workspace.task-defaults";
+const projects = [
+  { id: "project-one", name: "First", teams: ["ONE"] },
+  { id: "project-two", name: "Second", teams: ["TWO"] },
+];
+const teams = [{ id: "team-one", key: "ONE" }, { id: "team-two", key: "TWO" }];
+const setProjects = h => { h.client.lists.projects = { items: projects }; };
+const serializedStore = h => new Map(JSON.parse(JSON.stringify([...h.sharedStore])));
+
+test("new dialog restores the last project and its explicit computer repository from serialized shared preferences", async () => {
+  const first = await harness();
+  first.client.screen = "create";
+  first.client.pickProject("project-two", first.cx);
+  first.client.rememberRepository({ machine: "remote", folder: "/remote/project-two" });
+  first.client.rememberRepository({ machine: null, folder: "/local/project-two" });
+  const fresh = await harness({ sharedStore: serializedStore(first), teams });
+  setProjects(fresh);
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.project, "project-two");
+  assert.equal(fresh.client.form.team.id, "team-two");
+  assert.equal(fresh.client.defaultTaskMachine(), null);
+  assert.equal(fresh.client.mappedRepository(null), "/local/project-two");
+  assert.equal(fresh.client.mappedRepository("remote"), "/remote/project-two");
+});
+
+test("task defaults isolate workspaces and preserve other project and computer mappings", async () => {
+  const h = await harness();
+  h.client.screen = "create";
+  h.client.rememberRepository({ machine: null, folder: "/first" });
+  h.client.pickProject("project-two", h.cx);
+  h.client.rememberRepository({ machine: "remote", folder: "/second" });
+  h.client.ws = "workspace-two";
+  assert.equal(h.client.taskDefaults().lastProject, undefined);
+  h.client.rememberRepository({ machine: null, folder: "/other-workspace" });
+  h.client.ws = "workspace-one";
+  assert.equal(h.client.taskDefaults().projects["project-one"].repositories[""], "/first");
+  assert.equal(h.client.mappedRepository("remote"), "/second");
+  h.client.ws = null;
+  const before = JSON.stringify([...h.sharedStore]);
+  h.client.rememberProject(null);
+  h.client.rememberRepository({ folder: "/ignored" });
+  assert.equal(JSON.stringify([...h.sharedStore]), before);
+});
+
+test("explicit project and drilled context override remembered project; missing remembered projects are ignored", async () => {
+  for (const context of ["project", "drilled", "missing"]) {
+    const h = await harness({ teams });
+    setProjects(h);
+    h.client.rememberProject(context === "missing" ? "removed" : "project-one");
+    if (context === "project") { h.client.screen = "project"; h.client.curProject = projects[1]; }
+    if (context === "drilled") h.client.drilled = projects[1];
+    h.client.create(h.cx);
+    await h.flush();
+    assert.equal(h.client.form.project, context === "missing" ? null : "project-two");
+    if (context !== "missing") assert.equal(h.client.form.team.id, "team-two");
+  }
+});
+
+test("No project persists and team changes clear an incompatible project and refresh repository", async () => {
+  const h = await harness({ teams });
+  setProjects(h);
+  h.client.screen = "create";
+  h.client.form.states = {};
+  const selections = [];
+  h.client.chooseComputer = machine => selections.push(machine);
+  h.client.rememberRepository({ machine: "remote", folder: "/remote/first" });
+  h.client.pickProject("project-one", h.cx);
+  assert.equal(selections[0], "remote");
+  h.client.pickTeam(teams[1], h.cx);
+  await h.flush();
+  assert.equal(h.client.form.project, null);
+  assert.equal(h.client.taskDefaults().lastProject, null);
+  assert.equal(selections.length, 2);
+  h.client.pickProject(null, h.cx);
+  const fresh = await harness({ sharedStore: serializedStore(h), teams });
+  setProjects(fresh);
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.project, null);
+});
+
+test("demo task defaults neither read nor write real preferences", async () => {
+  const h = await harness({ teams });
+  setProjects(h);
+  h.client.rememberProject("project-two");
+  const before = JSON.stringify([...h.sharedStore]);
+  h.client.demo = true;
+  assert.equal(h.client.taskDefaults().lastProject, undefined);
+  h.client.screen = "create";
+  h.client.rememberProject("project-one");
+  h.client.rememberRepository({ folder: "/demo" });
+  assert.equal(h.client.mappedRepository(null), undefined);
+  assert.equal(JSON.stringify([...h.sharedStore]), before);
+});
+
+test("late teams use the current selected project and cannot overwrite a newer form", async () => {
+  const response = delay();
+  const h = await harness({ teamsReply: () => response.promise });
+  setProjects(h);
+  h.client.rememberProject("project-one");
+  h.client.create(h.cx);
+  h.client.pickProject("project-two", h.cx);
+  response.resolve({ teams });
+  await h.flush();
+  assert.equal(h.client.form.project, "project-two");
+  assert.equal(h.client.form.team.id, "team-two");
+
+  const old = delay();
+  let calls = 0;
+  const newer = await harness({ teamsReply: () => ++calls === 1 ? old.promise : { teams } });
+  setProjects(newer);
+  newer.client.create(newer.cx);
+  const flushing = newer.flush();
+  await new Promise(setImmediate);
+  newer.client.create(newer.cx);
+  newer.client.pickProject("project-two", newer.cx);
+  await new Promise(setImmediate);
+  const form = newer.client.form;
+  old.resolve({ teams: [teams[0]] });
+  await flushing;
+  assert.equal(newer.client.form, form);
+  assert.equal(form.project, "project-two");
+  assert.equal(form.team.id, "team-two");
+});
+
+test("busy project and team picks preserve the current task defaults", async () => {
+  const h = await harness();
+  h.client.busy = "Creating";
+  h.client.pickProject("project-two", h.cx);
+  h.client.pickTeam(teams[1], h.cx);
+  assert.equal(h.client.form.project, "project-one");
+  assert.equal(h.client.form.team.id, "team-one");
+  assert.equal(h.sharedStore.has(defaultsKey), false);
+});
+
+test("visiting or drilling a project remembers it without creating a ticket", async () => {
+  for (const action of ["openProject", "drill"]) {
+    const h = await harness();
+    h.client.linear = async () => ({});
+    h.client.focusKeys = () => {};
+    h.client.loadProject = () => {};
+    h.client.input = { set_value: () => {} };
+    h.client[action](projects[1], h.cx);
+    await h.flush();
+    assert.equal(h.client.taskDefaults().lastProject, "project-two");
+    assert.equal(h.requests.length, 0);
+  }
+});
+
+test("attachment project changes do not reset execution placement", async () => {
+  const h = await harness({ props: { attachSpace: { id: "space" } } });
+  setProjects(h);
+  h.client.form.states = {};
+  h.client.chooseComputer = () => assert.fail("attachment must retain its space placement");
+  h.client.pickProject("project-two", h.cx);
+  h.client.pickTeam(teams[0], h.cx);
+  await h.flush();
+  assert.equal(h.client.form.project, null);
+});
+
+test("configured key restores task access without an OAuth workspace or cached auth state", async () => {
+  const identities = [];
+  const config = { enrichment: { envKey: "TASK_LINEAR_KEY" } };
+  const apiReply = ({ query }) => {
+    if (query.includes("TaskIdentity")) { identities.push(true); return { data: { organization: { id: "api-workspace", name: "API Workspace", urlKey: "api-example" }, viewer: { id: "viewer" } } }; }
+    assert.match(query, /TaskTeams/);
+    return { data: { teams: { nodes: [{ id: "team", name: "Example" }], pageInfo: { hasNextPage: false } } } };
+  };
+  for (let restart = 0; restart < 2; restart++) {
+    const h = await harness({ config, apiReply });
+    h.client.on = null;
+    h.client.preferredOn = "remote";
+    const [teams] = await Promise.all([h.client.linear({ op: "teams" }), h.client.findLinear()]);
+    assert.equal(teams.teams[0].id, "team");
+    assert.equal(h.client.ws, "api-workspace");
+    assert.equal(h.requests.length, 0, "no OAuth backend used");
+  }
+  assert.equal(identities.length, 2, "one config/identity discovery per instance, even during concurrent startup");
+});
+
+test("failed configured access and retries never enter OAuth or show a sign-in prompt", async () => {
+  let ready = false;
+  const h = await harness({ config: { enrichment: { envKey: "TASK_LINEAR_KEY" } }, apiReply: ({ query }) => {
+    if (!ready) return { errors: [{ message: "API key revoked" }] };
+    if (query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one", urlKey: "example" }, viewer: { id: "viewer" } } };
+    return { data: { teams: { nodes: [], pageInfo: { hasNextPage: false } } } };
+  } });
+  await h.client.start(h.cx);
+  assert.equal(h.client.signedOut, false);
+  assert.match(h.client.err, /API key revoked/);
+  assert.equal(h.client.on, null);
+  await assert.rejects(h.client.linear({ op: "teams" }), /API key revoked/);
+  assert.equal(h.requests.length, 0);
+  ready = true;
+  await h.client.reload(h.cx);
+  assert.equal(h.client.err, "");
+  assert.deepEqual(JSON.parse(JSON.stringify(await h.client.linear({ op: "teams" }))), { teams: [], priorities: ["No priority", "Urgent", "High", "Medium", "Low"] });
+  assert.equal(h.requests.length, 0);
+});
+
+test("configured missing key is an access error while unconfigured users retain OAuth", async () => {
+  const configured = await harness({ config: { enrichment: { envKey: "MISSING_KEY" } } });
+  await configured.client.start(configured.cx);
+  assert.equal(configured.client.signedOut, false);
+  assert.match(configured.client.err, /Configured Linear access/);
+  assert.equal(configured.requests.length, 0);
+  const oauth = await harness({ statusReply: { workspaces: [{ id: "oauth-workspace", name: "OAuth" }] } });
+  await oauth.client.findLinear();
+  assert.equal(oauth.client.ws, "oauth-workspace");
+  assert.equal(oauth.client.api, null);
+  assert.equal(oauth.requests[0].request.op, "status");
+});
+
+test("API create transport failure is never retried through either authentication path", async () => {
+  const h = await harness({ config: { enrichment: { envKey: "TASK_LINEAR_KEY" } }, apiReply: ({ query }) => {
+    if (query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one" }, viewer: { id: "viewer" } } };
+    throw new Error("response lost after write");
+  } });
+  await h.client.findLinear();
+  await assert.rejects(h.client.linear({ op: "create", new: { title: "Task", team: "team-one" } }), /response lost after write/);
+  assert.equal(h.requests.length, 0);
+});
+
+test("OAuth transport retry dispatches to API when rediscovery finds a configured key", async () => {
+  const h = await harness({
+    teamsReply: () => { throw new Error("previous backend unavailable"); },
+    config: { enrichment: { envKey: "TASK_LINEAR_KEY" } },
+    apiReply: ({ query }) => query.includes("TaskIdentity")
+      ? { data: { organization: { id: "workspace-one" }, viewer: { id: "viewer" } } }
+      : { data: { teams: { nodes: [{ id: "api-team", name: "API team" }], pageInfo: { hasNextPage: false } } } },
+  });
+  assert.equal((await h.client.linear({ op: "teams" })).teams[0].id, "api-team");
+  assert.equal(h.requests.length, 1, "the failed old request is not retried through OAuth");
+});
+
+test("real New Task submit uses configured authentication and retains selected project and target", async () => {
+  const writes = [];
+  const h = await harness({ config: { enrichment: { envKey: "TASK_LINEAR_KEY" } }, apiReply: ({ query, variables }) => {
+    if (query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one", urlKey: "example" }, viewer: { id: "viewer-one" } } };
+    assert.match(query, /mutation TaskCreate/);
+    writes.push(variables.input);
+    return { data: { issueCreate: { success: true, issue: { ...ticket,
+      branchName: ticket.branch, team: { id: ticket.teamId, key: ticket.teamKey },
+      state: { id: "state-one", name: "Todo", type: "unstarted" }, assignee: null,
+    } } } };
+  } });
+  await h.client.findLinear();
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].projectId, "project-one");
+  assert.equal(writes[0].assigneeId, "viewer-one");
+  assert.match(writes[0].description, /ericsHerdrLinearExecutionTarget/);
+  assert.equal(h.validations[0].folder, sourceSpace.folder);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.commands.length, 0, "ordinary Create does not create a terminal or agent");
 });

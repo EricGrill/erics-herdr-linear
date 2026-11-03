@@ -16,6 +16,8 @@ import { View, div } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, InputState, Input, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
 import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
+import { LinearAPI } from "./api.js";
+import { normalizeConfig } from "./config.js";
 import { validateRepository, validateWorktreeRouting } from "./repository.js";
 import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
 import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
@@ -153,7 +155,8 @@ export default class Linear extends View {
     this.flash = this.err = this.busy = "";
     this.workspaces = [];
     this.ws = localStorage.getItem("workspace") ?? "";
-    this.on = localStorage.getItem("on");
+    this.preferredOn = localStorage.getItem("on");
+    this.on = null;
     this.trees = JSON.parse(localStorage.getItem("trees") ?? "{}");
     this.width = 900;
 
@@ -230,8 +233,43 @@ export default class Linear extends View {
 
   // The machine you're signed in to Linear on: the one that answered last,
   // else this one, else each connected one in turn.
-  async findLinear() {
-    const order = [this.on, "", ...machines().filter((m) => m.name && m.layout !== "unavailable").map((m) => m.name)];
+  findLinear() {
+    if (!this.discovery) {
+      this.discovery = this.discoverLinear();
+      const clear = () => { this.discovery = null; };
+      this.discovery.then(clear, clear);
+    }
+    return this.discovery;
+  }
+
+  async discoverLinear() {
+    const previousOn = this.on ?? this.preferredOn;
+    this.on = null;
+    this.api = null;
+    // The layout's configured key is also the task client's identity. The
+    // upstream backend only knows OAuth, so an API key cannot sign it in.
+    const text = await fs.readFile(`${appHome()}/erics-linear.config.json`, "utf8").catch(error => {
+      if (error?.code === "ENOENT" || /no such file|not found|ENOENT/i.test(String(error?.message ?? error))) return "{}";
+      throw error;
+    });
+    const supplied = JSON.parse(text);
+    const config = normalizeConfig(supplied);
+    const configured = Boolean(supplied.enrichment?.envKey || supplied.enrichment?.doppler);
+    const api = new LinearAPI(config);
+    this.api = null;
+    try {
+      const status = await api.status();
+      this.api = api;
+      this.on = "";
+      this.workspaces = status.workspaces;
+      if (!this.workspaces.some(w => w.id === this.ws)) this.ws = this.workspaces[0].id;
+      localStorage.setItem("on", "");
+      localStorage.setItem("workspace", this.ws);
+      return;
+    } catch (error) {
+      if (configured || !error.unavailable) throw new Error(`Configured Linear access: ${error.message}`);
+    }
+    const order = [previousOn, "", ...machines().filter((m) => m.name && m.layout !== "unavailable").map((m) => m.name)];
     const tried = new Set();
     let last;
     for (const m of order) {
@@ -259,11 +297,15 @@ export default class Linear extends View {
   async linear(req) {
     if (this.demo) return ask({ ...req, demo: true }, null);
     if (this.on == null) await this.findLinear();
+    // API writes must never be retried automatically: a lost response may
+    // follow a successful create or update.
+    if (this.api) return this.api.ask({ ...req, workspace: this.ws });
     try {
       return await ask({ ...req, workspace: this.ws }, this.on || null);
     } catch (e) {
       if (e instanceof AppError) throw e;
       await this.findLinear();
+      if (this.api) return this.api.ask({ ...req, workspace: this.ws });
       return ask({ ...req, workspace: this.ws }, this.on || null);
     }
   }
@@ -381,6 +423,7 @@ export default class Linear extends View {
   }
 
   reload(cx) {
+    if (this.signedOut || this.on == null) return this.start(cx);
     if (this.screen === "issue") return this.loadDetail(cx);
     this.loadAll(cx);
   }
@@ -573,6 +616,7 @@ export default class Linear extends View {
   // ── a project ──────────────────────────────────────────────────────────
 
   openProject(p, cx) {
+    this.rememberProject(p.id);
     this.screen = "project";
     this.curProject = p;
     this.projDetail = null;
@@ -592,6 +636,7 @@ export default class Linear extends View {
 
   // A project's issues, in the list, with ← or esc back to the projects.
   drill(p, cx) {
+    this.rememberProject(p.id);
     // From the project's screen, esc goes back there; from the list, to it.
     this.drillFrom = this.screen === "project";
     this.drilled = p;
@@ -873,11 +918,46 @@ export default class Linear extends View {
 
   // ── a new issue ────────────────────────────────────────────────────────
 
+  taskDefaults() {
+    return this.demo || !this.ws ? {} : shared("linear-workspace.task-defaults")?.[this.ws] ?? {};
+  }
+
+  rememberProject(id, workspace = this.ws) {
+    if (this.demo || !workspace) return;
+    const key = "linear-workspace.task-defaults", defaults = shared(key)?.[workspace] ?? {};
+    if (defaults.lastProject === id) return;
+    setShared(key, { ...shared(key), [workspace]: { ...defaults, lastProject: id } });
+  }
+
+  rememberRepository(target) {
+    if (this.demo || !this.ws || this.screen !== "create" || !this.form?.project ||
+      typeof target?.folder !== "string" || !target.folder.startsWith("/")) return;
+    const key = "linear-workspace.task-defaults", defaults = this.taskDefaults();
+    const id = this.form.project, machine = target.machine ?? null;
+    const project = defaults.projects?.[id] ?? {};
+    setShared(key, { ...shared(key), [this.ws]: { ...defaults, lastProject: id,
+      projects: { ...defaults.projects, [id]: { ...project, machine,
+        repositories: { ...project.repositories, [machine ?? ""]: target.folder } } } } });
+  }
+
+  defaultTaskMachine() {
+    const project = this.taskDefaults().projects?.[this.form?.project];
+    return project && Object.hasOwn(project, "machine") ? project.machine : this.launchTarget?.machine ?? null;
+  }
+
+  mappedRepository(machine) {
+    return this.screen === "create" && this.form?.project
+      ? this.taskDefaults().projects?.[this.form.project]?.repositories?.[machine ?? ""] : undefined;
+  }
+
   // The form: title, description, team, status, priority, project, and
   // whether it's yours. In a project (listed, or open), the issue goes in it.
   create(cx) {
-    const project = this.screen === "project" ? this.curProject : this.drilled;
+    const context = this.screen === "project" ? this.curProject : this.drilled;
+    const project = context ?? this.projectsFor(null).find((p) => p.id === this.taskDefaults().lastProject);
     this.form = { team: null, state: null, priority: 0, project: project?.id ?? null, assignToMe: true, teams: null, states: {} };
+    const form = this.form;
+    this.rememberProject(form.project);
     this.screen = "create";
     this.menu = null;
     this.err = this.flash = "";
@@ -886,11 +966,14 @@ export default class Linear extends View {
     cx.spawn(async (cx) => {
       try {
         const res = await this.linear({ op: "teams" });
-        this.form.teams = res.teams;
-        const key = project?.teams?.[0];
+        if (this.form !== form || this.screen !== "create") return;
+        form.teams = res.teams;
+        const selected = this.projectsFor(null).find((p) => p.id === form.project) ?? (project?.id === form.project ? project : null);
+        const key = selected?.teams?.[0];
         const t = res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
         if (t) this.pickTeam(t, cx);
       } catch (e) {
+        if (this.form !== form || this.screen !== "create") return;
         this.say(String(e?.message ?? e), cx, true);
       }
       cx.notify();
@@ -900,11 +983,16 @@ export default class Linear extends View {
   }
 
   pickTeam(t, cx) {
+    if (this.busy) return;
     const f = this.form;
     f.team = t;
     f.state = t.defaultIssueState?.id ?? null;
     localStorage.setItem("team", t.key);
-    if (f.project && !this.projectsFor(t).some((p) => p.id === f.project)) f.project = null;
+    if (f.project && !this.projectsFor(t).some((p) => p.id === f.project)) {
+      f.project = null;
+      this.rememberProject(null);
+      if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
+    }
     if (!f.states[t.id]) {
       cx.spawn(async (cx) => {
         try {
@@ -926,7 +1014,10 @@ export default class Linear extends View {
   }
 
   pickProject(id, cx) {
+    if (this.busy) return;
     this.form.project = id;
+    this.rememberProject(id);
+    if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
     this.projOpen = false;
     this.projSearch.set_value("");
     cx.timer.after(30, () => this.title.focus());

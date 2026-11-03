@@ -59,15 +59,17 @@ export function matchingRepository(repositories, hints = []) {
 // An explicit repository choice also supersedes pending ticket-target restoration.
 // Completed agent discovery stays valid because the selected computer did not change.
 export function selectRepository(view, repo, cx) {
-  if (view.busy || view.repositoriesLoading) return;
+  if (view.busy || view.repositoriesLoading) return false;
   view.targetGeneration = (view.targetGeneration ?? 0) + 1;
   view.targetPicker = null;
   view.launchTarget = { machine: view.launchTarget.machine, folder: repo.folder, name: repo.name, root: view.repoRoot };
+  view.repositoryError = "";
   cx.notify();
+  return true;
 }
 
 // One generation covers repository AND agent discovery, including failed/late requests.
-export function loadTarget(view, cx, machine, { retain = null, hints = [], preferredAgent = "" } = {}) {
+export function loadTarget(view, cx, machine, { retain = null, preferredFolder = "", hints = [], preferredAgent = "" } = {}) {
   if (view.busy) return;
   const generation = view.targetGeneration = (view.targetGeneration ?? 0) + 1;
   view.agentGeneration = (view.agentGeneration ?? 0) + 1;
@@ -92,9 +94,11 @@ export function loadTarget(view, cx, machine, { retain = null, hints = [], prefe
     view.repositoriesLoading = false;
     if (repos.status === "fulfilled") {
       view.repoRoot = repos.value.root; view.repositories = repos.value.repositories;
-      const selected = retain?.folder ? view.repositories.find(r => r.folder === retain.folder) : matchingRepository(view.repositories, hints);
+      const folder = retain?.folder || preferredFolder;
+      const selected = folder ? view.repositories.find(r => r.folder === folder) : matchingRepository(view.repositories, hints);
       view.launchTarget = { machine: machine ?? null, folder: selected?.folder ?? "", name: selected?.name ?? "", root: view.repoRoot, ...(retain?.computerId ? { computerId: retain.computerId, computerName: retain.computerName } : {}) };
       if (!view.repositories.length) view.repositoryError = `No existing Git repositories found in ${view.repoRoot}.`;
+      else if (preferredFolder && !selected) view.repositoryError = "The project's saved repository is unavailable on this computer. Choose an existing repository.";
     } else view.repositoryError = `Could not discover repositories on ${machine ?? "This computer"}: ${repos.reason?.message ?? repos.reason}`;
     view.agentsChecked = true;
     if (agents.status === "fulfilled") {

@@ -25,7 +25,12 @@ async function load(exec) {
   };
   const context = vm.createContext({ console });
   const module = new vm.SourceTextModule(source, { context, identifier: "enrich.js" });
-  await module.link(async specifier => {
+  const link = async specifier => {
+    if (specifier === "./auth.js") {
+      const auth = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
+      await auth.link(link);
+      return auth;
+    }
     if (specifier === "./config.js") {
       const config = new vm.SourceTextModule(configSource, { context, identifier: "config.js" });
       await config.link(() => { throw new Error("config is pure"); });
@@ -37,7 +42,8 @@ async function load(exec) {
     }, { context });
     await stub.link(() => { throw new Error("unreachable"); });
     return stub;
-  });
+  };
+  await module.link(link);
   await module.evaluate();
   return { api: module.namespace, calls };
 }
@@ -255,7 +261,7 @@ test("a key containing a newline cannot inject a curl option", async () => {
   const result = spawnSync("sh", ["-c", `curl() { exit 95; }\n${calls[0].args[1]}`, ...calls[0].args.slice(2)], {
     env: { ...process.env, LINEAR_API_KEY: 'test\nurl = "https://invalid.example"' }, encoding: "utf8",
   });
-  assert.equal(result.status, 4);
+  assert.equal(result.status, 5);
   assert.match(result.stderr, /must not contain a newline/);
 });
 
