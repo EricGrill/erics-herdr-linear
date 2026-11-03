@@ -75,7 +75,7 @@ async function harness(options = {}) {
     matches(issue) { return text(issue?.title ?? issue?.name).toLowerCase().includes((this.filter ?? "").toLowerCase()); }
   }
   const native = {
-    "gpui-kit": { div: () => element() },
+    "gpui-kit": { div: () => element(), svg: () => element("svg"), image: () => element("image") },
     "gpui-base": { v_flex: () => element("column"), h_flex: () => element("row"), Input: { new: () => element("input") } },
     "herdr": {
       spaces: () => allSpaces, panes: () => [], agents: () => allAgents, machines: () => [],
@@ -275,12 +275,12 @@ test("Crew expands delegated issue groups and drills into issues without changin
 });
 
 test("home matches missing Team and Project metadata supplied by enrichment", async () => {
-  const raw = ticket("1", { teamKey: undefined, project: null });
+  const raw = ticket("1", { teamKey: undefined, project: undefined });
   const enriched = { ...ticket("1"), delegate: { name: "Spock" } };
   const h = await harness({ issues: [raw], spaces: [workSpace("one", raw)], enrichment: [enriched] });
   h.view.applyFilter({ team: ["DEMO"], project: ["alpha"], crew: ["Spock"] });
   assert.equal(h.view.visibleSpaces().length, 1);
-  assert.equal(raw.project, null);
+  assert.equal(raw.project, undefined);
   assert.equal(raw.teamKey, undefined);
 });
 

@@ -1,12 +1,12 @@
 // Derived from the MIT-licensed herdr-linear app mod v0.14.2.
 // Modified for Eric's Herdr Linear: spaces-first layout, configurable enrichment and attention rules.
-import { div } from "gpui-kit";
+import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input } from "gpui-base";
 import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, pickFolder, appHome } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { tint, icon, stateIcon, MONO } from "./look.js";
-import { issueKey, folderOf, matchIssue, workRecords, taskContext } from "./model.js";
+import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
 import { fetchEnrichment, indexEnrichment, delegateCounts } from "./enrich.js";
 import { normalizeConfig } from "./config.js";
@@ -132,7 +132,8 @@ export default class LinearWorkspace extends LinearClient {
     const extra = lookup.byIdentifier?.get(String(issue.identifier).toUpperCase());
     if (!extra) return issue;
     return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state,
-      teamKey: issue.teamKey ?? extra.teamKey, project: issue.project ?? extra.project };
+      teamKey: issue.teamKey ?? extra.teamKey,
+      project: issue.project === undefined ? extra.project : issue.project };
   }
 
   filterWorkspace() { return props()?.workspaceId ?? this.ws ?? activeWorkspace(); }
@@ -445,8 +446,9 @@ export default class LinearWorkspace extends LinearClient {
       .on_click(() => this.selectWork(record))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${is.identifier} · ${is.title}` : record.space.name).child(is ? `${is.identifier} · ${is.title}` : record.space.name))
+        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
         .child(div().truncate().text_size(11).text_color(color).child(`${label}${!is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`)))
+      .children(this.harnessIcons([record]))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => {
@@ -454,6 +456,15 @@ export default class LinearWorkspace extends LinearClient {
           if (is) this.details(is);
           else dialog({ action: "attach", attachSpace: { id: record.space.id, name: record.space.name, folder: record.folder, machine: record.space.machine ?? null } });
         }).child(is ? "…" : "+"));
+  }
+  harnessIcons(records) {
+    const programs = new Map(records.flatMap(r => r.programs ?? []).map(p => [p.key, p]));
+    return [...programs.values()].map(p => {
+      const glyph = p.icon ? (p.tint ? svg(p.icon).text_color(theme().muted) : image(p.icon))
+        : icon("work", theme().muted, 13);
+      return div().w(13).h(13).flex_none().tooltip(p.name).accessibility_label(p.name)
+        .child(glyph.w(13).h(13).flex_none());
+    });
   }
   /** A small pill. Used for the delegate, the machine and each visible Linear label. */
   chip(id, text, color, { faded = false, click = null } = {}) {
@@ -490,7 +501,7 @@ export default class LinearWorkspace extends LinearClient {
     const delegate = row?.delegate ?? delegateOf(full);
     const labels = row?.labels ?? visibleLabels(full);
     const needs = row?.needs ?? issueNeedsYou(full, this.attentionRules());
-    const records = row?.records ?? [];
+    const records = row?.records ?? this.records().filter(r => r.issue?.id === full.id);
     const id = `issue-${scope}-${is.id}`;
     return v_flex().id(id).flex_none().pl(22).pr(6).py(4).gap(3).min_w(0).rounded(6)
       .when(needs, el => el.bg(tint(t.blocked, 0.07)))
@@ -498,7 +509,8 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().gap(7).min_w(0).items_center()
         .child(icon(needs ? "need" : stateIcon(full.state), needs ? t.blocked : t.dim, 12))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(full.title))
-        .child(div().flex_none().text_size(10).font_family(MONO).text_color(t.dim).child(full.identifier)))
+        .child(div().min_w(0).max_w(180).truncate().text_size(10).font_family(MONO).text_color(t.dim).tooltip(issueLabel(full)).child(issueLabel(full)))
+        .children(this.harnessIcons(records)))
       .child(h_flex().gap(4).min_w(0).items_center().flex_wrap().pl(19)
         .child(div().flex_none().text_size(10).text_color(needs ? t.blocked : t.muted).child(full.state?.name ?? ""))
         .children(this.delegateChips(delegate, id))
@@ -796,7 +808,7 @@ export default class LinearWorkspace extends LinearClient {
   // ---- Live strip: spaces grouped by the machine they run on -------------------------
 
   spaceRow(record, id) {
-    const t = theme(), is = record.issue;
+    const t = theme(), is = this.enrich(record.issue);
     const color = record.needs ? t.blocked : record.status === "working" ? t.working : t.dim;
     return h_flex().id(id).min_w(0).h(26).flex_none().px(6).gap(6).items_center().rounded(5)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
@@ -804,8 +816,8 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(record.needs ? "need" : record.status === "working" ? "work" : "idle", color, 11)
         .when(record.status === "working", el => el.spin(1100)))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
-        .child(is ? `${is.identifier}` : record.space.name))
-      .when(Boolean(is), el => el.child(div().flex_none().text_size(10).text_color(t.dim).truncate().max_w(96).child(is.title)))
+        .tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? issueLabel(is) : record.space.name))
+      .children(this.harnessIcons([record]))
       .child(div().flex_none().text_size(10).text_color(color)
         .child(record.needs ? (record.status === "blocked" ? "needs you" : "ready") : record.status === "working" ? "working" : ""));
   }
