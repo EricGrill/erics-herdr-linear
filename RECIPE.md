@@ -15,8 +15,13 @@ brand row, a space list that takes the remaining height, and a **69 px** Setting
 machine footer. The header reads **Erics Linear**.
 
 At the top of the list, Projects, Crew, and Agents are content-width buttons. A search
-field filters spaces by name, ticket, machine, or agent title. New task sits beside the
-number of matching spaces. Below it, non-empty groups appear in this order:
+field filters spaces by name, ticket, machine, or agent title. New task and Filters sit
+beside the number of matching spaces. Filters opens Team, Status, Project and Crew
+choices. Multiple selections match any value within one filter and all selected filters
+across categories, together with search. Selections are saved per Linear workspace,
+with per-category clearing and Clear all. Status separates space activity from Linear
+workflow names. No-value choices retain access to unlinked spaces. Below the controls,
+non-empty groups appear in this order:
 
 1. Needs you, using the theme's blocked color.
 2. Done, using its done color.
@@ -59,9 +64,10 @@ with leaf B. Expanding a project fetches its issues; loaded open projects refres
 a running issue to return to its space. Keep the project count inside this popup.
 
 Crew opens a movable, kept window showing Linear delegates, their open ticket counts,
-attention counts, and live-work counts. Selecting a delegate filters the spaces/project
-views. Delegation alone is not proof that an agent is running. The clear action removes
-the filter.
+attention counts, and live-work counts. Selecting a delegate expands their grouped
+tickets; selecting a ticket opens its details. Projects, Crew and Agents reports remain
+independent of home filters and do not change those selections when browsing. Delegation
+alone is not proof that an agent is running.
 
 Agents opens the scrollable live Herdr agent dialog, preserving status grouping, remote
 machine names, subagent trees, pinning, and sort controls. Selecting an agent closes the
@@ -149,6 +155,8 @@ display and report the error.
   a row returns to its terminal and the issue header follows the selected space.
 - Projects, Crew, and Agents open from the top; the full project tree remains searchable
   in its popup and the Agents list scrolls without clipping its rows.
+- Team, Status, Project and Crew filters combine with search, show selected values,
+  clear independently or together, and leave the grouped reports complete.
 - Creation, attach, and explicit agent continuation preserve ticket context, avoid
   duplicate prompts to an existing agent, and fail visibly when eligibility or agent
   checks fail.
