@@ -555,3 +555,57 @@ test("filter enrichment preserves an explicitly removed project", async () => {
 });
 
 }
+
+for (const [from, to] of [["remote", null], [null, "remote"]]) test(`repository name follows computer changes: ${from} to ${to}`, async () => {
+  const h = await harness({ props: { source: { machine: from, folder: "/different-home/code/one/" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, `/${from ?? "local"}/code/one`);
+  h.view.chooseComputer(to, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, `/${to ?? "local"}/code/one`);
+  assert.equal(h.view.launchTarget.machine, to);
+  assert.equal(h.view.repositoryError, "");
+});
+
+test("project repository name wins over a different focused repository without another selection", async () => {
+  const h = await harness({ props: { source: { machine: null, folder: "/local/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.curProject = project;
+  h.view.screen = "project";
+  h.view.create(h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+test("issue project selects its repository without inheriting the focused repository", async () => {
+  const h = await harness({ props: { source: { machine: null, folder: "/local/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.screen = "issue";
+  h.view.cur = { id: "issue-one", project };
+  h.view.chooseComputer(null, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+for (const folder of ["/home/.herdr/worktrees/one/feature-branch", "/home/.herdr/worktrees/one/user/feature-branch/src"]) test(`Herdr worktree uses the repository name rather than the branch: ${folder}`, async () => {
+  const h = await harness({ props: { source: { machine: "remote", folder } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.chooseComputer(null, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+test("a project display name without a repository match falls back to the source repository name", async () => {
+  const h = await harness({ projects: [{ ...project, name: "Project display name" }],
+    props: { source: { machine: "remote", folder: "/remote/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.create(h.cx);
+  h.view.pickProject(project.id, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/remote/code/two");
+});
