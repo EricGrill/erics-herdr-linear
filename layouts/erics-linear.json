@@ -41,7 +41,8 @@
           "content": {
             "mod": "erics-linear-chrome",
             "props": {
-              "footer": true
+              "footer": true,
+              "version": "0.1.0"
             }
           },
           "size": {

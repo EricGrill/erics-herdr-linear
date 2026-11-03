@@ -23,7 +23,11 @@ try:
     ids = [node["id"] for node in nodes]
     if len(ids) != len(set(ids)):
         errors.append("Duplicate layout IDs")
-except (OSError, ValueError, KeyError) as error:
+    version = json.loads((root / "package.json").read_text())["version"]
+    footer = next(node for node in nodes if node["id"] == "sidebar-footer")
+    if footer.get("content", {}).get("props", {}).get("version") != version:
+        errors.append("Sidebar footer version must match package.json")
+except (OSError, ValueError, KeyError, StopIteration) as error:
     errors.append(f"Layout: {error}")
 
 for path in list((root / "mods").rglob("*.json")) + list((root / "layouts").glob("*.json")):

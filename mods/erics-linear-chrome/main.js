@@ -42,6 +42,9 @@ export default class WorkspaceChrome extends View {
         .when(!collapsed, el => el.child(label));
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).text_size(13)
         .child(row("settings", "settings", "Settings", false, () => run("app.settings"))
+          .when(!collapsed && Boolean(props()?.version), el => el
+            .child(div().flex_1())
+            .child(div().text_size(11).text_color(t.muted).child(`Layout v${props().version}`)))
           .when(Boolean(updates().app.ready), el => el.child(div().size(6).rounded_full().bg(t.accent))))
         .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
     }
