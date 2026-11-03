@@ -573,6 +573,7 @@ export default class Linear extends View {
   // ── a project ──────────────────────────────────────────────────────────
 
   openProject(p, cx) {
+    this.rememberProject(p.id);
     this.screen = "project";
     this.curProject = p;
     this.projDetail = null;
@@ -592,6 +593,7 @@ export default class Linear extends View {
 
   // A project's issues, in the list, with ← or esc back to the projects.
   drill(p, cx) {
+    this.rememberProject(p.id);
     // From the project's screen, esc goes back there; from the list, to it.
     this.drillFrom = this.screen === "project";
     this.drilled = p;
@@ -873,11 +875,46 @@ export default class Linear extends View {
 
   // ── a new issue ────────────────────────────────────────────────────────
 
+  taskDefaults() {
+    return this.demo || !this.ws ? {} : shared("linear-workspace.task-defaults")?.[this.ws] ?? {};
+  }
+
+  rememberProject(id, workspace = this.ws) {
+    if (this.demo || !workspace) return;
+    const key = "linear-workspace.task-defaults", defaults = shared(key)?.[workspace] ?? {};
+    if (defaults.lastProject === id) return;
+    setShared(key, { ...shared(key), [workspace]: { ...defaults, lastProject: id } });
+  }
+
+  rememberRepository(target) {
+    if (this.demo || !this.ws || this.screen !== "create" || !this.form?.project ||
+      typeof target?.folder !== "string" || !target.folder.startsWith("/")) return;
+    const key = "linear-workspace.task-defaults", defaults = this.taskDefaults();
+    const id = this.form.project, machine = target.machine ?? null;
+    const project = defaults.projects?.[id] ?? {};
+    setShared(key, { ...shared(key), [this.ws]: { ...defaults, lastProject: id,
+      projects: { ...defaults.projects, [id]: { ...project, machine,
+        repositories: { ...project.repositories, [machine ?? ""]: target.folder } } } } });
+  }
+
+  defaultTaskMachine() {
+    const project = this.taskDefaults().projects?.[this.form?.project];
+    return project && Object.hasOwn(project, "machine") ? project.machine : this.launchTarget?.machine ?? null;
+  }
+
+  mappedRepository(machine) {
+    return this.screen === "create" && this.form?.project
+      ? this.taskDefaults().projects?.[this.form.project]?.repositories?.[machine ?? ""] : undefined;
+  }
+
   // The form: title, description, team, status, priority, project, and
   // whether it's yours. In a project (listed, or open), the issue goes in it.
   create(cx) {
-    const project = this.screen === "project" ? this.curProject : this.drilled;
+    const context = this.screen === "project" ? this.curProject : this.drilled;
+    const project = context ?? this.projectsFor(null).find((p) => p.id === this.taskDefaults().lastProject);
     this.form = { team: null, state: null, priority: 0, project: project?.id ?? null, assignToMe: true, teams: null, states: {} };
+    const form = this.form;
+    this.rememberProject(form.project);
     this.screen = "create";
     this.menu = null;
     this.err = this.flash = "";
@@ -886,11 +923,14 @@ export default class Linear extends View {
     cx.spawn(async (cx) => {
       try {
         const res = await this.linear({ op: "teams" });
-        this.form.teams = res.teams;
-        const key = project?.teams?.[0];
+        if (this.form !== form || this.screen !== "create") return;
+        form.teams = res.teams;
+        const selected = this.projectsFor(null).find((p) => p.id === form.project) ?? (project?.id === form.project ? project : null);
+        const key = selected?.teams?.[0];
         const t = res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
         if (t) this.pickTeam(t, cx);
       } catch (e) {
+        if (this.form !== form || this.screen !== "create") return;
         this.say(String(e?.message ?? e), cx, true);
       }
       cx.notify();
@@ -900,11 +940,16 @@ export default class Linear extends View {
   }
 
   pickTeam(t, cx) {
+    if (this.busy) return;
     const f = this.form;
     f.team = t;
     f.state = t.defaultIssueState?.id ?? null;
     localStorage.setItem("team", t.key);
-    if (f.project && !this.projectsFor(t).some((p) => p.id === f.project)) f.project = null;
+    if (f.project && !this.projectsFor(t).some((p) => p.id === f.project)) {
+      f.project = null;
+      this.rememberProject(null);
+      if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
+    }
     if (!f.states[t.id]) {
       cx.spawn(async (cx) => {
         try {
@@ -926,7 +971,10 @@ export default class Linear extends View {
   }
 
   pickProject(id, cx) {
+    if (this.busy) return;
     this.form.project = id;
+    this.rememberProject(id);
+    if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
     this.projOpen = false;
     this.projSearch.set_value("");
     cx.timer.after(30, () => this.title.focus());

@@ -31,6 +31,11 @@ In New task, select **Computer**, then **Repository**. The repository list comes
 the selected computer's own `~/code`; it does not create or clone a missing repository.
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
+New tasks remember the last project selected or visited in each Linear workspace.
+Choosing a repository saves that project's computer and repository for future tasks,
+with separate repository choices for each computer. These preferences persist in this
+Herdr app and are shared by both Linear layouts. A missing saved repository stays
+unselected until you choose an existing one.
 The pinned worktree backend trims path output, so paths containing newlines or ending
 in whitespace are rejected before any ticket or worktree mutation.
 

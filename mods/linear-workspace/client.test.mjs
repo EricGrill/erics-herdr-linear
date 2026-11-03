@@ -48,7 +48,9 @@ async function harness(options = {}) {
     const request = JSON.parse(args[3]);
     requests.push({ request, on: config?.on ?? null });
     let result;
-    if (request.op === "check-start") result = { issue: ticket };
+    if (request.op === "teams") result = options.teamsReply ? await options.teamsReply() : { teams: options.teams ?? [] };
+    else if (request.op === "states") result = { states: [] };
+    else if (request.op === "check-start") result = { issue: ticket };
     else if (request.op === "create") {
       createCalls += 1;
       result = options.failCreateAt === createCalls ? { error: "Linear create failed" } : { issue: ticket, note: "Created ticket" };
@@ -135,8 +137,9 @@ async function harness(options = {}) {
     demo: false, trees: {}, lists: {}, screen: "issue", cur: ticket, busy: "", err: "", flash: "",
     issueTargetState: { key: "workspace-one/issue-one", request: 0, status: "ready" },
     launchTarget: Object.hasOwn(options, "launchTarget") ? options.launchTarget : { folder: sourceSpace.folder, machine: null },
-    agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars" },
-    desc: { value: () => "Reproduce the missing scheduled research." },
+    agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars", set_value: noop },
+    projSearch: { set_value: noop },
+    desc: { value: () => "Reproduce the missing scheduled research.", set_value: noop },
     form: { team: { id: "team-one" }, project: "project-one", state: "state-one", priority: 2, assignToMe: true },
     replaceRow: noop,
     records: () => [], publish: noop,
@@ -588,4 +591,165 @@ test("a late old-issue detail response cannot mark a newer issue placement ready
   assert.equal(h.client.cur.id, next.id);
   assert.equal(h.client.issueTargetState.key, "workspace-one/issue-next");
   assert.equal(h.client.detail.issue.id, next.id);
+});
+
+const defaultsKey = "linear-workspace.task-defaults";
+const projects = [
+  { id: "project-one", name: "First", teams: ["ONE"] },
+  { id: "project-two", name: "Second", teams: ["TWO"] },
+];
+const teams = [{ id: "team-one", key: "ONE" }, { id: "team-two", key: "TWO" }];
+const setProjects = h => { h.client.lists.projects = { items: projects }; };
+const serializedStore = h => new Map(JSON.parse(JSON.stringify([...h.sharedStore])));
+
+test("new dialog restores the last project and its explicit computer repository from serialized shared preferences", async () => {
+  const first = await harness();
+  first.client.screen = "create";
+  first.client.pickProject("project-two", first.cx);
+  first.client.rememberRepository({ machine: "remote", folder: "/remote/project-two" });
+  first.client.rememberRepository({ machine: null, folder: "/local/project-two" });
+  const fresh = await harness({ sharedStore: serializedStore(first), teams });
+  setProjects(fresh);
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.project, "project-two");
+  assert.equal(fresh.client.form.team.id, "team-two");
+  assert.equal(fresh.client.defaultTaskMachine(), null);
+  assert.equal(fresh.client.mappedRepository(null), "/local/project-two");
+  assert.equal(fresh.client.mappedRepository("remote"), "/remote/project-two");
+});
+
+test("task defaults isolate workspaces and preserve other project and computer mappings", async () => {
+  const h = await harness();
+  h.client.screen = "create";
+  h.client.rememberRepository({ machine: null, folder: "/first" });
+  h.client.pickProject("project-two", h.cx);
+  h.client.rememberRepository({ machine: "remote", folder: "/second" });
+  h.client.ws = "workspace-two";
+  assert.equal(h.client.taskDefaults().lastProject, undefined);
+  h.client.rememberRepository({ machine: null, folder: "/other-workspace" });
+  h.client.ws = "workspace-one";
+  assert.equal(h.client.taskDefaults().projects["project-one"].repositories[""], "/first");
+  assert.equal(h.client.mappedRepository("remote"), "/second");
+  h.client.ws = null;
+  const before = JSON.stringify([...h.sharedStore]);
+  h.client.rememberProject(null);
+  h.client.rememberRepository({ folder: "/ignored" });
+  assert.equal(JSON.stringify([...h.sharedStore]), before);
+});
+
+test("explicit project and drilled context override remembered project; missing remembered projects are ignored", async () => {
+  for (const context of ["project", "drilled", "missing"]) {
+    const h = await harness({ teams });
+    setProjects(h);
+    h.client.rememberProject(context === "missing" ? "removed" : "project-one");
+    if (context === "project") { h.client.screen = "project"; h.client.curProject = projects[1]; }
+    if (context === "drilled") h.client.drilled = projects[1];
+    h.client.create(h.cx);
+    await h.flush();
+    assert.equal(h.client.form.project, context === "missing" ? null : "project-two");
+    if (context !== "missing") assert.equal(h.client.form.team.id, "team-two");
+  }
+});
+
+test("No project persists and team changes clear an incompatible project and refresh repository", async () => {
+  const h = await harness({ teams });
+  setProjects(h);
+  h.client.screen = "create";
+  h.client.form.states = {};
+  const selections = [];
+  h.client.chooseComputer = machine => selections.push(machine);
+  h.client.rememberRepository({ machine: "remote", folder: "/remote/first" });
+  h.client.pickProject("project-one", h.cx);
+  assert.equal(selections[0], "remote");
+  h.client.pickTeam(teams[1], h.cx);
+  await h.flush();
+  assert.equal(h.client.form.project, null);
+  assert.equal(h.client.taskDefaults().lastProject, null);
+  assert.equal(selections.length, 2);
+  h.client.pickProject(null, h.cx);
+  const fresh = await harness({ sharedStore: serializedStore(h), teams });
+  setProjects(fresh);
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.project, null);
+});
+
+test("demo task defaults neither read nor write real preferences", async () => {
+  const h = await harness({ teams });
+  setProjects(h);
+  h.client.rememberProject("project-two");
+  const before = JSON.stringify([...h.sharedStore]);
+  h.client.demo = true;
+  assert.equal(h.client.taskDefaults().lastProject, undefined);
+  h.client.screen = "create";
+  h.client.rememberProject("project-one");
+  h.client.rememberRepository({ folder: "/demo" });
+  assert.equal(h.client.mappedRepository(null), undefined);
+  assert.equal(JSON.stringify([...h.sharedStore]), before);
+});
+
+test("late teams use the current selected project and cannot overwrite a newer form", async () => {
+  const response = delay();
+  const h = await harness({ teamsReply: () => response.promise });
+  setProjects(h);
+  h.client.rememberProject("project-one");
+  h.client.create(h.cx);
+  h.client.pickProject("project-two", h.cx);
+  response.resolve({ teams });
+  await h.flush();
+  assert.equal(h.client.form.project, "project-two");
+  assert.equal(h.client.form.team.id, "team-two");
+
+  const old = delay();
+  let calls = 0;
+  const newer = await harness({ teamsReply: () => ++calls === 1 ? old.promise : { teams } });
+  setProjects(newer);
+  newer.client.create(newer.cx);
+  const flushing = newer.flush();
+  await new Promise(setImmediate);
+  newer.client.create(newer.cx);
+  newer.client.pickProject("project-two", newer.cx);
+  await new Promise(setImmediate);
+  const form = newer.client.form;
+  old.resolve({ teams: [teams[0]] });
+  await flushing;
+  assert.equal(newer.client.form, form);
+  assert.equal(form.project, "project-two");
+  assert.equal(form.team.id, "team-two");
+});
+
+test("busy project and team picks preserve the current task defaults", async () => {
+  const h = await harness();
+  h.client.busy = "Creating";
+  h.client.pickProject("project-two", h.cx);
+  h.client.pickTeam(teams[1], h.cx);
+  assert.equal(h.client.form.project, "project-one");
+  assert.equal(h.client.form.team.id, "team-one");
+  assert.equal(h.sharedStore.has(defaultsKey), false);
+});
+
+test("visiting or drilling a project remembers it without creating a ticket", async () => {
+  for (const action of ["openProject", "drill"]) {
+    const h = await harness();
+    h.client.linear = async () => ({});
+    h.client.focusKeys = () => {};
+    h.client.loadProject = () => {};
+    h.client.input = { set_value: () => {} };
+    h.client[action](projects[1], h.cx);
+    await h.flush();
+    assert.equal(h.client.taskDefaults().lastProject, "project-two");
+    assert.equal(h.requests.length, 0);
+  }
+});
+
+test("attachment project changes do not reset execution placement", async () => {
+  const h = await harness({ props: { attachSpace: { id: "space" } } });
+  setProjects(h);
+  h.client.form.states = {};
+  h.client.chooseComputer = () => assert.fail("attachment must retain its space placement");
+  h.client.pickProject("project-two", h.cx);
+  h.client.pickTeam(teams[0], h.cx);
+  await h.flush();
+  assert.equal(h.client.form.project, null);
 });

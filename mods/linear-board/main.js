@@ -299,9 +299,11 @@ export default class LinearWorkspace extends LinearClient {
   }
   dismiss() { if (props()?.overlay) super.dismiss(); }
   details(is, extra = {}) {
+    if (is.project?.id) this.rememberProject(is.project.id, this.ws || shared(ACTIVE));
     dialog({ issue: { key: is.identifier, workspaceKey: this.workspace()?.urlKey }, ...extra });
   }
   selectWork(record) {
+    if (record.issue?.project?.id) this.rememberProject(record.issue.project.id, this.ws || shared(ACTIVE));
     const a = record.agents.find(a => a.status === "blocked") ?? record.agents.find(a => a.status === "done") ?? record.agents[0];
     run("space.select", { id: record.space.id });
     if (a) run("agent.focus", { terminal: a.address });
@@ -369,14 +371,14 @@ export default class LinearWorkspace extends LinearClient {
       : this.screen === "project" ? this.curProject : this.drilled;
     const hints = [project?.name];
     if ((source?.machine ?? null) === (machine ?? null)) hints.push(source?.folder);
-    loadTarget(this, cx, machine, { retain, hints, preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
+    loadTarget(this, cx, machine, { retain, hints, preferredFolder: this.mappedRepository(machine), preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
   }
   create(cx) {
     super.create(cx);
-    if (!props().attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
+    if (!props().attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
   }
   selectRepository(repo, cx) {
-    selectTargetRepository(this, repo, cx);
+    if (selectTargetRepository(this, repo, cx)) this.rememberRepository(this.launchTarget);
   }
 
   button(id, label, action, { primary = false, enabled = true } = {}) {
@@ -515,6 +517,7 @@ export default class LinearWorkspace extends LinearClient {
         .on_click((_e, cx) => {
           this.expanded[p.id] = !open;
           localStorage.setItem("expandedProjects", JSON.stringify(this.expanded));
+          if (!open) this.rememberProject(p.id);
           if (!open && !list?.loaded) this.load(`project:${p.id}`, cx, { op: "list", tab: "project", project: p.id });
           cx.notify();
         })
@@ -541,6 +544,7 @@ export default class LinearWorkspace extends LinearClient {
         .on_click((_e, cx) => {
           this.expanded[p.id] = !open;
           localStorage.setItem("expandedProjects", JSON.stringify(this.expanded));
+          if (!open) this.rememberProject(p.id);
           if (!open && !list?.loaded) this.load(`project:${p.id}`, cx, { op: "list", tab: "project", project: p.id });
           cx.notify();
         })

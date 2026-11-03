@@ -112,6 +112,40 @@ test("persisted target is revalidated and missing target stays unselected", asyn
   assert.match(view.repositoryError, /does not exist/);
 });
 
+for (const folder of ["/local/code/two", "/local/code/missing"]) test(`project mapping takes precedence over name and source hints: ${folder}`, async () => {
+  const h = await harness({ exec: async () => ({ code: 0, stdout: "/local/code\0/local/code/one\0/local/code/two\0", stderr: "" }) });
+  const jobs = [], cx = { notify() {}, spawn(fn) { jobs.push(fn(cx)); } }, view = {};
+  h.loadTarget(view, cx, null, { preferredFolder: folder, hints: ["one"] });
+  await jobs[0];
+  assert.equal(view.launchTarget.folder, folder.endsWith("missing") ? "" : folder);
+  if (folder.endsWith("missing")) {
+    assert.match(view.repositoryError, /saved repository.*unavailable/i);
+    assert.equal(view.repositories.length, 2, "another repository can still be chosen");
+  }
+});
+
+test("an explicit ticket target takes precedence over a project mapping", async () => {
+  const h = await harness({ exec: async () => ({ code: 0, stdout: "/local/code\0/local/code/one\0/local/code/two\0", stderr: "" }) });
+  const jobs = [], cx = { notify() {}, spawn(fn) { jobs.push(fn(cx)); } }, view = {};
+  h.loadTarget(view, cx, null, { preferredFolder: "/local/code/two", retain: { folder: "/local/code/one" } });
+  await jobs[0];
+  assert.equal(view.launchTarget.folder, "/local/code/one");
+});
+
+test("changing projects discards an earlier discovery on the same computer", async () => {
+  const old = deferred();
+  let calls = 0;
+  const reply = { code: 0, stdout: "/local/code\0/local/code/one\0/local/code/two\0", stderr: "" };
+  const h = await harness({ exec: async () => ++calls === 1 ? old.promise : reply });
+  const jobs = [], cx = { notify() {}, spawn(fn) { jobs.push(fn(cx)); } }, view = {};
+  h.loadTarget(view, cx, null, { preferredFolder: "/local/code/one" });
+  h.loadTarget(view, cx, null, { preferredFolder: "/local/code/two" });
+  await jobs[1];
+  old.resolve(reply);
+  await jobs[0];
+  assert.equal(view.launchTarget.folder, "/local/code/two");
+});
+
 for (const [repos, workspace, blocked] of [
   [{ CHA: "/other/repo" }, "example", false],
   [{ "": "/other/repo" }, "example", true],
