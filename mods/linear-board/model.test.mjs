@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { issueKey, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext } from "./model.js";
+import { issueKey, issueLabel, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext } from "./model.js";
 
 const issue = (id = "one", identifier = "DEMO-3785", extra = {}) => ({
   id, identifier, title: "Research new stars", url: `https://linear.app/example/issue/${identifier}`,
@@ -13,6 +13,33 @@ const space = (id = "space-one", extra = {}) => ({
 });
 const linked = (s, ticket, extra = {}) => ({
   workspace: "workspace-one", machine: s.machine, space: s.id, folder: s.folder, issue: ticket, ...extra,
+});
+
+test("issue labels put the project immediately after the identifier without empty parentheses", () => {
+  assert.equal(issueLabel(issue()), "DEMO-3785 (RepoRadar)");
+  for (const project of [undefined, null, { name: "" }, { name: "  " }]) {
+    assert.equal(issueLabel(issue("one", "DEMO-3785", { project })), "DEMO-3785");
+  }
+});
+
+test("open harnesses come from this space's live agents and terminal panes only", () => {
+  const s = space();
+  const codex = { key: "codex", name: "Codex", agent: true, icon: "icons/codex.svg", tint: true };
+  const claude = { key: "claude", name: "Claude Code", agent: true, icon: "icons/claude.png", tint: false };
+  const other = { key: "other", name: "Other harness", agent: true };
+  const [record] = workRecords({
+    allSpaces: [s], issues: [], links: [], workspace: "workspace-one",
+    allAgents: [{ space: s.id, program: codex }, { space: "remote-space", program: other }],
+    allPanes: [
+      { tab: s.tabs[0].id, terminal: "codex-terminal", program: codex },
+      { tab: s.tabs[0].id, terminal: "no-status-report-yet", program: claude },
+      { tab: s.tabs[0].id, terminal: "shell", program: { key: "shell", agent: false } },
+      { tab: s.tabs[0].id, terminal: null, program: other },
+      { tab: "remote-tab", terminal: "remote-terminal", program: other },
+    ],
+  });
+  assert.deepEqual(record.programs, [codex, claude]);
+  assert.equal(record.issue, null);
 });
 
 test("recognizes issue identifiers in worktree branches and full paths", () => {
