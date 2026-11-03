@@ -82,7 +82,7 @@ test("the query body survives a $ sequence intact", async () => {
   const body = script.split("HERDR_BOARD_QUERY")[1].replace(/^'/, "");
   const parsed = JSON.parse(body.trim());
   assert.match(parsed.query, /query BoardEnrichment\(\$after: String\)/);
-  assert.match(parsed.query, /delegate \{ name displayName avatarUrl \}/);
+  assert.match(parsed.query, /delegate \{ id name displayName avatarUrl \}/);
   assert.match(parsed.query, /nin: \["completed", "canceled"\]/);
   same(parsed.variables, { after: null });
 });
@@ -91,7 +91,7 @@ test("a delegated issue parses into usable rows", async () => {
   const { api } = await load(async () => ({ code: 0, stdout: "", stderr: "" }));
   const parsed = api.parseEnrichment(answer([
     node("DEMO-3589", {
-      delegate: { name: "Spock", displayName: "spock", avatarUrl: "https://public.linear.app/a.png" },
+      delegate: { id: "agent-spock", name: "Spock", displayName: "spock", avatarUrl: "https://public.linear.app/a.png" },
       state: { name: "Needs Human", type: "started" },
       labels: { nodes: [{ name: "agent:stalled" }, { name: "needs-eric" }] },
     }),
@@ -101,7 +101,7 @@ test("a delegated issue parses into usable rows", async () => {
   same(parsed.rows, [{
     id: "uuid-DEMO-3589",
     identifier: "DEMO-3589",
-    delegate: { name: "Spock", avatarUrl: "https://public.linear.app/a.png" },
+    delegate: { id: "agent-spock", name: "Spock", avatarUrl: "https://public.linear.app/a.png" },
     assignee: "sample-user",
     state: { name: "Needs Human", type: "started" },
     project: { id: "p1", name: "Helper Project" },
