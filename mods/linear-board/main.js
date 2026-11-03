@@ -364,7 +364,9 @@ export default class LinearWorkspace extends LinearClient {
   chooseComputer(machine, cx, retain = null) {
     this.targetPicker = null;
     const source = this.repositorySource;
-    const project = this.curProject ?? this.drilled;
+    const project = this.screen === "create"
+      ? this.lists.projects?.items?.find(p => p.id === this.form?.project)
+      : this.screen === "project" ? this.curProject : this.drilled;
     const hints = [project?.name];
     if ((source?.machine ?? null) === (machine ?? null)) hints.push(source?.folder);
     loadTarget(this, cx, machine, { retain, hints, preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
@@ -736,17 +738,12 @@ export default class LinearWorkspace extends LinearClient {
         .when(!this.agentChoices.length, el => el.child(div().text_size(11).text_color(t.muted).child(this.agentsChecked ? this.launchError || "No installed agents found" : "Checking installed agents…"))));
   }
 
-  createView(o) {
-    const attaching = Boolean(props().attachSpace);
-    return v_flex().flex_1().min_h(0).gap(7).child(super.createView(o))
-      .when(!attaching, el => el.child(this.launchOptions()))
-      .child(h_flex().flex_none().gap(8).items_center()
-        .child(div().flex_1().text_size(11).text_color(o.muted).child(attaching ? `Creating also attaches to ${props().attachSpace.name}` : "Create a ticket, then start work in its own worktree"))
-        .when(!attaching, el => el.child(this.button("create-start", "Create & start", cx => {
-          if (!this.launchTarget?.folder) return this.say("Choose the repository folder first.", cx, true);
-          this.submit(cx, true);
-        }, { primary: true, enabled: !this.busy && this.agentsChecked && this.agentChoices.length > 0 }))));
+  createStartButton() {
+    return this.button("create-start", "Create & start", cx => this.submit(cx, true), {
+      primary: true, enabled: !this.busy && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.length > 0,
+    });
   }
+
   issueView(o) {
     const is = this.cur, attaching = Boolean(props().attachSpace), record = this.records().find(r => r.issue?.id === is.id);
     return v_flex().flex_1().min_h(0).gap(7)
@@ -754,7 +751,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().flex_none().gap(7).items_center().flex_wrap()
         .when(attaching, el => el.child(this.button("attach-selected", `Attach ${is.identifier}`, () => { this.attach(is); this.dismiss(); }, { primary: true })))
         .when(Boolean(record), el => el.child(this.button("open-linked", "Open workspace", () => { this.selectWork(record); this.dismiss(); }, { primary: true })))
-        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
+        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && Boolean(this.launchTarget?.folder) && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
         .when(!attaching && Boolean(record) && Boolean(this.detail) && !this.detail.startWhy && !this.busy, el => el.children(this.agentChoices.map(a => this.button(`continue-${a.key}`, `+ ${a.name}`, cx => {
           this.continueAgent(record, is, a, cx);
         }))))
