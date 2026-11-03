@@ -29,7 +29,9 @@ export default class LinearWorkspace extends LinearClient {
     this.resolved = {};
     this.expanded = JSON.parse(localStorage.getItem("expandedProjects") ?? "{}");
     this.repositorySource = p?.source ?? currentSource();
-    this.launchTarget = { machine: this.repositorySource?.machine ?? null, folder: "" };
+    // Focus supplies repository hints, not permission to start on another host.
+    // Saved ticket targets and explicit computer choices are restored separately.
+    this.launchTarget = { machine: null, folder: "" };
     this.agentChoices = [];
     this.agentKey = shared(PREFS)?.[this.launchTarget?.machine ?? ""] ?? "codex";
     super.init(p, cx);

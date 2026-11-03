@@ -96,9 +96,30 @@ test("explicit-local source discovers and preselects locally while a remote spac
   assert.ok(h.calls.every(call => call.config.on === null));
 });
 
-test("initial focused remote source uses its target-side home and never expands locally", async () => {
+test("unplaced tasks default locally while a remote space is focused", async () => {
   const h = await harness({ focused: { id: "remote-space", active: true, machine: "remote", folder: "/remote/code/two" } });
   h.view.init({}, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.machine, null);
+  assert.equal(h.view.repoRoot, "/local/code");
+  assert.equal(h.view.launchTarget.folder, "", "remote source must not select a local repository by accident");
+  assert.equal(h.view.agentKey, "local-agent");
+  assert.ok(h.calls.every(call => call.config.on === null));
+  h.view.create(h.cx);
+  h.view.pickProject(project.id, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.machine, null);
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+  assert.ok(h.calls.every(call => call.config.on === null));
+});
+
+test("an explicit remote choice discovers repositories and agents on that computer", async () => {
+  const h = await harness({ props: { source: { machine: "remote", folder: "/remote/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.machine, null, "dialog source describes focus, not execution intent");
+  h.calls.length = 0;
+  h.view.chooseComputer("remote", h.cx);
   await h.settle();
   assert.equal(h.view.launchTarget.machine, "remote");
   assert.equal(h.view.repoRoot, "/remote/code");
