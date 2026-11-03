@@ -1,0 +1,2 @@
+# Unified-diff context prefixes are patch syntax, including space-only lines.
+*.patch -whitespace
