@@ -36,13 +36,18 @@ export async function discoverRepositories(machine) {
 const VALIDATE = `
 [ -d "$1" ] || { printf 'Repository does not exist: %s' "$1" >&2; exit 1; }
 { [ -d "$1/.git" ] || [ -f "$1/.git" ]; } || { printf 'Not a Git repository: %s' "$1" >&2; exit 1; }
-git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'Invalid Git repository: %s' "$1" >&2; exit 1; }`;
+git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'Invalid Git repository: %s' "$1" >&2; exit 1; }
+git -C "$1" rev-parse --show-toplevel`;
 
 export async function validateRepository(target) {
   if (!target?.folder?.startsWith("/")) throw new Error("Choose an existing repository on the selected computer first.");
   available(target.machine);
   const result = await exec("sh", ["-c", VALIDATE, "herdr-repository", target.folder], { on: target.machine ?? null });
   if (result.code !== 0) throw new Error(result.stderr || `Invalid repository: ${target.folder}`);
+  // The pinned worktree backend trims Git output. Reject an ambiguous path
+  // rather than let it open a different sibling repository after trimming.
+  const top = result.stdout.replace(/\n$/, "");
+  if (top.trim() !== top || /[\r\n]/.test(top)) throw new Error("The worktree backend cannot safely handle a repository path ending in whitespace or containing a newline. Choose a repository with an unambiguous path.");
   return target.folder;
 }
 

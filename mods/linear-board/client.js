@@ -1420,6 +1420,7 @@ export default class Linear extends View {
   // The new issue's form.
   createView(o) {
     const f = this.form;
+    const canCreate = !this.busy && (Boolean(props()?.attachSpace) || Boolean(this.launchTarget?.folder));
     const states = f.team ? f.states[f.team.id] ?? [] : [];
     const pick = (id, items, isOn, onPick) => h_flex().gap(6).flex_wrap().items_center().children(items.map((x, i) => {
       const on = isOn(x);
@@ -1433,7 +1434,7 @@ export default class Linear extends View {
     }));
     const input = (state) => h_flex().h(36).flex_none().px(12).items_center().rounded(8).border_1().border_color(o.line).bg(o.sunk)
       .child(Input.new(state).flex_1().h_full().text_size(13).text_color(o.fg));
-    return v_flex().flex_1().min_h(0).gap(12)
+    return v_flex().id("create-form").flex_1().min_h(0).overflow_y_scrollbar().gap(12)
       .child(h_flex().flex_none().gap(10).items_center()
         .child(this.backButton(o, this.fromLabel()))
         .child(div().text_size(14).font_semibold().text_color(o.fg).child(`New issue in ${this.workspace()?.name ?? "Linear"}`)))
@@ -1448,11 +1449,13 @@ export default class Linear extends View {
       .child(this.field(o, "Priority", pick("pr", PRIORITIES.map((n, i) => ({ i, parts: [priorityIcon(i) ? icon(priorityIcon(i), i === 1 ? o.fix : o.muted, 12) : null, n] })), (x) => x.i === f.priority, (x) => (f.priority = x.i))))
       .child(this.field(o, "Project", this.projectField(o)))
       .child(this.field(o, "Assignee", pick("me", [{ me: true, parts: [icon("person", o.muted, 12), "Me"] }, { me: false, parts: ["Nobody"] }], (x) => x.me === f.assignToMe, (x) => (f.assignToMe = x.me))))
+      .when(!props()?.attachSpace && Boolean(this.launchOptions), el => el.child(this.launchOptions()))
       .child(h_flex().flex_none().gap(10).items_center()
-        .child(div().flex_1())
-        .child(h_flex().id("create-btn").flex_none().h(30).px(14).items_center().rounded(7).bg(o.accent).cursor_pointer().hover((s) => s.opacity(0.85))
-          .on_click((_e, cx) => this.submit(cx))
-          .child(div().text_size(12.5).font_semibold().text_color(o.surface).child("Create issue"))));
+        .child(div().flex_1().text_size(11).text_color(o.muted).child(props()?.attachSpace ? `Creating also attaches to ${props().attachSpace.name}` : "Create a ticket, or start work in its own worktree"))
+        .child(h_flex().id("create-btn").flex_none().h(30).px(14).items_center().rounded(7).bg(o.accent).opacity(canCreate ? 1 : 0.5).when(canCreate, el => el.cursor_pointer().hover(s => s.opacity(0.85)))
+          .on_click((_e, cx) => { if (canCreate) this.submit(cx); })
+          .child(div().text_size(12.5).font_semibold().text_color(o.surface).child("Create issue")))
+        .when(!props()?.attachSpace && Boolean(this.createStartButton), el => el.child(this.createStartButton())));
   }
 
   menuView(o) {

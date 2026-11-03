@@ -31,6 +31,8 @@ In New task, select **Computer**, then **Repository**. The repository list comes
 the selected computer's own `~/code`; it does not create or clone a missing repository.
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
+The pinned worktree backend trims path output, so paths containing newlines or ending
+in whitespace are rejected before any ticket or worktree mutation.
 
 Both **Create issue** and **Create & start** validate the existing repository. Queued
 issues retain their selected execution target. Starting work may create the issue's
