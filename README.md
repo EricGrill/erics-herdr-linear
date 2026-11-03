@@ -57,13 +57,21 @@ write. Finishing a capture or agent run does not mark an issue Done.
 
 ## Choose where a task runs
 
-In New task, select **Computer**, then **Repository**. The repository list comes from
+In New task, write the request in **What needs doing?**. The title uses the first
+line, shortened to 100 characters; the full text is saved as the description.
+**Ticket details** lets you change the remembered status, priority and assignee.
+Team and project remain editable. These choices are remembered per Linear workspace;
+a removed or completed status falls back to an available open status.
+
+Select **Computer**, then **Repository**. The repository list comes from
 the selected computer's own `~/code`; it does not create or clone a missing repository.
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
-Choosing a repository saves that project's computer and repository for future tasks,
-with separate repository choices for each computer. These preferences persist in this
+Choosing a repository saves that project's computer and repository for future tasks
+(or the workspace's choice when no project is selected),
+with separate repository choices for each computer. Agent selections are also remembered
+for each computer. These preferences persist in this
 Herdr app and are shared by both Linear layouts. A missing saved repository stays
 unselected until you choose an existing one.
 The pinned worktree backend trims path output, so paths containing newlines or ending

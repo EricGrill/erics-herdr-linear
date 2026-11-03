@@ -180,7 +180,7 @@ export default class Linear extends View {
     this.title = InputState.new({ placeholder: "Title" });
     this.title.on("focus", () => (this.formField = "title"));
     this.title.on("submit", (_e, cx) => this.form?.capture ? this.captureDescription.focus() : this.submit(cx));
-    this.desc = InputState.new({ placeholder: "Description (Markdown), optional" });
+    this.desc = TextareaState.new({ placeholder: "What needs doing?", rows: 4 });
     this.desc.on("focus", () => (this.formField = "desc"));
     this.idea = TextareaState.new({ placeholder: "What would you like to improve?", rows: 4 });
     this.captureDescription = TextareaState.new({ placeholder: "Describe the outcome and how to check it", rows: 7 });
@@ -221,11 +221,11 @@ export default class Linear extends View {
         const c = await nextCommand();
         if (c === "escape") this.escape(cx);
         // Tab (keys.json binds it here, over the app's own): on the new
-        // issue's form, from the title to the description and back.
+        // issue form, keep focus on its request (or the capture review fields).
         else if ((c === "tab" || c === "backtab") && this.screen === "create" && !this.projOpen) {
           const next = this.form?.capture
             ? (this.form.review ? (this.formField === "title" ? this.captureDescription : this.title) : this.idea)
-            : (this.formField === "title" ? this.desc : this.title);
+            : this.desc;
           cx.timer.after(0, () => next.focus());
         }
         else if (c === "demo") {
@@ -948,11 +948,21 @@ export default class Linear extends View {
     setShared(key, { ...shared(key), [workspace]: { ...defaults, lastProject: id } });
   }
 
+  rememberTaskOptions() {
+    const f = this.form;
+    if (this.demo || !this.ws || !f || f.capture) return;
+    const key = "linear-workspace.task-defaults", defaults = this.taskDefaults();
+    const previous = defaults.issue ?? {};
+    const issue = { team: f.team?.id ?? previous.team, priority: f.priority, assignToMe: f.assignToMe,
+      states: { ...previous.states, ...(f.team && f.state ? { [f.team.id]: f.state } : {}) } };
+    setShared(key, { ...shared(key), [this.ws]: { ...defaults, issue } });
+  }
+
   rememberRepository(target) {
-    if (this.demo || !this.ws || this.screen !== "create" || !this.form?.project ||
+    if (this.demo || !this.ws || this.screen !== "create" || !this.form ||
       typeof target?.folder !== "string" || !target.folder.startsWith("/")) return;
     const key = "linear-workspace.task-defaults", defaults = this.taskDefaults();
-    const id = this.form.project, machine = target.machine ?? null;
+    const id = this.form.project ?? "", machine = target.machine ?? null;
     const project = defaults.projects?.[id] ?? {};
     setShared(key, { ...shared(key), [this.ws]: { ...defaults, lastProject: id,
       projects: { ...defaults.projects, [id]: { ...project, machine,
@@ -960,21 +970,22 @@ export default class Linear extends View {
   }
 
   defaultTaskMachine() {
-    const project = this.taskDefaults().projects?.[this.form?.project];
+    const project = this.taskDefaults().projects?.[this.form?.project ?? ""];
     return project && Object.hasOwn(project, "machine") ? project.machine : this.launchTarget?.machine ?? null;
   }
 
   mappedRepository(machine) {
-    return this.screen === "create" && this.form?.project
-      ? this.taskDefaults().projects?.[this.form.project]?.repositories?.[machine ?? ""] : undefined;
+    return this.screen === "create" && this.form
+      ? this.taskDefaults().projects?.[this.form.project ?? ""]?.repositories?.[machine ?? ""] : undefined;
   }
 
-  // The form: title, description, team, status, priority, project, and
+  // The form: a request, team, status, priority, project, and
   // whether it's yours. In a project (listed, or open), the issue goes in it.
   create(cx, capture = false, projectId = null) {
     const context = this.screen === "project" ? this.curProject : this.drilled;
     const project = context ?? this.projectsFor(null).find((p) => p.id === this.taskDefaults().lastProject);
-    const form = { team: null, state: null, priority: 0, project: projectId ?? project?.id ?? (capture ? this.taskDefaults().lastProject : null) ?? null, assignToMe: true, teams: null, states: {}, capture };
+    const options = capture ? {} : this.taskDefaults().issue ?? {};
+    const form = { team: null, state: null, priority: options.priority ?? 0, project: projectId ?? project?.id ?? (capture ? this.taskDefaults().lastProject : null) ?? null, assignToMe: options.assignToMe ?? true, teams: null, states: {}, capture };
     if (capture) {
       if (!this.ws && !this.demo) return this.say("Select a Linear workspace to save an idea.", cx, true);
       form.workspace = this.ws;
@@ -1006,7 +1017,7 @@ export default class Linear extends View {
     form.restoring = false;
     form.waitingProjects = capture && form.project && !this.lists.projects?.loaded;
     if (!form.waitingProjects) this.loadFormTeams(cx, project);
-    cx.timer.after(30, () => (capture && !form.review ? this.idea : this.title).focus());
+    cx.timer.after(30, () => (capture ? (form.review ? this.title : this.idea) : this.desc).focus());
     cx.notify();
   }
 
@@ -1019,7 +1030,9 @@ export default class Linear extends View {
         form.teams = res.teams;
         const selected = this.projectsFor(null).find((p) => p.id === form.project) ?? (project?.id === form.project ? project : null);
         const key = selected?.teams?.[0];
-        const t = res.teams.find(t => t.id === form.draft?.team) ?? res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
+        const savedTeam = !form.capture && this.taskDefaults().issue?.team;
+        const t = res.teams.find(t => t.id === form.draft?.team)
+          ?? res.teams.find(t => t.id === savedTeam && (!selected || selected.teams.includes(t.key))) ?? res.teams.find((t) => t.key === key) ?? res.teams.find((t) => form.capture && t.key === localStorage.getItem("team")) ?? res.teams[0];
         if (t) this.pickTeam(t, cx, true);
       } catch (e) {
         if (this.form !== form || this.screen !== "create") return;
@@ -1032,9 +1045,12 @@ export default class Linear extends View {
   pickTeam(t, cx, restoring = false) {
     if (this.busy) return;
     const f = this.form;
-    const savedState = restoring && f.draft?.team === t.id ? f.draft.state : null;
+    const savedState = f.capture ? (restoring && f.draft?.team === t.id ? f.draft.state : null)
+      : this.taskDefaults().issue?.states?.[t.id];
     f.team = t;
-    f.state = savedState ?? t.defaultIssueState?.id ?? null;
+    f.state = f.capture ? savedState ?? t.defaultIssueState?.id ?? null : null;
+    const initialState = f.state;
+    f.statesError = "";
     localStorage.setItem("team", t.key);
     if (f.project && (!f.capture || this.lists.projects?.loaded) && !this.projectsFor(t).some((p) => p.id === f.project)) {
       f.project = null;
@@ -1044,23 +1060,30 @@ export default class Linear extends View {
       } else this.say("The saved project is unavailable for this team. Choose a project or continue without one.", cx);
     }
     const applyStates = () => {
-      if (!f.capture || this.form !== f || f.team?.id !== t.id || f.draft.uncertain || this.screen !== "create") return;
+      if (this.form !== f || f.team?.id !== t.id || f.draft?.uncertain || this.screen !== "create" || f.state !== initialState) return;
       const states = f.states[t.id] ?? [];
+      const defaultState = states.find(x => x.id === t.defaultIssueState?.id && !["completed", "canceled"].includes(x.type));
       if (savedState && states.some(x => x.id === savedState && !["completed", "canceled"].includes(x.type))) f.state = savedState;
-      else f.state = (states.find(x => x.type === "backlog") ?? states.find(x => x.type === "triage") ?? states.find(x => x.id === t.defaultIssueState?.id && !["completed", "canceled"].includes(x.type)) ?? states.find(x => x.type === "unstarted"))?.id ?? null;
-      this.saveCapture(cx);
+      else f.state = ((f.capture ? null : defaultState) ?? states.find(x => x.type === "backlog") ?? states.find(x => x.type === "triage") ?? defaultState ?? states.find(x => x.type === "unstarted"))?.id ?? null;
+      if (f.capture) this.saveCapture(cx);
     };
+    if (!restoring && !f.capture) this.rememberTaskOptions();
     if (!f.states[t.id]) {
+      f.loadingStates = t.id;
       cx.spawn(async (cx) => {
         try {
           f.states[t.id] = (await this.linear({ op: "states", team: t.id }, f.workspace)).states;
           applyStates();
         } catch (error) {
-          if (f.capture && this.form === f && f.team?.id === t.id) this.say("Could not load team statuses. Retry loading ticket details.", cx, true);
+          if (this.form === f && f.team?.id === t.id) {
+            f.statesError = "Could not load team statuses. Choose the team again to retry.";
+            this.say(f.statesError, cx, true);
+          }
         }
+        if (f.loadingStates === t.id) f.loadingStates = null;
         cx.notify();
       });
-    } else applyStates();
+    } else { f.loadingStates = null; applyStates(); }
     if (f.capture && !f.draft.uncertain) this.saveCapture(cx);
     cx.notify();
   }
@@ -1262,7 +1285,7 @@ export default class Linear extends View {
     if (!this.form.capture && this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
     this.projOpen = false;
     this.projSearch.set_value("");
-    cx.timer.after(30, () => (this.form.capture && !this.form.review ? this.idea : this.title).focus());
+    cx.timer.after(30, () => (this.form.capture ? (this.form.review ? this.title : this.idea) : this.desc).focus());
     cx.notify();
   }
 
@@ -1307,10 +1330,12 @@ export default class Linear extends View {
     const f = this.form;
     if (!f || this.busy) return;
     if (f.capture) return startAfterCreate ? undefined : this.submitCapture(cx);
-    const title = this.title.value().trim();
-    if (!title) return this.say("Give it a title first.", cx, true);
-    if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
     const description = this.desc.value();
+    const firstLine = Array.from(description.trim().split(/\r?\n/)[0].replace(/\s+/g, " "));
+    const title = firstLine.length > 100 ? firstLine.slice(0, 97).join("") + "..." : firstLine.join("");
+    if (!title) return this.say("Write a request first.", cx, true);
+    if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
+    if (f.loadingStates || f.statesError) return this.say(f.statesError || "Still loading team statuses; try again in a moment.", cx, true);
     const creationAgentKey = this.agentKey;
     const attaching = Boolean(props()?.attachSpace);
     const execution = this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
@@ -1329,6 +1354,7 @@ export default class Linear extends View {
           savedDescription = descriptionWithExecutionTarget(description, execution);
         }
         const res = await this.linear({ op: "create", new: { team: f.team.id, title, description: savedDescription, project: f.project ?? "", state: f.state ?? "", priority: f.priority, assignToMe: f.assignToMe } });
+        this.rememberTaskOptions();
         if (!attaching) this.rememberLaunchTarget(res.issue, execution);
         this.busy = "";
         this.lists.recent = null;
@@ -1758,7 +1784,7 @@ export default class Linear extends View {
   // The new issue's form.
   createView(o) {
     const f = this.form;
-    const canCreate = !this.busy && (Boolean(props()?.attachSpace) || Boolean(this.launchTarget?.folder));
+    const canCreate = !this.busy && !f.loadingStates && !f.statesError && (Boolean(props()?.attachSpace) || Boolean(this.launchTarget?.folder));
     const states = f.team ? f.states[f.team.id] ?? [] : [];
     if (f.unreadable) return v_flex().gap(8).child(div().text_color(o.fix).child(f.unreadable))
       .child(this.button("capture-corrupt-close", "Close", cx => this.back(cx)))
@@ -1774,6 +1800,7 @@ export default class Linear extends View {
           if (this.busy) return;
           onPick(x, cx);
           if (f.capture) this.saveCapture(cx);
+          else this.rememberTaskOptions();
           cx.notify();
         })
         .children(x.parts.filter(Boolean).map((p) => (typeof p === "string" ? div().text_size(12).text_color(on ? o.fg : o.muted).child(p) : p)));
@@ -1782,7 +1809,7 @@ export default class Linear extends View {
       .child(Input.new(state).flex_1().h_full().text_size(13).text_color(o.fg));
     const textarea = state => v_flex().flex_none().p(10).rounded(8).border_1().border_color(o.line).bg(o.sunk)
       .child(Textarea.new(state).w_full().text_size(13).text_color(o.fg));
-    const details = !f.capture || f.details;
+    const details = f.details;
     return v_flex().id("create-form").flex_1().min_h(0).overflow_y_scrollbar().gap(12)
       .child(h_flex().flex_none().gap(10).items_center()
         .child(this.backButton(o, this.fromLabel()))
@@ -1795,13 +1822,13 @@ export default class Linear extends View {
         .child(input(this.title)).child(textarea(this.captureDescription))
         .child(div().text_size(12).text_color(o.muted).child("Source idea · included in the ticket"))
         .child(div().text_size(13).text_color(o.fg).child(f.draft.idea)))
-      .when(!f.capture, el => el.child(input(this.title)).child(input(this.desc)))
+      .when(!f.capture, el => el.child(textarea(this.desc)))
       .child(this.field(o, "Team", f.teams
         ? pick("tm", f.teams.map((t) => ({ ...t, parts: [div().font_family(MONO).text_size(11.5).text_color(o.muted).child(t.key), t.name] })), (t) => t.id === f.team?.id, (t, cx) => this.pickTeam(t, cx))
         : div().text_color(o.dim).child("Loading…")))
       .when(f.capture, el => el.child(this.field(o, "Project", this.projectField(o))))
-      .when(f.capture, el => el.child(h_flex().flex_wrap().gap(6).child(this.button("capture-details", f.details ? "Hide ticket details" : "Ticket details", cx => { f.details = !f.details; cx.notify(); }))
-        .child(div().text_size(11.5).text_color(o.muted).child([states.find(s => s.id === f.state)?.name, PRIORITIES[f.priority], f.assignToMe ? "Me" : "Nobody"].filter(Boolean).join(" · ")))))
+      .child(h_flex().flex_wrap().gap(6).child(this.button("capture-details", f.details ? "Hide ticket details" : "Ticket details", cx => { f.details = !f.details; cx.notify(); }))
+        .child(div().text_size(11.5).text_color(o.muted).child([states.find(s => s.id === f.state)?.name, PRIORITIES[f.priority], f.assignToMe ? "Me" : "Nobody"].filter(Boolean).join(" · "))))
       .when(details, el => el.child(this.field(o, "Status", states.length
         ? pick("st", states.filter((s) => s.type !== "completed" && s.type !== "canceled").map((s) => ({ ...s, parts: [icon(stateIcon(s), hue(o, s.color), 12), s.name] })), (s) => s.id === f.state, (s) => (f.state = s.id))
         : div().text_color(o.dim).child("…"))))

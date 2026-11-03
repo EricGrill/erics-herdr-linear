@@ -258,3 +258,35 @@ test("passive space selection remembers the project in the currently active work
   h.view.selectWork({ space: { id: "unlinked" }, agents: [] });
   assert.equal(h.sharedStore.get("linear-workspace.task-defaults")["workspace-two"].lastProject, "project-two");
 });
+
+
+test("agent selection persists ordinary preferences but demo selection stays isolated", async () => {
+  for (const demo of [false, true]) {
+    const h = await harness();
+    h.view.init({}, h.cx);
+    await h.settle();
+    h.view.demo = demo;
+    h.view.agentChoices = [{ key: "new-agent", name: "New agent" }];
+    const callbacks = new Map();
+    h.view.button = (id, _label, action) => { callbacks.set(id, action); return {}; };
+    h.view.launchOptions();
+    callbacks.get("agent-new-agent")(h.cx);
+    assert.equal(h.view.agentKey, "new-agent");
+    assert.equal(h.sharedStore.get("linear-workspace.agents")?.remote, demo ? undefined : "new-agent");
+  }
+});
+
+test("Create & start reflects status readiness without starting anything", async () => {
+  const h = await harness();
+  h.view.launchTarget = { machine: null, folder: "/local/code/one" };
+  h.view.agentsChecked = true;
+  h.view.agentChoices = [{ key: "local-agent" }];
+  h.view.button = (_id, _label, _action, options) => options;
+  h.view.form = {};
+  assert.equal(h.view.createStartButton().enabled, true);
+  h.view.form.loadingStates = "team";
+  assert.equal(h.view.createStartButton().enabled, false);
+  h.view.form.loadingStates = null;
+  h.view.form.statesError = "Offline";
+  assert.equal(h.view.createStartButton().enabled, false);
+});
