@@ -1,8 +1,9 @@
 import { div } from "gpui-kit";
-import { v_flex, h_flex, Input } from "gpui-base";
-import { spaces, panes, agents, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, pickFolder, appHome } from "herdr";
+import { v_flex, h_flex, Input, Popup } from "gpui-base";
+import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
+import { computers, loadTarget } from "./repository.js";
 import { tint, icon, stateIcon, MONO } from "./look.js";
 import { issueKey, folderOf, matchIssue, workRecords, projectGroups, taskContext, issueNeedsYou } from "./model.js";
 
@@ -27,20 +28,23 @@ export default class LinearWorkspace extends LinearClient {
     this.extraIssues = {};
     this.resolved = {};
     this.expanded = JSON.parse(localStorage.getItem("expandedProjects") ?? "{}");
-    this.launchTarget = p?.source ?? currentSource();
+    this.repositorySource = p?.source ?? currentSource();
+    this.launchTarget = { machine: this.repositorySource?.machine ?? null, folder: "" };
     this.agentChoices = [];
     this.agentKey = shared(PREFS)?.[this.launchTarget?.machine ?? ""] ?? "codex";
     super.init(p, cx);
     this.ws = p?.workspaceId ?? shared(ACTIVE) ?? this.ws;
     this.tab = "mine";
     if (this.role === "sidebar") cx.timer.every(10000, cx => this.resolveSpaces(cx));
-    else this.checkAgents(cx);
+    else this.chooseComputer(this.launchTarget.machine, cx);
   }
 
   checkAgents(cx) {
     const generation = this.agentGeneration = (this.agentGeneration ?? 0) + 1;
     const machine = this.launchTarget?.machine ?? null;
     this.agentsChecked = false;
+    this.agentChoices = [];
+    this.agentKey = shared(PREFS)?.[machine ?? ""] ?? "";
     cx.spawn(async cx => {
       try {
         const choices = (await knownAgents({ on: machine })).filter(a => a.installed);
@@ -171,6 +175,7 @@ export default class LinearWorkspace extends LinearClient {
     if (this.role === "sidebar") return this.visit(is);
     const record = this.records().find(r => r.issue?.id === is.id);
     if (record && (record.space.machine ?? null) !== (this.launchTarget?.machine ?? null)) {
+      this.targetGeneration = (this.targetGeneration ?? 0) + 1;
       this.launchTarget = { ...record.space, folder: record.folder };
       this.checkAgents(cx);
     }
@@ -212,14 +217,25 @@ export default class LinearWorkspace extends LinearClient {
     if (start) setShared(PREFS, { ...shared(PREFS), [this.launchTarget.machine ?? ""]: this.agentKey });
     super.worktree(cx, start, what);
   }
-  chooseFolder(cx) {
-    cx.spawn(async cx => {
-      try {
-        const folder = await pickFolder({ prompt: "Choose the repository for this Linear task" });
-        if (folder) { this.launchTarget = { folder, machine: null, name: folder.split("/").pop() }; this.checkAgents(cx); }
-      } catch (e) { this.say(String(e?.message ?? e), cx, true); }
-      cx.notify();
-    });
+  chooseComputer(machine, cx, retain = null) {
+    this.targetPicker = null;
+    const source = this.repositorySource;
+    const project = this.screen === "create"
+      ? this.lists.projects?.items?.find(p => p.id === this.form?.project)
+      : this.screen === "project" ? this.curProject : this.drilled;
+    const hints = [project?.name];
+    if ((source?.machine ?? null) === (machine ?? null)) hints.push(source?.folder);
+    loadTarget(this, cx, machine, { retain, hints, preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
+  }
+  create(cx) {
+    super.create(cx);
+    if (!props().attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
+  }
+  selectRepository(repo, cx) {
+    if (this.busy || this.repositoriesLoading) return;
+    this.targetPicker = null;
+    this.launchTarget = { machine: this.launchTarget.machine, folder: repo.folder, name: repo.name, root: this.repoRoot };
+    cx.notify();
   }
 
   button(id, label, action, { primary = false, enabled = true } = {}) {
@@ -350,28 +366,36 @@ export default class LinearWorkspace extends LinearClient {
       .when(Boolean(s && !is), el => el.child(this.button("launch-attach", "Attach this workspace…", () => action(() => dialog({ action: "attach", attachSpace: currentSource() })))));
   }
   launchOptions() {
-    const t = theme();
+    const t = theme(), machine = this.launchTarget?.machine ?? null;
+    const label = machine ?? "This computer", available = computers().find(m => m.name === machine)?.layout ?? "unavailable";
+    const computerTrigger = this.button("choose-computer", `${label} · ${available} ▾`, cx => { this.targetPicker = this.targetPicker === "computer" ? null : "computer"; cx.notify(); }, { enabled: !this.busy });
+    const repoTrigger = this.button("choose-repository", `${this.launchTarget?.name || "Select an existing repository"} ▾`, cx => { this.targetPicker = this.targetPicker === "repository" ? null : "repository"; cx.notify(); }, { enabled: !this.busy && !this.repositoriesLoading && this.repositories?.length > 0 });
+    const row = (id, text, action, enabled = true) => this.button(id, text, action, { enabled });
     return v_flex().flex_none().gap(6).py(7)
-      .child(h_flex().gap(7).items_center().min_w(0)
+      .child(h_flex().gap(7).items_center().flex_wrap()
+        .child(div().text_size(11).text_color(t.muted).child("Computer"))
+        .child(Popup.new("computer-picker", computerTrigger).anchor("bottom_left").when(this.targetPicker === "computer", el => el.content(
+          v_flex().p(6).gap(3).bg(t.popover).children(computers().map((m, i) =>
+            row(`computer-${i}`, `${m.name ?? "This computer"} · ${m.layout}`, cx => this.chooseComputer(m.name, cx), !this.busy && m.layout === "ready"))))))
         .child(div().text_size(11).text_color(t.muted).child("Repository"))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).font_family(MONO).text_color(t.foreground).child(this.launchTarget?.folder ?? "Choose a repository"))
-        .child(div().text_size(11).text_color(t.dim).child(this.launchTarget?.machine ?? "local"))
-        .child(this.button("choose-repo", "Choose…", cx => this.chooseFolder(cx))))
+        .child(Popup.new("repository-picker", repoTrigger).anchor("bottom_left").when(this.targetPicker === "repository", el => el.content(
+          v_flex().id("repository-list").h(180).w(340).overflow_y_scrollbar().p(6).gap(3).bg(t.popover)
+            .children((this.repositories ?? []).map((r, i) => row(`repository-${i}`, r.name, cx => this.selectRepository(r, cx), !this.busy && !this.repositoriesLoading))))))
+        .child(this.button("refresh-repositories", "↻", cx => this.chooseComputer(machine, cx, this.launchTarget?.folder ? this.launchTarget : null), { enabled: !this.busy })))
+      .child(div().text_size(11).text_color(t.muted).child(this.repositoriesLoading ? `Reading ~/code on ${label}…` : `Repository root: ${this.repoRoot || "~/code on the selected computer"}`))
+      .when(Boolean(this.repositoryError), el => el.child(div().text_size(11).text_color(t.blocked).child(this.repositoryError)))
+      .child(div().text_size(12).font_family(MONO).text_color(t.foreground).child(`${label} · ${this.launchTarget?.folder || "Select a repository before creating or starting"}`))
       .child(h_flex().gap(7).items_center().flex_wrap().child(div().text_size(11).text_color(t.muted).child("Agent"))
-        .children(this.agentChoices.map(a => this.button(`agent-${a.key}`, a.name, cx => { this.agentKey = a.key; cx.notify(); }, { primary: a.key === this.agentKey })))
+        .children(this.agentChoices.map(a => this.button(`agent-${a.key}`, a.name, cx => { this.agentKey = a.key; cx.notify(); }, { primary: a.key === this.agentKey, enabled: !this.busy })))
         .when(!this.agentChoices.length, el => el.child(div().text_size(11).text_color(t.muted).child(this.agentsChecked ? this.launchError || "No installed agents found" : "Checking installed agents…"))));
   }
-  createView(o) {
-    const attaching = Boolean(props().attachSpace);
-    return v_flex().flex_1().min_h(0).gap(7).child(super.createView(o))
-      .when(!attaching, el => el.child(this.launchOptions()))
-      .child(h_flex().flex_none().gap(8).items_center()
-        .child(div().flex_1().text_size(11).text_color(o.muted).child(attaching ? `Creating also attaches to ${props().attachSpace.name}` : "Create a ticket, then start work in its own worktree"))
-        .when(!attaching, el => el.child(this.button("create-start", "Create & start", cx => {
-          if (!this.launchTarget?.folder) return this.say("Choose the repository folder first.", cx, true);
-          this.submit(cx, true);
-        }, { primary: true, enabled: !this.busy && this.agentsChecked && this.agentChoices.length > 0 }))));
+
+  createStartButton() {
+    return this.button("create-start", "Create & start", cx => this.submit(cx, true), {
+      primary: true, enabled: !this.busy && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.length > 0,
+    });
   }
+
   issueView(o) {
     const is = this.cur, attaching = Boolean(props().attachSpace), record = this.records().find(r => r.issue?.id === is.id);
     return v_flex().flex_1().min_h(0).gap(7)
@@ -379,7 +403,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().flex_none().gap(7).items_center().flex_wrap()
         .when(attaching, el => el.child(this.button("attach-selected", `Attach ${is.identifier}`, () => { this.attach(is); this.dismiss(); }, { primary: true })))
         .when(Boolean(record), el => el.child(this.button("open-linked", "Open workspace", () => { this.selectWork(record); this.dismiss(); }, { primary: true })))
-        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
+        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && Boolean(this.launchTarget?.folder) && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
         .when(!attaching && Boolean(record) && Boolean(this.detail) && !this.detail.startWhy && !this.busy, el => el.children(this.agentChoices.map(a => this.button(`continue-${a.key}`, `+ ${a.name}`, cx => {
           this.continueAgent(record, is, a, cx);
         }))))

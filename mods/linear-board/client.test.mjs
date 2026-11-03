@@ -17,7 +17,8 @@ const sourceSpace = { id: "source", active: true, folder: "/repos/sampleWorkspac
 // commands, backend process replies, installed-agent discovery, and UI classes.
 // No process, network connection, timer, or app command leaves this harness.
 async function harness(options = {}) {
-  const requests = [], commands = [], agentChecks = [], links = [], modes = [];
+  const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [];
+  const sharedStore = options.sharedStore ?? new Map();
   const storage = new Map();
   const context = vm.createContext({
     console,
@@ -54,10 +55,19 @@ async function harness(options = {}) {
     "gpui-kit": { View: class View {}, div: dummy },
     "gpui-base": Object.fromEntries(["v_flex", "h_flex", "InputState", "Input", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
     "fs/promises": { readFile: async () => "{}", writeFile: async () => {} },
+    "./repository.js": { validateRepository: async target => {
+      validations.push({ ...target });
+      if (options.validationError) throw new Error(options.validationError);
+      return target.folder;
+    }, validateWorktreeRouting: async (target, workspaceKey) => {
+      routingChecks.push({ target: { ...target }, workspaceKey });
+      if (options.routingError) throw new Error(options.routingError);
+    } },
     "herdr": {
+      shared: key => sharedStore.get(key), setShared: (key, value) => sharedStore.set(key, value),
       agents: () => [], panes: () => options.panes ?? [], machines: () => [], spaces: () => allSpaces,
       run: (name, args) => { commands.push({ name, args }); return {}; }, exec, theme: () => ({}),
-      appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog" }), closeOverlay: noop,
+      appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
       openOverlay: noop, nextCommand: async () => new Promise(() => {}),
       knownAgents: async ({ on }) => {
         agentChecks.push(on ?? null);
@@ -88,7 +98,7 @@ async function harness(options = {}) {
   Object.assign(client, {
     ws: "workspace-one", on: "", workspaces: [{ id: "workspace-one", name: "Workspace", urlKey: "example" }],
     demo: false, trees: {}, lists: {}, screen: "issue", cur: ticket, busy: "", err: "", flash: "",
-    launchTarget: options.launchTarget ?? { folder: sourceSpace.folder, machine: null },
+    launchTarget: Object.hasOwn(options, "launchTarget") ? options.launchTarget : { folder: sourceSpace.folder, machine: null },
     agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars" },
     desc: { value: () => "Reproduce the missing scheduled research." },
     form: { team: { id: "team-one" }, project: "project-one", state: "state-one", priority: 2, assignToMe: true },
@@ -102,7 +112,7 @@ async function harness(options = {}) {
     let read = 0;
     while (read < pending.length) { const batch = pending.slice(read); read = pending.length; await Promise.all(batch); }
   };
-  return { client, cx, flush, requests, commands, agentChecks, links, modes };
+  return { client, cx, flush, requests, commands, agentChecks, links, modes, validations, routingChecks, sharedStore, openIssue: module.namespace.default.prototype.openIssue };
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
@@ -222,5 +232,146 @@ test("explicit local target checks local agents even when current space is remot
   assert.deepEqual(h.agentChecks, [null]);
   const request = h.requests.find(r => r.request.op === "worktree");
   assert.equal(request.on, null);
-  assert.deepEqual(request.request.dirs, ["/repos/local", "/repos/local"]);
+  assert.deepEqual(request.request.dirs, ["/repos/local"]);
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "");
+  assert.equal(h.validations[0].machine, null);
+});
+
+
+test("remote target validates, discovers agents, prepares and launches on that computer", async () => {
+  const h = await harness({
+    launchTarget: { machine: "build-2", folder: "/home/build/code/Repos with 空間", id: "source" },
+    spaces: [{ ...sourceSpace, machine: "focused-remote" }],
+    panes: [{ tab: "source-tab", cwd: "/wrong/focused/repository" }],
+  });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.validations[0].folder, "/home/build/code/Repos with 空間");
+  assert.equal(h.validations[0].machine, "build-2");
+  assert.deepEqual(h.agentChecks, ["build-2"]);
+  assert.equal(h.requests.find(r => r.request.op === "worktree").on, "build-2");
+  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, ["/home/build/code/Repos with 空間"]);
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "build-2");
+});
+
+test("invalid base repository never creates an issue or worktree or starts elsewhere", async () => {
+  for (const action of ["submit", "worktree"]) {
+    const h = await harness({ validationError: "Selected repository is not a Git repository" });
+    h.client[action](h.cx, true);
+    await h.flush();
+    assert.match(h.client.err, /not a Git repository/);
+    assert.deepEqual(h.requests, []);
+    assert.deepEqual(h.commands, []);
+    assert.deepEqual(h.agentChecks, []);
+  }
+});
+
+test("missing target never inherits the focused computer or repository", async () => {
+  for (const action of ["submit", "worktree"]) {
+    const h = await harness({ launchTarget: null, spaces: [{ ...sourceSpace, machine: "focused-remote" }] });
+    h.client[action](h.cx, true);
+    await h.flush();
+    assert.match(h.client.err, /Choose a computer and an existing repository/);
+    assert.deepEqual(h.requests, []);
+    assert.deepEqual(h.commands, []);
+  }
+});
+
+test("ordinary Create persists its computer and repository for a reopened ticket", async () => {
+  const launchTarget = { machine: "build-2", folder: "/home/build/code/project", name: "project", root: "/home/build/code" };
+  const created = await harness({ launchTarget });
+  created.client.submit(created.cx);
+  await created.flush();
+  assert.deepEqual(created.modes, [false]);
+  assert.equal(created.validations[0].machine, "build-2");
+  const reopened = await harness({ sharedStore: created.sharedStore, launchTarget: { machine: null, folder: "/different" } });
+  const restored = [];
+  reopened.client.chooseComputer = (machine, _cx, target) => { restored.push({ machine, target }); reopened.client.launchTarget = target; };
+  reopened.client.loadDetail = () => {};
+  reopened.client.focusKeys = () => {};
+  reopened.openIssue.call(reopened.client, ticket, reopened.cx);
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].machine, "build-2");
+  assert.equal(restored[0].target.folder, launchTarget.folder);
+  assert.equal(restored[0].target.root, launchTarget.root);
+  reopened.client.worktree(reopened.cx, true, { issue: ticket });
+  await reopened.flush();
+  assert.equal(reopened.commands.find(c => c.name === "space.new").args.machine, "build-2");
+});
+
+test("saved explicit-local target remains local on reopening under a remote space", async () => {
+  const created = await harness({ launchTarget: { machine: null, folder: "/Users/local/code/project" } });
+  created.client.submit(created.cx);
+  await created.flush();
+  const reopened = await harness({ sharedStore: created.sharedStore, launchTarget: { machine: "remote", folder: "/home/remote/code/project" } });
+  reopened.client.loadDetail = () => {};
+  reopened.client.focusKeys = () => {};
+  reopened.openIssue.call(reopened.client, ticket, reopened.cx);
+  assert.equal(reopened.client.launchTarget.machine, null);
+  assert.equal(reopened.client.launchTarget.folder, "/Users/local/code/project");
+});
+
+test("execution snapshot stays on the originally selected computer during async work", async () => {
+  const h = await harness({ launchTarget: { machine: "selected", folder: "/selected/repo" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  h.client.launchTarget = { machine: "different", folder: "/different/repo" };
+  h.client.agentKey = "claude";
+  await h.flush();
+  assert.equal(h.validations[0].machine, "selected");
+  assert.deepEqual(h.agentChecks, ["selected"]);
+  assert.equal(h.requests.find(r => r.request.op === "worktree").on, "selected");
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "selected");
+});
+
+
+test("creating an attachment ticket does not require a new execution target", async () => {
+  const h = await harness({ launchTarget: null, props: { attachSpace: { id: "existing-space", machine: "remote" } } });
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.deepEqual(h.validations, []);
+  assert.equal(h.requests.filter(r => r.request.op === "create").length, 1);
+  assert.equal(h.sharedStore.has("linear-workspace.launch-targets"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+
+test("worktree repository routing does not reuse the Linear team's configured checkout", async () => {
+  const h = await harness({ launchTarget: { machine: "build-2", folder: "/home/build/code/selected" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  const worktree = h.requests.find(r => r.request.op === "worktree").request;
+  const start = h.requests.find(r => r.request.op === "start").request;
+  assert.equal(worktree.target.teamKey, "");
+  assert.equal(worktree.target.workspaceKey, "example");
+  assert.deepEqual(worktree.dirs, ["/home/build/code/selected"]);
+  assert.equal(start.teamKey, ticket.teamKey);
+  assert.equal(start.issue, ticket.id);
+  assert.match(h.commands.find(c => c.name === "space.new").args.task, /Work on Linear issue DEMO-3785/);
+});
+
+
+test("unsafe backend repository overrides stop before issue creation, worktrees, or launch", async () => {
+  for (const action of ["submit", "worktree"]) {
+    const h = await harness({
+      launchTarget: { machine: "build-2", folder: "/home/build/code/selected" },
+      routingError: "Remove the empty-team repository override before starting work",
+    });
+    h.client[action](h.cx, true);
+    await h.flush();
+    assert.match(h.client.err, /empty-team repository override/);
+    assert.equal(h.routingChecks[0].target.machine, "build-2");
+    assert.equal(h.routingChecks[0].workspaceKey, "example");
+    assert.deepEqual(h.requests, []);
+    assert.deepEqual(h.agentChecks, []);
+    assert.deepEqual(h.commands, []);
+  }
+});
+
+test("ordinary Create persists a target without invoking worktree-specific routing", async () => {
+  const h = await harness({ routingError: "Empty-team override blocks worktrees" });
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.requests.filter(r => r.request.op === "create").length, 1);
+  assert.deepEqual(h.routingChecks, []);
+  assert.equal(h.client.savedLaunchTarget(ticket).folder, sourceSpace.folder);
 });

@@ -15,7 +15,8 @@
 import { View, div } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, InputState, Input, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
-import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents } from "herdr";
+import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
+import { validateRepository, validateWorktreeRouting } from "./repository.js";
 import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
 
 // The herdr-linear this mod is part of (its release; the repo's tests hold it
@@ -88,7 +89,7 @@ async function job(req, machine, limitMs = 5 * 60000) {
   const { job: id } = await ask({ ...req, bg: true }, machine);
   const until = Date.now() + limitMs;
   while (Date.now() < until) {
-    await exec("sleep", ["1"]).catch(() => {});
+    await exec("sleep", ["1"], { on: machine ?? null }).catch(() => {});
     const res = await ask({ op: "job", job: id }, machine);
     if (res.done) {
       if (res.result?.error) throw new AppError(res.result);
@@ -109,6 +110,7 @@ const TABS = [
 const ISSUE_KEY = /^(?:[A-Za-z][A-Za-z0-9_]*-)?\d{1,9}$/;
 // Where the lists are kept between openings.
 const CACHE = `${appHome()}/linear-workspace-cache.json`;
+const LAUNCH_TARGETS = "linear-workspace.launch-targets";
 
 // The list's heights: a heading's, a row's (34 and a gap), and the most it
 // takes before it scrolls.
@@ -447,7 +449,23 @@ export default class Linear extends View {
     cx.timer.after(30, () => this.keys.focus());
   }
 
+  savedLaunchTarget(is) {
+    return shared(LAUNCH_TARGETS)?.[`${this.ws}/${is.id}`] ?? null;
+  }
+
+  rememberLaunchTarget(is, target) {
+    if (this.demo || !target?.folder) return;
+    const { folder, name, root } = target;
+    setShared(LAUNCH_TARGETS, { ...shared(LAUNCH_TARGETS),
+      [`${this.ws}/${is.id}`]: { folder, name, root, machine: target.machine ?? null } });
+  }
+
   openIssue(is, cx, direct = false) {
+    const saved = this.savedLaunchTarget(is);
+    if (saved && (saved.folder !== this.launchTarget?.folder || (saved.machine ?? null) !== (this.launchTarget?.machine ?? null))) {
+      if (this.chooseComputer) this.chooseComputer(saved.machine ?? null, cx, saved);
+      else this.launchTarget = { ...saved };
+    }
     this.screen = "issue";
     this.cur = is;
     this.detail = null;
@@ -685,6 +703,9 @@ export default class Linear extends View {
     const is = what.issue;
     const pr = what.project;
     if (!is && !pr) return;
+    if (this.busy) return;
+    const execution = this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
+    const agentKey = this.agentKey;
     const name = is ? is.identifier : pr.name;
     this.busy = start ? `Starting ${name}…` : `Opening ${name}'s worktree…`;
     this.menu = null;
@@ -698,15 +719,21 @@ export default class Linear extends View {
           cx.notify();
           return Promise.race([p, new Promise((_, no) => cx.timer.after(ms, () => no(new Error(`${label.replace(/…$/, "")} took too long`))))]);
         };
-        if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
         const workspaceKey = this.workspace()?.urlKey ?? "";
+        if (!this.demo) {
+          if (!execution?.folder) throw new Error("Choose a computer and an existing repository first.");
+          execution.folder = await step("Validating the selected repository…", validateRepository(execution));
+          await step("Checking repository routing…", validateWorktreeRouting(execution, workspaceKey));
+          if (is) this.rememberLaunchTarget(is, execution);
+        }
+        if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
         // Choose before changing the ticket or creating its worktree. A missing
         // selected agent must never silently turn Start into a plain shell.
-        const machineForAgent = this.launchTarget ? (this.launchTarget.machine ?? null) : (spaces().find((s) => s.active)?.machine ?? null);
+        const machineForAgent = execution?.machine ?? null;
         let selectedAgent = null;
         if (start) {
           const known = await step("Checking the selected agent…", knownAgents({ on: machineForAgent }));
-          selectedAgent = known.find((a) => a.installed && a.key === this.agentKey);
+          selectedAgent = known.find((a) => a.installed && a.key === agentKey);
           if (!selectedAgent) throw new Error("The selected agent is not installed on this machine. Choose another agent.");
         }
         const target = is
@@ -725,10 +752,13 @@ export default class Linear extends View {
           this.busy = "";
           return this.say(note, cx);
         }
-        const active = this.launchTarget ?? spaces().find((s) => s.active);
-        const machine = active?.machine ?? null;
+        const machine = execution.machine;
+        // https://github.com/mrolafsson/herdr-linear/blob/v0.14.2/app.go#L468
+        // Configured team repos precede dirs. The guard excludes empty-team
+        // overrides; only Git routing clears the team, never Linear check/start.
+        const repositoryTarget = { ...target, teamKey: "" };
         const res = await step(`Making its worktree on ${machine ?? "this computer"}…`,
-          job({ op: "worktree", target, dirs: [active && place(active), active?.folder].filter(Boolean) }, machine), 4 * 60000);
+          job({ op: "worktree", target: repositoryTarget, dirs: [execution.folder] }, machine), 4 * 60000);
         this.trees[target.branch] = { path: res.path, machine };
         localStorage.setItem("trees", JSON.stringify(this.trees));
         let note = "";
@@ -748,8 +778,8 @@ export default class Linear extends View {
           if (start) return this.say(`${note ? note + ". " : ""}Its worktree already had a space, so no prompt was sent: its agent may be busy.`, cx);
           return this.dismiss();
         }
-        const spec = { folder: res.path };
-        if (machine) spec.machine = machine;
+        // Empty explicitly means this computer; omission inherits focused space.
+        const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
           spec.argv = selectedAgent.run;
           spec.task = this.taskFor?.(fresh) ?? res.prompt;
@@ -881,11 +911,19 @@ export default class Linear extends View {
     if (!title) return this.say("Give it a title first.", cx, true);
     if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
     const description = this.desc.value();
+    const attaching = Boolean(props()?.attachSpace);
+    const execution = this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
+    if (!this.demo && !attaching && !execution?.folder) return this.say("Choose a computer and an existing repository first.", cx, true);
     this.busy = `Creating ${title}…`;
     cx.notify();
     cx.spawn(async (cx) => {
       try {
+        if (!this.demo && !attaching) {
+          execution.folder = await validateRepository(execution);
+          if (startAfterCreate) await validateWorktreeRouting(execution, this.workspace()?.urlKey ?? "");
+        }
         const res = await this.linear({ op: "create", new: { team: f.team.id, title, description, project: f.project ?? "", state: f.state ?? "", priority: f.priority, assignToMe: f.assignToMe } });
+        if (!attaching) this.rememberLaunchTarget(res.issue, execution);
         this.busy = "";
         this.lists.recent = null;
         this.loadAll(cx);
@@ -1306,6 +1344,7 @@ export default class Linear extends View {
   // The new issue's form.
   createView(o) {
     const f = this.form;
+    const canCreate = !this.busy && (Boolean(props()?.attachSpace) || Boolean(this.launchTarget?.folder));
     const states = f.team ? f.states[f.team.id] ?? [] : [];
     const pick = (id, items, isOn, onPick) => h_flex().gap(6).flex_wrap().items_center().children(items.map((x, i) => {
       const on = isOn(x);
@@ -1319,7 +1358,7 @@ export default class Linear extends View {
     }));
     const input = (state) => h_flex().h(36).flex_none().px(12).items_center().rounded(8).border_1().border_color(o.line).bg(o.sunk)
       .child(Input.new(state).flex_1().h_full().text_size(13).text_color(o.fg));
-    return v_flex().flex_1().min_h(0).gap(12)
+    return v_flex().id("create-form").flex_1().min_h(0).overflow_y_scrollbar().gap(12)
       .child(h_flex().flex_none().gap(10).items_center()
         .child(this.backButton(o, this.fromLabel()))
         .child(div().text_size(14).font_semibold().text_color(o.fg).child(`New issue in ${this.workspace()?.name ?? "Linear"}`)))
@@ -1334,11 +1373,13 @@ export default class Linear extends View {
       .child(this.field(o, "Priority", pick("pr", PRIORITIES.map((n, i) => ({ i, parts: [priorityIcon(i) ? icon(priorityIcon(i), i === 1 ? o.fix : o.muted, 12) : null, n] })), (x) => x.i === f.priority, (x) => (f.priority = x.i))))
       .child(this.field(o, "Project", this.projectField(o)))
       .child(this.field(o, "Assignee", pick("me", [{ me: true, parts: [icon("person", o.muted, 12), "Me"] }, { me: false, parts: ["Nobody"] }], (x) => x.me === f.assignToMe, (x) => (f.assignToMe = x.me))))
+      .when(!props()?.attachSpace && Boolean(this.launchOptions), el => el.child(this.launchOptions()))
       .child(h_flex().flex_none().gap(10).items_center()
-        .child(div().flex_1())
-        .child(h_flex().id("create-btn").flex_none().h(30).px(14).items_center().rounded(7).bg(o.accent).cursor_pointer().hover((s) => s.opacity(0.85))
-          .on_click((_e, cx) => this.submit(cx))
-          .child(div().text_size(12.5).font_semibold().text_color(o.surface).child("Create issue"))));
+        .child(div().flex_1().text_size(11).text_color(o.muted).child(props()?.attachSpace ? `Creating also attaches to ${props().attachSpace.name}` : "Create a ticket, or start work in its own worktree"))
+        .child(h_flex().id("create-btn").flex_none().h(30).px(14).items_center().rounded(7).bg(o.accent).opacity(canCreate ? 1 : 0.5).when(canCreate, el => el.cursor_pointer().hover(s => s.opacity(0.85)))
+          .on_click((_e, cx) => { if (canCreate) this.submit(cx); })
+          .child(div().text_size(12.5).font_semibold().text_color(o.surface).child("Create issue")))
+        .when(!props()?.attachSpace && Boolean(this.createStartButton), el => el.child(this.createStartButton())));
   }
 
   menuView(o) {
