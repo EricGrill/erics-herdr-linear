@@ -21,7 +21,7 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
-  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {} },
+  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {

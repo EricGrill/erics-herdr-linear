@@ -15,7 +15,9 @@
 import { View, div } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, InputState, Input, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
-import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents } from "herdr";
+import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
+import { validateRepository, validateWorktreeRouting } from "./repository.js";
+import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
 import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
 
 // The herdr-linear this mod is part of (its release; the repo's tests hold it
@@ -109,6 +111,7 @@ const TABS = [
 const ISSUE_KEY = /^(?:[A-Za-z][A-Za-z0-9_]*-)?\d{1,9}$/;
 // Where the lists are kept between openings.
 const CACHE = `${appHome()}/linear-workspace-cache.json`;
+const LAUNCH_TARGETS = "linear-workspace.launch-targets";
 
 // The list's heights: a heading's, a row's (34 and a gap), and the most it
 // takes before it scrolls.
@@ -447,7 +450,53 @@ export default class Linear extends View {
     cx.timer.after(30, () => this.keys.focus());
   }
 
+  savedLaunchTarget(is) {
+    return shared(LAUNCH_TARGETS)?.[`${this.ws}/${is.id}`] ?? null;
+  }
+
+  rememberLaunchTarget(is, target) {
+    if (this.demo || !target?.folder) return;
+    const { folder, name, root, computerId, computerName } = target;
+    setShared(LAUNCH_TARGETS, { ...shared(LAUNCH_TARGETS),
+      [`${this.ws}/${is.id}`]: { folder, name, root, computerId, computerName, machine: target.machine ?? null } });
+  }
+
+  async restoreLaunchTarget(is, description, cx, expectedGeneration) {
+    if (this.demo || (this.targetGeneration ?? 0) !== expectedGeneration || this.cur?.id !== is.id) return;
+    let saved;
+    try { saved = readExecutionTarget(description); }
+    catch (error) { this.blockLaunchTarget(error.message, cx); return; }
+    if (!saved) return;
+    const generation = this.blockLaunchTarget("Resolving the ticket's saved computer…", cx, saved.computerName);
+    try {
+      const resolved = await resolveExecutionTarget(saved);
+      if (this.cur?.id !== is.id || this.targetGeneration !== generation) return;
+      this.repositoryError = "";
+      if (this.chooseComputer) this.chooseComputer(resolved.machine, cx, resolved);
+      else this.launchTarget = resolved;
+    } catch (error) {
+      if (this.cur?.id === is.id && this.targetGeneration === generation) this.repositoryError = String(error?.message ?? error);
+    }
+    cx.notify();
+  }
+
+  blockLaunchTarget(message, cx, computerName = null) {
+    const generation = this.targetGeneration = (this.targetGeneration ?? 0) + 1;
+    this.agentGeneration = (this.agentGeneration ?? 0) + 1;
+    this.launchTarget = { machine: computerName, folder: "" };
+    this.repositories = []; this.repoRoot = ""; this.repositoriesLoading = false;
+    this.agentChoices = []; this.agentKey = ""; this.agentsChecked = false;
+    this.repositoryError = message;
+    cx.notify();
+    return generation;
+  }
+
   openIssue(is, cx, direct = false) {
+    const saved = this.savedLaunchTarget(is);
+    if (saved && (saved.folder !== this.launchTarget?.folder || (saved.machine ?? null) !== (this.launchTarget?.machine ?? null))) {
+      if (this.chooseComputer) this.chooseComputer(saved.machine ?? null, cx, saved);
+      else this.launchTarget = { ...saved };
+    }
     this.screen = "issue";
     this.cur = is;
     this.detail = null;
@@ -477,18 +526,41 @@ export default class Linear extends View {
 
   loadDetail(cx) {
     const is = this.cur;
+    const targetGeneration = this.targetGeneration ?? 0;
+    const request = this.detailGeneration = (this.detailGeneration ?? 0) + 1;
+    const key = `${this.ws}/${is.id}`;
+    this.issueTargetState = { key, request, status: "pending" };
     cx.spawn(async (cx) => {
+      const current = () => this.cur?.id === is.id && this.issueTargetState?.key === key && this.issueTargetState.request === request;
       try {
         const d = await this.linear({ op: "detail", issue: is.id });
-        if (this.cur?.id !== is.id) return;
+        if (!current()) return;
+        await this.restoreLaunchTarget(is, d.description, cx, targetGeneration);
+        if (!current()) return;
         this.detail = d;
         this.cur = d.issue;
         this.replaceRow(d.issue);
+        this.issueTargetState = { key, request, status: "ready" };
       } catch (e) {
-        if (this.cur?.id === is.id) this.err = String(e?.message ?? e);
+        if (current()) {
+          this.err = String(e?.message ?? e);
+          this.issueTargetState = { key, request, status: "failed", error: this.err };
+        }
       }
+      if (current() && this.flash === this.launchWaitNotice) this.flash = "";
       cx.notify();
     });
+  }
+
+  createdLaunchFor(is, start) {
+    const launch = this.createdLaunch;
+    return start && launch?.key === `${this.ws}/${is?.id}` ? launch : null;
+  }
+
+  launchIssueReady(is, start) {
+    if (this.demo || this.createdLaunchFor(is, start)) return true;
+    const state = this.issueTargetState;
+    return state?.key === `${this.ws}/${is?.id}` && state.status === "ready" && !this.repositoriesLoading;
   }
 
   replaceRow(is) {
@@ -685,6 +757,21 @@ export default class Linear extends View {
     const is = what.issue;
     const pr = what.project;
     if (!is && !pr) return;
+    if (this.busy) return;
+    if (is && !this.launchIssueReady(is, start)) {
+      const key = `${this.ws}/${is.id}`;
+      const state = this.issueTargetState;
+      if (state?.key !== key) this.openIssue(is, cx);
+      if (state?.key === key && state.status === "failed") return this.say(`Cannot launch before issue details are loaded: ${state.error}. Reload the issue and try again.`, cx, true);
+      this.launchWaitNotice = "Loading the issue's computer and repository. Wait for its details, then launch again.";
+      return this.say(this.launchWaitNotice, cx);
+    }
+    // Only Create & start may skip the redundant detail reload: its exact
+    // request-scoped placement was already validated and identified before create.
+    const created = this.createdLaunchFor(is, start);
+    const execution = created ? { ...created.execution } : this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
+    const agentKey = created ? created.agentKey : this.agentKey;
+    if (created) this.createdLaunch = null;
     const name = is ? is.identifier : pr.name;
     this.busy = start ? `Starting ${name}…` : `Opening ${name}'s worktree…`;
     this.menu = null;
@@ -698,15 +785,21 @@ export default class Linear extends View {
           cx.notify();
           return Promise.race([p, new Promise((_, no) => cx.timer.after(ms, () => no(new Error(`${label.replace(/…$/, "")} took too long`))))]);
         };
-        if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
         const workspaceKey = this.workspace()?.urlKey ?? "";
+        if (!this.demo) {
+          if (!execution?.folder) throw new Error("Choose a computer and an existing repository first.");
+          execution.folder = await step("Validating the selected repository…", validateRepository(execution));
+          await step("Checking repository routing…", validateWorktreeRouting(execution, workspaceKey));
+          if (is) this.rememberLaunchTarget(is, execution);
+        }
+        if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
         // Choose before changing the ticket or creating its worktree. A missing
         // selected agent must never silently turn Start into a plain shell.
-        const machineForAgent = this.launchTarget ? (this.launchTarget.machine ?? null) : (spaces().find((s) => s.active)?.machine ?? null);
+        const machineForAgent = execution?.machine ?? null;
         let selectedAgent = null;
         if (start) {
           const known = await step("Checking the selected agent…", knownAgents({ on: machineForAgent }));
-          selectedAgent = known.find((a) => a.installed && a.key === this.agentKey);
+          selectedAgent = known.find((a) => a.installed && a.key === agentKey);
           if (!selectedAgent) throw new Error("The selected agent is not installed on this machine. Choose another agent.");
         }
         const target = is
@@ -725,10 +818,13 @@ export default class Linear extends View {
           this.busy = "";
           return this.say(note, cx);
         }
-        const active = this.launchTarget ?? spaces().find((s) => s.active);
-        const machine = active?.machine ?? null;
+        const machine = execution.machine;
+        // https://github.com/mrolafsson/herdr-linear/blob/v0.14.2/app.go#L468
+        // Configured team repos precede dirs. The guard excludes empty-team
+        // overrides; only Git routing clears the team, never Linear check/start.
+        const repositoryTarget = { ...target, teamKey: "" };
         const res = await step(`Making its worktree on ${machine ?? "this computer"}…`,
-          job({ op: "worktree", target, dirs: [active && place(active), active?.folder].filter(Boolean) }, machine), 4 * 60000);
+          job({ op: "worktree", target: repositoryTarget, dirs: [execution.folder] }, machine), 4 * 60000);
         this.trees[target.branch] = { path: res.path, machine };
         localStorage.setItem("trees", JSON.stringify(this.trees));
         let note = "";
@@ -748,8 +844,8 @@ export default class Linear extends View {
           if (start) return this.say(`${note ? note + ". " : ""}Its worktree already had a space, so no prompt was sent: its agent may be busy.`, cx);
           return this.dismiss();
         }
-        const spec = { folder: res.path };
-        if (machine) spec.machine = machine;
+        // Empty explicitly means this computer; omission inherits focused space.
+        const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
           spec.argv = selectedAgent.run;
           spec.task = this.taskFor?.(fresh) ?? res.prompt;
@@ -881,17 +977,35 @@ export default class Linear extends View {
     if (!title) return this.say("Give it a title first.", cx, true);
     if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
     const description = this.desc.value();
+    const creationAgentKey = this.agentKey;
+    const attaching = Boolean(props()?.attachSpace);
+    const execution = this.launchTarget ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
+    if (!this.demo && !attaching && !execution?.folder) return this.say("Choose a computer and an existing repository first.", cx, true);
     this.busy = `Creating ${title}…`;
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const res = await this.linear({ op: "create", new: { team: f.team.id, title, description, project: f.project ?? "", state: f.state ?? "", priority: f.priority, assignToMe: f.assignToMe } });
+        if (!this.demo && !attaching) {
+          execution.folder = await validateRepository(execution);
+          if (startAfterCreate) await validateWorktreeRouting(execution, this.workspace()?.urlKey ?? "");
+        }
+        let savedDescription = description;
+        if (!this.demo && !attaching) {
+          Object.assign(execution, await identifyExecutionTarget(execution));
+          savedDescription = descriptionWithExecutionTarget(description, execution);
+        }
+        const res = await this.linear({ op: "create", new: { team: f.team.id, title, description: savedDescription, project: f.project ?? "", state: f.state ?? "", priority: f.priority, assignToMe: f.assignToMe } });
+        if (!attaching) this.rememberLaunchTarget(res.issue, execution);
         this.busy = "";
         this.lists.recent = null;
         this.loadAll(cx);
+        this.createdLaunch = startAfterCreate && !attaching && execution
+          ? { key: `${this.ws}/${res.issue.id}`, execution: { ...execution }, agentKey: creationAgentKey } : null;
         this.openIssue(res.issue, cx);
         this.say(res.note, cx);
         this.afterCreate?.(res.issue, cx, startAfterCreate);
+        // A handler that did not start work must not leave a future bypass behind.
+        this.createdLaunch = null;
       } catch (e) {
         this.busy = "";
         this.say(String(e?.message ?? e), cx, true);
