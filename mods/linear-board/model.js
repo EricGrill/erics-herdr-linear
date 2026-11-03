@@ -29,13 +29,23 @@ export function matchIssue(space, issues, links, workspace, allPanes = []) {
 
 const URGENCY = { blocked: 0, done: 1, working: 2, idle: 3 };
 
+export function issueLabel(issue) {
+  const project = issue?.project?.name?.trim();
+  return `${issue.identifier}${project ? ` (${project})` : ""}`;
+}
+
 export function workRecords({ allSpaces, allPanes, allAgents, issues, links, workspace }) {
   return allSpaces.map(space => {
     const ownAgents = allAgents.filter(a => a.space === space.id);
+    const tabs = new Set((space.tabs ?? []).map(t => t.id));
+    const programs = new Map();
+    for (const source of [...ownAgents, ...allPanes.filter(p => p.terminal && tabs.has(p.tab))]) {
+      if (source.program?.agent) programs.set(source.program.key, source.program);
+    }
     const statuses = [space.status, ...ownAgents.map(a => a.status)].filter(Boolean);
     const status = statuses.sort((a, b) => (URGENCY[a] ?? 4) - (URGENCY[b] ?? 4))[0] ?? "idle";
     return {
-      space, agents: ownAgents, status, needs: status === "blocked" || status === "done",
+      space, agents: ownAgents, programs: [...programs.values()], status, needs: status === "blocked" || status === "done",
       folder: folderOf(space, allPanes), issue: matchIssue(space, issues, links, workspace, allPanes),
     };
   }).sort((a, b) => (URGENCY[a.status] ?? 4) - (URGENCY[b.status] ?? 4) || a.space.name.localeCompare(b.space.name));
