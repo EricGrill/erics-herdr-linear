@@ -33,21 +33,19 @@ const boundaries = {
 };
 const cache = new Map();
 async function load(specifier) {
-  if (cache.has(specifier)) return cache.get(specifier);
-  let module;
-  if (boundaries[specifier]) {
-    const values = boundaries[specifier];
-    module = new vm.SyntheticModule(Object.keys(values), function () {
-      for (const [key, value] of Object.entries(values)) this.setExport(key, value);
-    }, { context });
-  } else {
-    module = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
-  }
-  cache.set(specifier, module);
-  await module.link(load);
-  return module;
+  if (!cache.has(specifier)) cache.set(specifier, (async () => {
+    if (boundaries[specifier]) {
+      const values = boundaries[specifier];
+      return new vm.SyntheticModule(Object.keys(values), function () {
+        for (const [key, value] of Object.entries(values)) this.setExport(key, value);
+      }, { context });
+    }
+    return new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
+  })());
+  return cache.get(specifier);
 }
 const module = await load("./main.js");
+await module.link(load);
 await module.evaluate();
 const Board = module.namespace.default;
 const board = new Board();
