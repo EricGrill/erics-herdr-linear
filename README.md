@@ -96,16 +96,14 @@ your machine-local configuration outside this Git checkout.
 
 ## Linear setup
 
-There are two data paths:
+Task dialogs and the sidebar use the configured Linear API key when available, including
+the Doppler fallback below. This lets projects, ticket creation, and Crew share access
+without a separate browser sign-in. Credential values remain inside the shell that sends
+the request; they are never stored in layout preferences.
 
-1. **Issues, projects, ticket creation, and worktrees** use the existing `herdr-linear`
-   sign-in. Use the sign-in action in the Projects/Browse view if needed. The adapter is
-   pinned to backend version **0.14.2** and checks downloaded release archives against
-   upstream checksums.
-2. **Delegate and label enrichment** uses Linear's API. By default, it reads the
-   `LINEAR_API_KEY` environment variable available to the shell Herdr executes. Optional
-   Doppler configuration provides a fallback. This enrichment is separate from the
-   adapter's account sign-in.
+When no API key is available, task dialogs can use the existing `herdr-linear` OAuth
+sign-in. Worktree operations use backend version **0.14.2**, with downloaded release
+archives checked against upstream checksums.
 
 The optional configuration file is:
 

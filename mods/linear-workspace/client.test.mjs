@@ -41,6 +41,11 @@ async function harness(options = {}) {
       return { code: 0, stdout: JSON.stringify({ core }), stderr: "" };
     }
     assert.equal(command, "sh");
+    if (args[1].includes("HERDR_BOARD_QUERY")) {
+      const body = JSON.parse(args[1].split("<<'HERDR_BOARD_QUERY'\n")[1].split("\nHERDR_BOARD_QUERY")[0]);
+      if (!options.apiReply) return { code: 4, stdout: "", stderr: "no Linear API key available" };
+      return { code: 0, stdout: JSON.stringify(await options.apiReply(body)), stderr: "" };
+    }
     if (args[1] !== 'exec "$0" app "$1"') {
       assert.ok(args[1].includes('dest="$HOME/.local/share/herdr-linear/app/$v"'), "only the existing provision boundary is stubbed");
       return { code: 0, stdout: "/fake/herdr-linear", stderr: "" };
@@ -48,7 +53,8 @@ async function harness(options = {}) {
     const request = JSON.parse(args[3]);
     requests.push({ request, on: config?.on ?? null });
     let result;
-    if (request.op === "teams") result = options.teamsReply ? await options.teamsReply() : { teams: options.teams ?? [] };
+    if (request.op === "status") result = options.statusReply ?? { workspaces: [] };
+    else if (request.op === "teams") result = options.teamsReply ? await options.teamsReply() : { teams: options.teams ?? [] };
     else if (request.op === "states") result = { states: [] };
     else if (request.op === "check-start") result = { issue: ticket };
     else if (request.op === "create") {
@@ -69,7 +75,7 @@ async function harness(options = {}) {
   const exportsByModule = {
     "gpui-kit": { View: class View {}, div: dummy, svg: dummy, image: dummy },
     "gpui-base": Object.fromEntries(["v_flex", "h_flex", "InputState", "Input", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
-    "fs/promises": { readFile: async () => "{}", writeFile: async () => {} },
+    "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
     "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, validateRepository: async target => {
       validations.push({ ...target });
       if (options.validationError) throw new Error(options.validationError);
@@ -94,6 +100,11 @@ async function harness(options = {}) {
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
   const link = async specifier => {
+    if (["./api.js", "./auth.js", "./config.js"].includes(specifier)) {
+      const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
+      await real.link(link);
+      return real;
+    }
     if (specifier === "./execution-target.js") {
       const targetModule = new vm.SourceTextModule(targetSource, { context });
       await targetModule.link(link);
@@ -752,4 +763,67 @@ test("attachment project changes do not reset execution placement", async () => 
   h.client.pickTeam(teams[0], h.cx);
   await h.flush();
   assert.equal(h.client.form.project, null);
+});
+
+test("configured key restores task access without an OAuth workspace or cached auth state", async () => {
+  const identities = [];
+  const config = { enrichment: { envKey: "TASK_LINEAR_KEY" } };
+  const apiReply = ({ query }) => {
+    if (query.includes("TaskIdentity")) { identities.push(true); return { data: { organization: { id: "api-workspace", name: "API Workspace", urlKey: "api-example" }, viewer: { id: "viewer" } } }; }
+    assert.match(query, /TaskTeams/);
+    return { data: { teams: { nodes: [{ id: "team", name: "Example" }], pageInfo: { hasNextPage: false } } } };
+  };
+  for (let restart = 0; restart < 2; restart++) {
+    const h = await harness({ config, apiReply });
+    h.client.on = null;
+    h.client.preferredOn = "remote";
+    const [teams] = await Promise.all([h.client.linear({ op: "teams" }), h.client.findLinear()]);
+    assert.equal(teams.teams[0].id, "team");
+    assert.equal(h.client.ws, "api-workspace");
+    assert.equal(h.requests.length, 0, "no OAuth backend used");
+  }
+  assert.equal(identities.length, 2, "one config/identity discovery per instance, even during concurrent startup");
+});
+
+test("failed configured access and retries never enter OAuth or show a sign-in prompt", async () => {
+  let ready = false;
+  const h = await harness({ config: { enrichment: { envKey: "TASK_LINEAR_KEY" } }, apiReply: ({ query }) => {
+    if (!ready) return { errors: [{ message: "API key revoked" }] };
+    if (query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one", urlKey: "example" }, viewer: { id: "viewer" } } };
+    return { data: { teams: { nodes: [], pageInfo: { hasNextPage: false } } } };
+  } });
+  await h.client.start(h.cx);
+  assert.equal(h.client.signedOut, false);
+  assert.match(h.client.err, /API key revoked/);
+  assert.equal(h.client.on, null);
+  await assert.rejects(h.client.linear({ op: "teams" }), /API key revoked/);
+  assert.equal(h.requests.length, 0);
+  ready = true;
+  await h.client.reload(h.cx);
+  assert.equal(h.client.err, "");
+  assert.deepEqual(JSON.parse(JSON.stringify(await h.client.linear({ op: "teams" }))), { teams: [], priorities: ["No priority", "Urgent", "High", "Medium", "Low"] });
+  assert.equal(h.requests.length, 0);
+});
+
+test("configured missing key is an access error while unconfigured users retain OAuth", async () => {
+  const configured = await harness({ config: { enrichment: { envKey: "MISSING_KEY" } } });
+  await configured.client.start(configured.cx);
+  assert.equal(configured.client.signedOut, false);
+  assert.match(configured.client.err, /Configured Linear access/);
+  assert.equal(configured.requests.length, 0);
+  const oauth = await harness({ statusReply: { workspaces: [{ id: "oauth-workspace", name: "OAuth" }] } });
+  await oauth.client.findLinear();
+  assert.equal(oauth.client.ws, "oauth-workspace");
+  assert.equal(oauth.client.api, null);
+  assert.equal(oauth.requests[0].request.op, "status");
+});
+
+test("API create transport failure is never retried through either authentication path", async () => {
+  const h = await harness({ config: { enrichment: { envKey: "TASK_LINEAR_KEY" } }, apiReply: ({ query }) => {
+    if (query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one" }, viewer: { id: "viewer" } } };
+    throw new Error("response lost after write");
+  } });
+  await h.client.findLinear();
+  await assert.rejects(h.client.linear({ op: "create", new: { title: "Task", team: "team-one" } }), /response lost after write/);
+  assert.equal(h.requests.length, 0);
 });

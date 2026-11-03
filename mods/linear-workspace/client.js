@@ -16,6 +16,8 @@ import { View, div } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, InputState, Input, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
 import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
+import { LinearAPI } from "./api.js";
+import { normalizeConfig } from "./config.js";
 import { validateRepository, validateWorktreeRouting } from "./repository.js";
 import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
 import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
@@ -153,7 +155,8 @@ export default class Linear extends View {
     this.flash = this.err = this.busy = "";
     this.workspaces = [];
     this.ws = localStorage.getItem("workspace") ?? "";
-    this.on = localStorage.getItem("on");
+    this.preferredOn = localStorage.getItem("on");
+    this.on = null;
     this.trees = JSON.parse(localStorage.getItem("trees") ?? "{}");
     this.width = 900;
 
@@ -230,8 +233,43 @@ export default class Linear extends View {
 
   // The machine you're signed in to Linear on: the one that answered last,
   // else this one, else each connected one in turn.
-  async findLinear() {
-    const order = [this.on, "", ...machines().filter((m) => m.name && m.layout !== "unavailable").map((m) => m.name)];
+  findLinear() {
+    if (!this.discovery) {
+      this.discovery = this.discoverLinear();
+      const clear = () => { this.discovery = null; };
+      this.discovery.then(clear, clear);
+    }
+    return this.discovery;
+  }
+
+  async discoverLinear() {
+    const previousOn = this.on ?? this.preferredOn;
+    this.on = null;
+    this.api = null;
+    // The layout's configured key is also the task client's identity. The
+    // upstream backend only knows OAuth, so an API key cannot sign it in.
+    const text = await fs.readFile(`${appHome()}/erics-linear.config.json`, "utf8").catch(error => {
+      if (error?.code === "ENOENT" || /no such file|not found|ENOENT/i.test(String(error?.message ?? error))) return "{}";
+      throw error;
+    });
+    const supplied = JSON.parse(text);
+    const config = normalizeConfig(supplied);
+    const configured = Boolean(supplied.enrichment?.envKey || supplied.enrichment?.doppler);
+    const api = new LinearAPI(config);
+    this.api = null;
+    try {
+      const status = await api.status();
+      this.api = api;
+      this.on = "";
+      this.workspaces = status.workspaces;
+      if (!this.workspaces.some(w => w.id === this.ws)) this.ws = this.workspaces[0].id;
+      localStorage.setItem("on", "");
+      localStorage.setItem("workspace", this.ws);
+      return;
+    } catch (error) {
+      if (configured || !error.unavailable) throw new Error(`Configured Linear access: ${error.message}`);
+    }
+    const order = [previousOn, "", ...machines().filter((m) => m.name && m.layout !== "unavailable").map((m) => m.name)];
     const tried = new Set();
     let last;
     for (const m of order) {
@@ -259,11 +297,15 @@ export default class Linear extends View {
   async linear(req) {
     if (this.demo) return ask({ ...req, demo: true }, null);
     if (this.on == null) await this.findLinear();
+    // API writes must never be retried automatically: a lost response may
+    // follow a successful create or update.
+    if (this.api) return this.api.ask({ ...req, workspace: this.ws });
     try {
       return await ask({ ...req, workspace: this.ws }, this.on || null);
     } catch (e) {
       if (e instanceof AppError) throw e;
       await this.findLinear();
+      if (this.api) return this.api.ask({ ...req, workspace: this.ws });
       return ask({ ...req, workspace: this.ws }, this.on || null);
     }
   }
@@ -381,6 +423,7 @@ export default class Linear extends View {
   }
 
   reload(cx) {
+    if (this.signedOut || this.on == null) return this.start(cx);
     if (this.screen === "issue") return this.loadDetail(cx);
     this.loadAll(cx);
   }

@@ -12,6 +12,7 @@ import { normalizeConfig } from "./config.js";
 // replaced. No process starts, no network connection opens, no credential is read.
 const source = await readFile(new URL("./enrich.js", import.meta.url), "utf8");
 const configSource = await readFile(new URL("./config.js", import.meta.url), "utf8");
+const authSource = await readFile(new URL("./auth.js", import.meta.url), "utf8");
 const plain = value => JSON.parse(JSON.stringify(value));
 
 async function load(respond) {
@@ -23,7 +24,12 @@ async function load(respond) {
   };
   const context = vm.createContext({ console });
   const module = new vm.SourceTextModule(source, { context, identifier: "enrich.js" });
-  await module.link(async specifier => {
+  const link = async specifier => {
+    if (specifier === "./auth.js") {
+      const auth = new vm.SourceTextModule(authSource, { context, identifier: "auth.js" });
+      await auth.link(link);
+      return auth;
+    }
     if (specifier === "./config.js") {
       const config = new vm.SourceTextModule(configSource, { context, identifier: "config.js" });
       await config.link(() => { throw new Error("config is pure"); });
@@ -32,7 +38,8 @@ async function load(respond) {
     const stub = new vm.SyntheticModule(["exec"], function () { this.setExport("exec", exec); }, { context });
     await stub.link(() => { throw new Error("unreachable"); });
     return stub;
-  });
+  };
+  await module.link(link);
   await module.evaluate();
   return { api: module.namespace, calls };
 }

@@ -32,7 +32,8 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
   const state = new Map([
     ["erics-linear.config", { attention: { states: ["Blocked"], labels: ["needs-human"] } }],
     ["linear-board.enrich", { rows, on: null, fetchedAt: 100, partial: false, error: null }],
-    ["linear-board.delegate", "Existing filter"],
+    ["linear-workspace.workspace", "workspace-one"],
+    ["linear-board.filters", { "workspace-one": { team: ["DEMO"], crew: ["Existing filter"] } }],
   ]);
   const context = vm.createContext({ console });
   const effect = name => (...args) => { effects.push({ name, args }); };
@@ -40,7 +41,9 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
     "gpui-kit": { div: () => native("div"), svg: () => native("svg"), image: () => native("image") },
     "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {},
       TextView: { markdown: (id, body) => native("markdown").id(id).child(body) } },
-    "./client.js": { default: class {} },
+    "./client.js": { default: class {
+      rememberProject(id, workspace) { effects.push({ name: "rememberProject", id, workspace }); }
+    } },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": {
       spaces: () => [], panes: () => [], agents: () => [], machines: () => [],
@@ -96,8 +99,8 @@ test("Crew renders six zero-space issues, attention first, without changing the 
   assert.match(text(tree), /1 of 6 need attention/);
   assert.match(text(tree), /Labelled needs-human/);
   assert.equal((text(queue).match(/No Herdr space/g) ?? []).length, 6);
-  assert.equal(h.state.get("linear-board.delegate"), "Existing filter");
-  assert.equal(h.effects.filter(e => e.name === "setShared" && e.key === "linear-board.delegate").length, 0);
+  assert.deepEqual(h.state.get("linear-board.filters"), { "workspace-one": { team: ["DEMO"], crew: ["Existing filter"] } });
+  assert.equal(h.effects.filter(e => e.name === "setShared" && e.key === "linear-board.filters").length, 0);
   assert.ok(queue.attributes.overflow_y_scrollbar);
   assert.deepEqual(queue.attributes.min_h, [0]);
   assert.ok(byId(tree, "crew-agents").attributes.overflow_y_scrollbar);
@@ -122,6 +125,7 @@ test("issue inspection renders detail without a workspace and exposes an existin
   const linked = h.board.crewInspector([record]);
   assert.match(text(linked), /working on local/);
   h.click(linked, "crew-workspace");
+  assert.equal(h.effects.find(e => e.name === "rememberProject")?.id, row.project.id);
   assert.equal(h.effects.at(-1).args[0], "space.select");
   assert.equal(h.effects.at(-1).args[1].id, "space-1");
 });

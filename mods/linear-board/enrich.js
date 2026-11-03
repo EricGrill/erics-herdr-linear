@@ -10,7 +10,7 @@
 // the shell that uses it and is
 // written to a 0600 curl config rather than passed as an argument, so it never appears in
 // any process's argv. Temporary files are removed when the shell exits.
-import { exec } from "herdr";
+import { request } from "./auth.js";
 import { normalizeConfig } from "./config.js";
 
 // Requests are paginated. A bounded refresh reports partial results rather than
@@ -34,50 +34,6 @@ const QUERY = `query BoardEnrichment($after: String) {
     }
   }
 }`;
-
-const SCRIPT = String.raw`
-set -eu
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-env_name=$1
-doppler_project=$2
-doppler_config=$3
-shift 3
-key=$(printenv "$env_name" 2>/dev/null) || key=""
-if [ -z "$key" ] && [ -n "$doppler_project" ]; then
-  command -v doppler >/dev/null 2>&1 || { echo "doppler is not installed" >&2; exit 3; }
-  for name in "$@"; do
-    key=$(doppler secrets get "$name" --project "$doppler_project" --config "$doppler_config" --plain 2>/dev/null) || key=""
-    [ -n "$key" ] && break
-  done
-fi
-[ -n "$key" ] || { echo "no Linear API key available; set the configured environment variable or Doppler fallback" >&2; exit 4; }
-case "$key" in
-  *'
-'*|*"$(printf '\r')"*) echo "Linear API key must not contain a newline" >&2; exit 4 ;;
-esac
-umask 077
-dir=$(mktemp -d) || exit 3
-trap 'rm -rf "$dir"' EXIT
-escaped_key=$(printf '%s' "$key" | sed 's/\\/\\\\/g; s/"/\\"/g')
-printf 'header = "Authorization: %s"\n' "$escaped_key" > "$dir/curlrc"
-cat > "$dir/body" <<'HERDR_BOARD_QUERY'
-%BODY%
-HERDR_BOARD_QUERY
-curl -sS -m 30 --config "$dir/curlrc" \
-  -H 'Content-Type: application/json' \
-  --data-binary @"$dir/body" \
-  https://api.linear.app/graphql
-`;
-
-function script(query, variables) {
-  const body = JSON.stringify({ query, variables });
-  // The heredoc is quoted, so the only thing that could break out is the delimiter itself.
-  if (body.includes("HERDR_BOARD_QUERY")) throw new Error("query body collided with its heredoc delimiter");
-  // Replacer functions, not strings: a "$&" or "$'" inside the JSON body would otherwise
-  // be read as a replacement pattern and corrupt the query.
-  return SCRIPT
-    .replace("%BODY%", () => body);
-}
 
 // Completeness must be stated by Linear, never inferred from missing metadata.
 function pagination(page) {
@@ -163,23 +119,6 @@ export function delegateCounts(rows) {
     counts.get(name).issues.push(row);
   }
   return [...counts.values()].sort((a, b) => b.issues.length - a.issues.length || a.name.localeCompare(b.name));
-}
-
-/** One GraphQL request through the credential-safe shell. Never throws.
- *  Returns { text } on a completed HTTP exchange, or { error }. */
-async function request({ on = null, auth, query, variables }) {
-  let result;
-  try {
-    // The key names are positional arguments ("$@"); the key itself is never one.
-    result = await exec("sh", ["-c", script(query, variables), "sh", auth.envKey,
-      auth.doppler?.project ?? "", auth.doppler?.config ?? "", ...(auth.doppler?.keyNames ?? [])], { on });
-  } catch (e) {
-    return { error: String(e?.message ?? e) };
-  }
-  if (result.code !== 0) {
-    return { error: String(result.stderr ?? "").trim().split("\n").pop() || `curl exit ${result.code}` };
-  }
-  return { text: result.stdout };
 }
 
 function authOf(config) {
