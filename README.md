@@ -17,11 +17,31 @@ The layout ID is `erics-linear`; its window header reads **Erics Linear**.
 - Shows Linear delegates in Crew without treating a delegated ticket as a running agent.
 - Creates a ticket before starting a task in its worktree, or attaches an existing space
   to a ticket without moving its files or changing its branch.
+- Lets you choose the execution computer, then an existing Git repository under that
+  computer's `~/code`, instead of using a local-only folder picker.
 - Retains Herdr's terminal tabs, pane controls, Files, Changes, and status bar.
 
 The grouping is a view of work, not a workflow automation. Finishing an agent run does
 not mark a Linear ticket Done. Commands typed directly into a terminal can still start
 unlinked work; the issue header identifies spaces that have no ticket.
+
+## Choose where a task runs
+
+In New task, select **Computer**, then **Repository**. The repository list comes from
+the selected computer's own `~/code`; it does not create or clone a missing repository.
+Installed-agent choices are refreshed for that computer. Changing computers clears
+stale repository and agent choices, and unavailable computers cannot be used.
+
+Both **Create issue** and **Create & start** validate the existing repository. Queued
+issues retain their selected execution target. Starting work may create the issue's
+worktree inside that existing repository; the base repository must already exist.
+An owned JSON block in the issue description records the computer's stable Herdr
+identity and repository path, so another client can resolve the same physical target.
+It contains placement metadata, not credentials.
+
+Choosing **This computer** explicitly targets the local machine even while a remote
+space is focused. A saved target that cannot be resolved must be chosen explicitly;
+the launcher must not silently substitute a different computer.
 
 ## Install
 

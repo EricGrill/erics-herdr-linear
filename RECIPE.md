@@ -67,8 +67,13 @@ Agents opens the scrollable live Herdr agent dialog, preserving status grouping,
 machine names, subagent trees, pinning, and sort controls. Selecting an agent closes the
 dialog and focuses its terminal. Escape and the popup shortcut close it.
 
-New task can create only a ticket or create and start it. Starting shows the repository,
-machine, and installed-agent choice first, checks ticket eligibility and agent
+New task can create only a ticket or create and start it. Choose the computer first,
+then an existing Git repository under that computer's own `~/code`. Discovery and
+validation run on that target; missing repositories are not created or cloned. Changing
+the computer refreshes the repository and installed-agent choices and discards stale
+responses. Save the selected physical computer and repository with a queued ticket so
+another client cannot reinterpret the origin's local computer as its own.
+Starting shows the repository, machine, and installed-agent choice, checks eligibility and agent
 availability, prepares a worktree, and opens a space with ticket context. Reopening a
 worktree must still include that context. Existing open spaces are selected without
 silently prompting their running agent. New follow-up references the source ticket in
