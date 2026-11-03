@@ -1,0 +1,22 @@
+{
+  "enrichment": {
+    "enabled": true,
+    "envKey": "LINEAR_API_KEY"
+  },
+  "attention": {
+    "labels": [
+      "needs-human",
+      "agent:review-needed",
+      "agent:check-result",
+      "agent:stalled",
+      "reopened:not-done"
+    ],
+    "states": [
+      "needs human",
+      "in review",
+      "blocked",
+      "awaiting review",
+      "ready for review"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "erics-herdr-linear",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A spaces-first Herdr layout for Linear work, with portable installs and updates.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --experimental-vm-modules --test mods/linear-board/*.test.mjs mods/linear-workspace/*.test.mjs",
+    "test:installer": "python3 -m unittest discover -s tests",
+    "check": "python3 scripts/check.py"
+  },
+  "engines": { "node": ">=22" }
+}

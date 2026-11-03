@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" width="320" height="200" role="img" aria-label="Erics Linear: spaces grouped by Needs you, Done, Working and Idle; Projects, Crew and Agents open from the top">
+<rect width="320" height="200" fill="#f6f6f5"/>
+<rect width="110" height="200" fill="#ececeb"/>
+<g font-family="Arial,sans-serif" font-size="6" fill="#414141">
+<text x="8" y="12">Erics Linear</text>
+<text x="8" y="27">Projects</text><text x="45" y="27">Crew</text><text x="73" y="27">Agents</text>
+<rect x="8" y="34" width="94" height="12" rx="3" fill="#fff"/>
+<text x="13" y="42" fill="#888">Search spaces…</text>
+<text x="8" y="60" fill="#c44d3b">NEEDS YOU</text>
+<rect x="8" y="65" width="94" height="20" rx="3" fill="#f3deda"/>
+<text x="13" y="74">Review implementation</text><text x="13" y="81" fill="#c44d3b">Needs your attention · local</text>
+<text x="8" y="98" fill="#4673c2">DONE</text>
+<text x="13" y="110">Add notifications</text><text x="13" y="118" fill="#4673c2">Agent finished · local</text>
+<text x="8" y="136" fill="#a67825">WORKING</text>
+<text x="13" y="148">Fix scheduled research</text><text x="13" y="156" fill="#a67825">Working · local</text>
+<text x="8" y="175" fill="#888">IDLE</text><text x="13" y="186">Other workspaces</text>
+<text x="120" y="12">CHA-123 · Issue context</text>
+</g>
+<path d="M110 21h210M110 39h210" stroke="#d6d6d2"/>
+<rect x="118" y="25" width="36" height="10" rx="3" fill="#e0e0dd"/>
+<rect x="118" y="46" width="194" height="143" rx="5" fill="#fff" stroke="#d6d6d2"/>
+<g fill="#c0c0bc"><rect x="129" y="58" width="56" height="4" rx="2"/><rect x="129" y="75" width="149" height="3" rx="1.5"/><rect x="129" y="84" width="133" height="3" rx="1.5"/><rect x="129" y="93" width="142" height="3" rx="1.5"/></g>
+</svg>

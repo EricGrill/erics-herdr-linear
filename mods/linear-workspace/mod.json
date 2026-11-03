@@ -1,0 +1,16 @@
+{
+  "place": "none",
+  "title": "Linear Workspace",
+  "overlay": {
+    "kind": "popup",
+    "at": "top",
+    "offset": 40,
+    "width": 0.8,
+    "height": 0.8
+  },
+  "cloned_from": {
+    "name": "linear",
+    "version": "0.1.12"
+  },
+  "focusable": true
+}
