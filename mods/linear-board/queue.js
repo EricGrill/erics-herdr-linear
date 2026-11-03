@@ -106,6 +106,7 @@ export function age(value, now = Date.now()) {
 /** The plain-language state of a queue read, so the UI never shows a partial or failed
  *  read as if it were the full queue. */
 export function queueStatus(queue) {
+  if (queue?.waiting) return { kind: "waiting", text: "Waiting for the Herdr sidebar to connect to Linear; the queue loads as soon as it does." };
   if (!queue || queue.loading && !queue.rows?.length) return { kind: "loading", text: "Reading this agent's queue from Linear…" };
   if (queue.loading) return { kind: "refreshing", text: `Refreshing from Linear; showing the previous ${queue.rows.length} until it finishes.` };
   if (queue.error) {
@@ -143,4 +144,37 @@ export function batchSummary(batch, destination) {
   if (batch.ok) return `Moved ${n} issue${n === 1 ? "" : "s"} to ${destination}; Linear confirmed each one.`;
   if (!batch.succeeded) return `None of the ${n} moved to ${destination}. ${batch.failed.length} failed and stay selected for retry.`;
   return `${batch.succeeded} of ${n} moved to ${destination}; ${batch.failed.length} failed and stay selected for retry.`;
+}
+
+/** The Linear connection Crew reads through: the layout config and the machine the
+ *  sidebar runs its Linear calls from. Both are published by the sidebar; until they
+ *  are, this is null and Crew waits rather than reading with defaults from the wrong
+ *  machine. The sidebar publishes `on` (null meaning this machine) with every enrichment
+ *  result, so its presence, not its value, is the signal. */
+export function crewContext(config, published) {
+  if (!config || typeof config !== "object") return null;
+  if (!published || typeof published !== "object" || !Object.prototype.hasOwnProperty.call(published, "on")) return null;
+  return { on: published.on ?? null, config };
+}
+
+/** Who the picked issues can be moved to. Agents from Linear's agent list always; when
+ *  that list could not be read, also the agents seen as delegates on open issues (a
+ *  delegate is by definition a Linear agent identity, so its id is a valid target).
+ *  Never the source agent, and never an entry without a Linear id. */
+export function reassignChoices(roster = [], { sourceId = null, listFailed = false } = {}) {
+  return roster.filter(e => e.id && e.id !== sourceId && (e.eligible || listFailed));
+}
+
+/** Last-request-wins bookkeeping. `begin(key)` returns a check that stays true only
+ *  while no newer request for the same key has begun, so a slow, older read can never
+ *  overwrite a newer one (for example the read issued after a reassignment). */
+export function requestGate() {
+  const seq = new Map();
+  return {
+    begin(key) {
+      const n = (seq.get(key) ?? 0) + 1;
+      seq.set(key, n);
+      return () => seq.get(key) === n;
+    },
+  };
 }

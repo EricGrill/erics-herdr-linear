@@ -9,7 +9,8 @@ import { tint, icon, stateIcon, MONO } from "./look.js";
 import { issueKey, folderOf, matchIssue, workRecords, taskContext } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue } from "./enrich.js";
-import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary } from "./queue.js";
+import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
+  crewContext, reassignChoices, requestGate } from "./queue.js";
 import { normalizeConfig } from "./config.js";
 
 // Shared with the linear-workspace layout on purpose: an issue/space link made in one
@@ -21,6 +22,9 @@ const PREFS = "linear-workspace.agents", ACTIVE = "linear-workspace.workspace";
 const ENRICH = "linear-board.enrich", FILTER = "linear-board.delegate", TEAMS = "linear-board.teams";
 const CONFIG = "erics-linear.config";
 const ENRICH_MS = 60000;
+// Crew checks this often whether the sidebar has published its Linear connection, and
+// retries a failed agent list no sooner than CREW_RETRY_MS after the last attempt.
+const CREW_TICK_MS = 2000, CREW_RETRY_MS = 30000;
 
 // Roles that render from shared state alone and never load a Linear list themselves.
 const PASSIVE = ["header", "launcher", "spaces", "issue", "agent", "crew"];
@@ -92,12 +96,12 @@ export default class LinearWorkspace extends LinearClient {
         const previous = sharedEnrich();
         if (result.error && !result.rows.length) {
           // Keep the rows we had; only the error line changes.
-          setShared(ENRICH, { ...previous, error: result.error });
+          setShared(ENRICH, { ...previous, error: result.error, on: this.on || null });
         } else {
           setShared(ENRICH, { rows: result.rows, error: result.error, fetchedAt: result.fetchedAt, partial: result.partial, on: this.on || null });
         }
       } catch (error) {
-        setShared(ENRICH, { ...sharedEnrich(), error: `Layout config: ${error?.message ?? error}` });
+        setShared(ENRICH, { ...sharedEnrich(), error: `Layout config: ${error?.message ?? error}`, on: this.on || null });
       } finally { this.enriching = false; cx.notify(); }
     });
   }
@@ -872,26 +876,49 @@ export default class LinearWorkspace extends LinearClient {
   crewInit(cx) {
     this.crew = {
       agent: null,          // { id, name } selected on the left
-      queues: {},           // agent id -> { rows, complete, error, loading, fetchedAt }
-      agents: { list: [], error: null, loading: true, complete: false },
+      queues: {},           // agent id -> { rows, complete, error, loading, waiting, fetchedAt }
+      agents: { list: [], error: null, loading: false, waiting: true, complete: false, key: null, at: 0 },
       issueId: null,        // the issue open in the inspector
-      details: {},          // issue id -> { issue, error, loading }
+      details: {},          // issue id -> { issue, error, loading, waiting, row }
       picked: new Set(),    // issue ids selected for reassignment
       reassign: null,       // { target: agent|null } while the reassign panel is open
       busy: "",
       result: null,         // { text, ok, failed: [{identifier, error}] }
+      gate: requestGate(),  // last request wins, per agent list / queue / issue
     };
-    this.crewLoadAgents(cx);
+    // A kept window can start before the sidebar has published the layout config and the
+    // machine Linear runs on. The tick waits for both, loads the agent list once they are
+    // there (and again if they change), retries a failed list, and runs any read that was
+    // asked for while waiting.
+    this.crewTick(cx);
+    cx.timer.every(CREW_TICK_MS, cx => this.crewTick(cx));
   }
 
-  crewLinear() { return { on: sharedEnrich().on ?? null, config: shared(CONFIG) ?? {} }; }
+  /** The published Linear connection, or null while the sidebar has not published it. */
+  crewLinear() { return crewContext(shared(CONFIG), shared(ENRICH)); }
+
+  crewTick(cx) {
+    const crew = this.crew, linear = this.crewLinear();
+    if (!linear) return;
+    const key = JSON.stringify(linear), a = crew.agents;
+    const retry = Boolean(a.error) && Date.now() - a.at >= CREW_RETRY_MS;
+    let started = false;
+    if (!a.loading && (a.waiting || a.key !== key || retry)) { this.crewLoadAgents(cx); started = true; }
+    for (const [id, q] of Object.entries(crew.queues)) if (q.waiting) { this.crewLoadQueue(id, cx); started = true; }
+    const d = crew.issueId ? crew.details[crew.issueId] : null;
+    if (d?.waiting && d.row) { this.crewInspect(d.row, cx); started = true; }
+    if (started) cx.notify();
+  }
 
   crewLoadAgents(cx) {
-    const crew = this.crew;
-    crew.agents = { ...crew.agents, loading: true };
+    const crew = this.crew, linear = this.crewLinear();
+    if (!linear) { crew.agents = { ...crew.agents, loading: false, waiting: true }; return; }
+    const key = JSON.stringify(linear), current = crew.gate.begin("agents");
+    crew.agents = { ...crew.agents, loading: true, waiting: false, key, at: Date.now() };
     cx.spawn(async cx => {
-      const res = await fetchAgents(this.crewLinear());
-      crew.agents = { list: res.agents, error: res.error, loading: false, complete: res.complete };
+      const res = await fetchAgents(linear);
+      if (!current()) return;
+      crew.agents = { list: res.agents, error: res.error, loading: false, waiting: false, complete: res.complete, key, at: Date.now() };
       cx.notify();
     });
   }
@@ -910,13 +937,19 @@ export default class LinearWorkspace extends LinearClient {
   }
 
   crewLoadQueue(id, cx) {
-    const crew = this.crew;
+    const crew = this.crew, linear = this.crewLinear();
     if (!id) return;
     const previous = crew.queues[id];
-    crew.queues[id] = { rows: previous?.rows ?? [], complete: false, error: null, loading: true, fetchedAt: previous?.fetchedAt ?? null };
+    const base = { rows: previous?.rows ?? [], complete: false, error: null, loading: true, fetchedAt: previous?.fetchedAt ?? null };
+    if (!linear) { crew.queues[id] = { ...base, waiting: true }; return; }
+    // Only the newest read for this agent may land: the read issued after a reassignment
+    // must not be overwritten by an older one still in flight.
+    const current = crew.gate.begin(`queue:${id}`);
+    crew.queues[id] = { ...base, waiting: false };
     cx.spawn(async cx => {
-      const res = await fetchQueue({ ...this.crewLinear(), delegateId: id });
-      crew.queues[id] = { rows: res.rows, complete: res.complete, error: res.error, loading: false, fetchedAt: res.fetchedAt };
+      const res = await fetchQueue({ ...linear, delegateId: id });
+      if (!current()) return;
+      crew.queues[id] = { rows: res.rows, complete: res.complete, error: res.error, loading: false, waiting: false, fetchedAt: res.fetchedAt };
       // An issue that left the queue can no longer be picked from it.
       const ids = new Set(res.rows.map(r => r.id));
       if (crew.agent?.id === id) crew.picked = new Set([...crew.picked].filter(x => ids.has(x)));
@@ -925,13 +958,17 @@ export default class LinearWorkspace extends LinearClient {
   }
 
   crewInspect(row, cx) {
-    const crew = this.crew;
+    const crew = this.crew, linear = this.crewLinear();
     crew.issueId = row.id;
-    crew.details[row.id] = { issue: crew.details[row.id]?.issue ?? null, error: null, loading: true, row };
+    const base = { issue: crew.details[row.id]?.issue ?? null, error: null, loading: true, row };
+    if (!linear) { crew.details[row.id] = { ...base, waiting: true }; cx.notify(); return; }
+    const current = crew.gate.begin(`issue:${row.id}`);
+    crew.details[row.id] = { ...base, waiting: false };
     cx.notify();
     cx.spawn(async cx => {
-      const res = await fetchIssueDetail({ ...this.crewLinear(), id: row.id });
-      crew.details[row.id] = { issue: res.issue, error: res.error, loading: false, row };
+      const res = await fetchIssueDetail({ ...linear, id: row.id });
+      if (!current()) return;
+      crew.details[row.id] = { issue: res.issue, error: res.error, loading: false, waiting: false, row };
       cx.notify();
     });
   }
@@ -954,13 +991,12 @@ export default class LinearWorkspace extends LinearClient {
    *  stay picked so the same button retries them. Nothing here touches a terminal: a
    *  running agent keeps running on its old ticket context. */
   crewApplyReassign(rows, cx) {
-    const crew = this.crew, target = crew.reassign?.target, source = crew.agent;
-    if (crew.busy || !target?.id || !rows.length) return;
+    const crew = this.crew, target = crew.reassign?.target, source = crew.agent, linear = this.crewLinear();
+    if (crew.busy || !target?.id || !rows.length || !linear) return;
     crew.busy = `Reassigning ${rows.length} issue${rows.length === 1 ? "" : "s"} to ${target.name}…`;
     crew.result = null;
     cx.notify();
     cx.spawn(async cx => {
-      const linear = this.crewLinear();
       const batch = await reassignBatch(rows, row => reassignIssue({ ...linear, id: row.id, delegateId: target.id }));
       crew.picked = new Set(batch.failed.map(f => f.id));
       crew.result = {
@@ -1021,12 +1057,14 @@ export default class LinearWorkspace extends LinearClient {
   crewAgentList(roster, records, enrichment) {
     const t = theme(), crew = this.crew;
     return v_flex().id("crew-agents").w(230).flex_none().h_full().min_h(0).overflow_y_scrollbar().gap(2)
+      .when(crew.agents.waiting, el => el.child(div().py(8).text_size(11).text_color(t.muted).line_height(1.4)
+        .child(enrichment.error ? `Waiting for the Herdr sidebar to connect to Linear: ${enrichment.error}` : "Waiting for the Herdr sidebar to connect to Linear…")))
       .when(crew.agents.loading && !roster.length, el => el.child(div().py(8).text_size(11).text_color(t.muted).child("Reading agents from Linear…")))
       .when(Boolean(crew.agents.error), el => el.child(div().py(4).text_size(10.5).text_color(t.blocked).line_height(1.4)
         .child(`Agent list unavailable: ${crew.agents.error}. Only agents with open work are shown.`)))
       .when(!crew.agents.loading && !crew.agents.error && !crew.agents.complete && crew.agents.list.length > 0, el => el.child(div().py(4).text_size(10.5).text_color(t.muted)
         .child("Agent list is incomplete; Linear has more.")))
-      .when(!crew.agents.loading && !roster.length, el => el.child(div().py(8).text_size(11).text_color(t.muted)
+      .when(!crew.agents.loading && !crew.agents.waiting && !roster.length, el => el.child(div().py(8).text_size(11).text_color(t.muted)
         .child(enrichment.fetchedAt || crew.agents.error ? "No Linear agents found." : "Reading delegates from Linear…")))
       .children(roster.map((entry, i) => {
         const running = entry.issues.filter(r => herdrActivity(r.identifier, records).records.length).length;
@@ -1119,7 +1157,7 @@ export default class LinearWorkspace extends LinearClient {
   crewReassignPanel(picked, records, roster) {
     const t = theme(), crew = this.crew, source = crew.agent, target = crew.reassign.target;
     // Only Linear agent identities with an id can be delegated to; local program names never.
-    const choices = roster.filter(e => e.id && e.eligible && e.id !== source?.id);
+    const choices = reassignChoices(roster, { sourceId: source?.id ?? null, listFailed: Boolean(crew.agents.error) });
     const running = picked.map(r => ({ row: r, live: herdrActivity(r.identifier, records) })).filter(x => x.live.records.length);
     const n = picked.length;
     return v_flex().id("crew-reassign").flex_none().max_h(260).min_h(0).overflow_y_scrollbar().p(8).gap(6).rounded(6).bg(t.raised)
@@ -1128,7 +1166,7 @@ export default class LinearWorkspace extends LinearClient {
       .when(n <= 6, el => el.child(div().text_size(10.5).font_family(MONO).text_color(t.muted).child(picked.map(r => r.identifier).join(", "))))
       .when(Boolean(crew.agents.error), el => el.child(div().text_size(10.5).text_color(t.blocked)
         .child("Linear's agent list could not be read, so only agents seen on open issues are offered.")))
-      .when(!choices.length, el => el.child(div().text_size(11).text_color(t.muted).child(crew.agents.loading ? "Reading agents from Linear…" : "No other Linear agent is available.")))
+      .when(!choices.length, el => el.child(div().text_size(11).text_color(t.muted).child(crew.agents.loading || crew.agents.waiting ? "Reading agents from Linear…" : "No other Linear agent is available.")))
       .child(h_flex().gap(5).flex_wrap()
         .children(choices.map((e, i) => this.button(`crew-dest-${i}`, `${e.name} · ${e.total}`, cx => { crew.reassign = { target: { id: e.id, name: e.name } }; cx.notify(); },
           { primary: target?.id === e.id, enabled: !crew.busy }))))
@@ -1138,7 +1176,7 @@ export default class LinearWorkspace extends LinearClient {
         .child(`Running in Herdr: ${running.map(x => `${x.row.identifier} (${x.live.summary})`).join("; ")}. Those sessions keep running; nothing is stopped, restarted or told about the move.`)))
       .child(h_flex().gap(6)
         .child(this.button("crew-apply", target ? `Move ${n} to ${target.name}` : "Choose an agent", cx => this.crewApplyReassign(picked, cx),
-          { primary: true, enabled: Boolean(target) && !crew.busy }))
+          { primary: true, enabled: Boolean(target) && !crew.busy && Boolean(this.crewLinear()) }))
         .child(this.button("crew-cancel", "Cancel", cx => { crew.reassign = null; cx.notify(); }, { enabled: !crew.busy })));
   }
 

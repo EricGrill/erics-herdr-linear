@@ -4,6 +4,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import {
   attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
+  crewContext, reassignChoices, requestGate,
 } from "./queue.js";
 import { normalizeConfig } from "./config.js";
 
@@ -313,4 +314,69 @@ test("Crew's reassignment path sends no terminal commands and never filters Spac
   const select = crew.slice(crew.indexOf("  crewSelectAgent("), crew.indexOf("  crewLoadQueue("));
   assert.doesNotMatch(select, /FILTER|applyFilter|setDelegateFilter/, "selecting an agent must leave Spaces alone");
   assert.match(main, /if \(this\.role === "crew"\) return this\.crewWindow\(\);/);
+});
+
+// ---- review round 1: connection readiness, fallback destinations, stale reads -----------
+
+test("Crew waits for the sidebar's config and Linear machine instead of reading with defaults", () => {
+  assert.equal(crewContext(undefined, undefined), null, "nothing published yet");
+  assert.equal(crewContext({ enrichment: {} }, undefined), null, "config without the machine");
+  assert.equal(crewContext({ enrichment: {} }, { rows: [], error: null }), null, "enrichment without `on` is not a connection");
+  assert.equal(crewContext(undefined, { on: "maul" }), null, "machine without the config");
+  assert.deepEqual(crewContext({ a: 1 }, { on: "maul", rows: [] }), { on: "maul", config: { a: 1 } });
+  assert.deepEqual(crewContext({ a: 1 }, { on: null, rows: [] }), { on: null, config: { a: 1 } }, "null means this machine and is a valid answer");
+  assert.equal(queueStatus({ rows: [], loading: true, waiting: true }).kind, "waiting");
+});
+
+test("the sidebar publishes the Linear machine on every enrichment outcome, and Crew retries", async () => {
+  const main = await readFile(new URL("./main.js", import.meta.url), "utf8");
+  const enrich = main.slice(main.indexOf("  startEnrich(cx) {"), main.indexOf("  loadTeams(cx) {"));
+  const writes = enrich.match(/setShared\(ENRICH, [^;]+;/g) ?? [];
+  assert.equal(writes.length, 3);
+  for (const w of writes) assert.match(w, /on: this\.on \|\| null/, w);
+  const init = main.slice(main.indexOf("  crewInit(cx) {"), main.indexOf("  crewLoadAgents(cx) {"));
+  assert.match(init, /cx\.timer\.every\(CREW_TICK_MS/, "a kept window must keep checking, not load once at startup");
+  assert.match(init, /a\.key !== key/, "a changed connection reloads the agent list");
+  assert.match(init, /CREW_RETRY_MS/, "a failed agent list is retried");
+});
+
+test("when the agent list fails, the delegates seen on issues are offered as destinations", () => {
+  const roster = crewRoster({
+    agents: [],
+    rows: [
+      { id: "1", identifier: "CHA-1", delegate: { id: "agent-data", name: "Data" }, state: { name: "Todo" }, labels: [] },
+      { id: "2", identifier: "CHA-2", delegate: { id: "agent-spock", name: "Spock" }, state: { name: "Todo" }, labels: [] },
+      { id: "3", identifier: "CHA-3", delegate: { name: "local-codex" }, state: { name: "Todo" }, labels: [] },
+    ],
+  });
+  assert.deepEqual(reassignChoices(roster, { sourceId: "agent-data", listFailed: false }), [], "a working list is the only source");
+  assert.deepEqual(reassignChoices(roster, { sourceId: "agent-data", listFailed: true }).map(e => e.name), ["Spock"],
+    "seen delegates with an id, never the source, never a nameless id");
+  const listed = crewRoster({ agents: [{ id: "agent-r2", name: "R2-D2" }, { id: "agent-data", name: "Data" }], rows: [] });
+  assert.deepEqual(reassignChoices(listed, { sourceId: "agent-data" }).map(e => e.name), ["R2-D2"]);
+});
+
+test("an older queue read cannot overwrite the read issued after a reassignment", async () => {
+  const gate = requestGate();
+  const queue = {};
+  const load = (rows, delay) => {
+    const current = gate.begin("queue:data");
+    return new Promise(r => setTimeout(r, delay)).then(() => { if (current()) queue.rows = rows; });
+  };
+  const before = load(["CHA-1", "CHA-2"], 30);   // started before the move, slow
+  const after = load(["CHA-2"], 5);              // issued after the move, fast
+  await Promise.all([before, after]);
+  assert.deepEqual(queue.rows, ["CHA-2"]);
+  const other = gate.begin("queue:spock");
+  gate.begin("queue:data");
+  assert.equal(other(), true, "keys are independent");
+});
+
+test("every Crew read is gated so only the newest result lands", async () => {
+  const main = await readFile(new URL("./main.js", import.meta.url), "utf8");
+  for (const fn of ["crewLoadAgents", "crewLoadQueue", "crewInspect"]) {
+    const body = main.slice(main.indexOf(`  ${fn}(`), main.indexOf("\n  }\n", main.indexOf(`  ${fn}(`)));
+    assert.match(body, /crew\.gate\.begin\(/, fn);
+    assert.match(body, /if \(!current\(\)\) return;/, fn);
+  }
 });
