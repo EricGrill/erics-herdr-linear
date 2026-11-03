@@ -14,7 +14,8 @@ The layout ID is `erics-linear`; its window header reads **Erics Linear**.
 - Shows each space's Linear ticket and machine. Click a space to return to its terminal.
 - Keeps the full project tree in a separate popup, with search and task creation.
 - Shows live Herdr agents in a scrollable popup, including remote agents and subagents.
-- Shows Linear delegates in Crew without treating a delegated ticket as a running agent.
+- Shows each Linear agent's full open issue queue in Crew, with attention reasons, issue
+  inspection and verified reassignment, without treating a delegated ticket as a running agent.
 - Creates a ticket before starting a task in its worktree, or attaches an existing space
   to a ticket without moving its files or changing its branch.
 - Lets you choose the execution computer, then an existing Git repository under that

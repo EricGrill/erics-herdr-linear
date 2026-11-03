@@ -58,10 +58,28 @@ rows, New task, and Browse. Names containing `A · B` can fold under a synthetic
 with leaf B. Expanding a project fetches its issues; loaded open projects refresh. Choose
 a running issue to return to its space. Keep the project count inside this popup.
 
-Crew opens a movable, kept window showing Linear delegates, their open ticket counts,
-attention counts, and live-work counts. Selecting a delegate filters the spaces/project
-views. Delegation alone is not proof that an agent is running. The clear action removes
-the filter.
+Crew opens a movable, kept two-column window: every Linear agent identity on the left
+(including agents with nothing delegated), with open and needs-attention counts shown
+separately, and the selected agent's complete open delegated queue on the right, read
+from Linear by delegate whether or not any issue has a Herdr space. Selecting an agent
+changes only the Crew view; it never filters the main Spaces list. Issues needing
+attention (by the configured state and label rules) come first with their reason; open
+blockers are shown as context. Herdr activity is a separate column, and "No Herdr space"
+is a normal state. Loading, empty, error and incomplete (paginated or failed) reads are
+labelled; a partial read is never shown as the whole queue.
+Nested label, blocker and attachment reads are bounded to keep queries within Linear's
+complexity limit. Missing context is identified explicitly, with the full Linear issue
+available from the inspector. Attention counts are lower bounds when labels are incomplete.
+
+Selecting an issue opens an inspector with its description, state, labels, blockers,
+linked pull requests, the Linear link, and Open workspace when a space exists. One or
+several issues can be reassigned to another Linear agent: the panel names the count,
+source and destination, and any running Herdr sessions. Only the delegate is written;
+each issue is read back from Linear to confirm the new delegate and that the assignee,
+state, project and priority did not change. Failures are listed per issue and stay
+selected for retry, including after a failed refresh. Destinations must be active Linear
+app users with assignment capability. Reassigning sends no Herdr terminal commands;
+running Herdr sessions continue. Linear may separately trigger its own agent integrations.
 
 Agents opens the scrollable live Herdr agent dialog, preserving status grouping, remote
 machine names, subagent trees, pinning, and sort controls. Selecting an agent closes the

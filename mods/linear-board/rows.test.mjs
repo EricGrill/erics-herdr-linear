@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 // Exercise the real row builders; only native elements and app boundaries are synthetic.
 // No Linear calls, live commands, credentials or agents are used.
@@ -21,7 +21,7 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
-  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {} },
+  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {}, TextView: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
@@ -32,7 +32,7 @@ const boundaries = {
   },
 };
 const cache = new Map();
-async function load(specifier) {
+function load(specifier) {
   if (cache.has(specifier)) return cache.get(specifier);
   let module;
   if (boundaries[specifier]) {
@@ -41,13 +41,13 @@ async function load(specifier) {
       for (const [key, value] of Object.entries(values)) this.setExport(key, value);
     }, { context });
   } else {
-    module = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
+    module = new vm.SourceTextModule(readFileSync(new URL(specifier, import.meta.url), "utf8"), { context });
   }
   cache.set(specifier, module);
-  await module.link(load);
   return module;
 }
-const module = await load("./main.js");
+const module = load("./main.js");
+await module.link(load);
 await module.evaluate();
 const Board = module.namespace.default;
 const board = new Board();
