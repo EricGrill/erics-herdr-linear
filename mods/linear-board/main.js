@@ -10,6 +10,7 @@ import { issueKey, folderOf, matchIssue, workRecords, taskContext } from "./mode
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
 import { fetchEnrichment, indexEnrichment, delegateCounts } from "./enrich.js";
 import { normalizeConfig } from "./config.js";
+import { FILTER_FIELDS, normalizeFilters, toggleFilter, filterCount, matchesFilters, filterOptions } from "./filters.js";
 
 // Shared with the linear-workspace layout on purpose: an issue/space link made in one
 // must not vanish when you switch to the other.
@@ -17,12 +18,12 @@ const DATA = "linear-workspace.data", LINKS = "linear-workspace.links";
 const PREFS = "linear-workspace.agents", ACTIVE = "linear-workspace.workspace";
 // This layout's own state. Enrichment is published by the sidebar copy and read by every
 // other copy, so only one of them talks to Linear.
-const ENRICH = "linear-board.enrich", FILTER = "linear-board.delegate", TEAMS = "linear-board.teams";
+const ENRICH = "linear-board.enrich", FILTER = "linear-board.filters", TEAMS = "linear-board.teams";
 const CONFIG = "erics-linear.config";
 const ENRICH_MS = 60000;
 
 // Roles that render from shared state alone and never load a Linear list themselves.
-const PASSIVE = ["header", "launcher", "spaces", "issue", "agent", "crew"];
+const PASSIVE = ["header", "launcher", "spaces", "issue", "agent", "crew", "filters"];
 
 const activeWorkspace = () => shared(ACTIVE) ?? "";
 const sharedIssues = () => shared(DATA)?.[activeWorkspace()]?.issues ?? [];
@@ -130,10 +131,13 @@ export default class LinearWorkspace extends LinearClient {
     const lookup = index ?? this.enrichment();
     const extra = lookup.byIdentifier?.get(String(issue.identifier).toUpperCase());
     if (!extra) return issue;
-    return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state };
+    return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state,
+      teamKey: issue.teamKey ?? extra.teamKey, project: issue.project ?? extra.project };
   }
 
-  delegateFilter() { return shared(FILTER) ?? null; }
+  filterWorkspace() { return props()?.workspaceId ?? this.ws ?? activeWorkspace(); }
+  homeFilters() { return normalizeFilters(shared(FILTER)?.[this.filterWorkspace()]); }
+  delegateFilter() { const crew = this.homeFilters().crew; return crew.length === 1 ? crew[0] : null; }
 
   attentionRules() { return shared(CONFIG)?.attention ?? normalizeConfig().attention; }
 
@@ -142,11 +146,64 @@ export default class LinearWorkspace extends LinearClient {
    *  reports as "this view could not be re-rendered". Deferring by one task lets the
    *  current frame finish first. */
   applyFilter(next, cx) {
-    if (cx?.spawn) cx.spawn(async cx => { setShared(FILTER, next); cx.notify(); });
-    else setShared(FILTER, next);
+    const workspace = this.filterWorkspace();
+    const apply = () => {
+      const saved = shared(FILTER) ?? {};
+      const current = normalizeFilters(saved[workspace]);
+      setShared(FILTER, { ...saved, [workspace]: normalizeFilters(typeof next === "function" ? next(current) : next) });
+    };
+    if (cx?.spawn) cx.spawn(async cx => { apply(); cx.notify(); });
+    else apply();
   }
   setDelegateFilter(name, cx) {
-    this.applyFilter(this.delegateFilter() === name ? null : name, cx);
+    this.applyFilter(current => ({ ...current, crew: current.crew.length === 1 && current.crew[0] === name ? [] : [name] }), cx);
+  }
+
+  openFilters() {
+    return openOverlay({ mod: "linear-board", kind: "dialog", width: 420, height: 580,
+      props: { role: "filters", workspaceId: this.filterWorkspace() } });
+  }
+
+  filterChoices(filters = this.homeFilters()) {
+    const workspace = this.filterWorkspace(), data = shared(DATA)?.[workspace] ?? {};
+    const index = this.enrichment();
+    const records = workRecords({ allSpaces: spaces(), allPanes: panes(), allAgents: agents(),
+      issues: data.issues ?? [], links: shared(LINKS) ?? [], workspace });
+    return filterOptions({ records: records.map(record => ({ ...record, issue: this.enrich(record.issue, index) })),
+      issues: (data.issues ?? []).map(issue => this.enrich(issue, index)),
+      projects: data.projects ?? [], teams: shared(TEAMS) ?? [], filters });
+  }
+
+  filtersView() {
+    const t = theme(), filters = this.homeFilters(), choices = this.filterChoices(filters);
+    const labels = { team: "Team", status: "Status", project: "Project", crew: "Crew" };
+    const field = this.filterField ?? "team";
+    const enrichment = sharedEnrich();
+    return v_flex().id("home-filters").size_full().min_h(0).p(12).gap(8).bg(t.popover)
+      .child(h_flex().flex_none().items_center().gap(8)
+        .child(div().flex_1().font_semibold().text_size(14).text_color(t.foreground).child("Filters"))
+        .child(this.button("filters-clear-all", "Clear all", cx => this.applyFilter({}, cx)))
+        .child(this.button("filters-close", "Close", () => closeOverlay(props().overlay))))
+      .child(div().flex_none().text_size(11).text_color(t.muted).child("Match any selection within a filter; match all filters."))
+      .child(v_flex().id("filter-fields").flex_1().min_h(0).overflow_y_scrollbar().gap(6)
+        .children(FILTER_FIELDS.map(key => v_flex().flex_none().gap(3)
+          .child(h_flex().items_center().gap(6)
+            .child(this.button(`filter-field-${key}`, `${field === key ? "⌄" : "›"} ${labels[key]} · ${filters[key].length || "All"}`, cx => {
+              this.filterField = field === key ? "" : key; cx.notify();
+            }))
+            .child(div().flex_1())
+            .when(filters[key].length > 0, el => el.child(this.button(`filter-clear-${key}`, "Clear", cx => this.applyFilter(current => ({ ...current, [key]: [] }), cx)))))
+          .when(filters[key].length > 0, el => el.child(div().px(6).text_size(10).text_color(t.accent)
+            .child(choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", "))))
+          .when(field === key, el => el.children(choices[key].map((option, i) => h_flex()
+            .id(`filter-option-${key}-${i}`).min_h(29).px(8).gap(8).items_center().rounded(5).cursor_pointer()
+            .bg(filters[key].includes(option.value) ? t.selected : t.popover).hover(el => el.bg(t.hover))
+            .on_click((_e, cx) => this.applyFilter(current => toggleFilter(current, key, option.value), cx))
+            .child(div().w(14).flex_none().text_color(t.accent).child(filters[key].includes(option.value) ? "☑" : "☐"))
+            .child(div().flex_1().min_w(0).text_size(12).text_color(t.foreground).child(option.label))))))))
+      .when(Boolean(enrichment.error || enrichment.partial), el => el.child(div().flex_none().text_size(10).text_color(t.blocked)
+        .child(enrichment.error ? `Crew metadata: ${enrichment.error}` : "Crew metadata is a partial read.")))
+      .child(div().flex_none().text_size(10).text_color(t.muted).child("Activity is space attention; Linear status is the ticket workflow."));
   }
 
   checkAgents(cx) {
@@ -424,10 +481,7 @@ export default class LinearWorkspace extends LinearClient {
   delegateChips(delegate, id) {
     if (!delegate) return [];
     const t = theme();
-    const active = this.delegateFilter() === delegate;
-    return [this.chip(`${id}-delegate`, delegate, active ? t.accent : t.working, {
-      click: (_e, cx) => this.setDelegateFilter(delegate, cx),
-    })];
+    return [this.chip(`${id}-delegate`, delegate, t.working)];
   }
 
   issueRow(is, scope, row = null) {
@@ -502,7 +556,7 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(list?.error), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.blocked).child(list.error)))
         .when(Boolean(list?.loading), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child("Loading issues…")))
         .when(Boolean(list?.loaded && !list.loading && !list.error && !rows.length), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.dim)
-          .child(this.delegateFilter() ? `Nothing for ${this.delegateFilter()} here` : "No matching issues")))
+          .child("No matching issues")))
         .child(div().pl(22).py(5).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
   }
   projectRow(group) {
@@ -537,12 +591,10 @@ export default class LinearWorkspace extends LinearClient {
    *  whatever is already known about it, so its needs-you count is never silently zero. */
   issuesByProject(index) {
     const byProject = {};
-    const filter = this.delegateFilter();
     for (const raw of this.allIssues()) {
-      const id = raw.project?.id;
-      if (!id) continue;
       const issue = this.enrich(raw, index);
-      if (filter && delegateOf(issue) !== filter) continue;
+      const id = issue.project?.id;
+      if (!id) continue;
       (byProject[id] ??= []).push(issue);
     }
     return byProject;
@@ -555,12 +607,11 @@ export default class LinearWorkspace extends LinearClient {
       records: this.records(),
       teams: shared(TEAMS) ?? [],
       attention: this.attentionRules(),
-      filter: { delegate: this.delegateFilter() },
     });
   }
 
   visibleSpaces() {
-    const index = this.enrichment(), delegate = this.delegateFilter();
+    const index = this.enrichment(), filters = this.homeFilters();
     const words = (this.filter ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
     const rank = { blocked: 0, done: 1, working: 2, idle: 3 };
     return this.records().map(record => {
@@ -570,7 +621,7 @@ export default class LinearWorkspace extends LinearClient {
         : record.status === "done" || issue?.state?.type === "completed" ? "done" : "idle";
       return { ...record, issue, lane };
     }).filter(record => {
-      if (delegate && delegateOf(record.issue) !== delegate) return false;
+      if (!matchesFilters(record, filters)) return false;
       const hay = [record.space.name, record.space.machine, record.issue?.identifier, record.issue?.title,
         ...record.agents.map(a => a.title)].filter(Boolean).join(" ").toLowerCase();
       return words.every(word => hay.includes(word));
@@ -578,7 +629,10 @@ export default class LinearWorkspace extends LinearClient {
   }
 
   sidebar() {
-    const t = theme(), records = this.visibleSpaces(), filter = this.delegateFilter();
+    const t = theme(), records = this.visibleSpaces(), filters = this.homeFilters(), count = filterCount(filters);
+    const choices = this.filterChoices(filters);
+    const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
+      `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
     const groups = [
       { status: "blocked", name: "NEEDS YOU", color: t.blocked },
       { status: "done", name: "DONE", color: t.done },
@@ -597,14 +651,15 @@ export default class LinearWorkspace extends LinearClient {
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().flex_none().items_center().gap(7)
         .child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true }))
+        .child(this.button("home-filter-button", count ? `Filters (${count})` : "Filters", () => this.openFilters()))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.muted).child(`${records.length} spaces`)))
-      .when(Boolean(filter), el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).child(`Only ${filter}`))
-        .child(this.button("clear-delegate", "Clear", cx => this.applyFilter(null, cx)))))
+      .when(count > 0, el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).tooltip(summary).child(summary))
+        .child(this.button("clear-home-filters", "Clear", cx => this.applyFilter({}, cx)))))
       .child(v_flex().id("spaces-by-status").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().gap(3)
         .when(!records.length, el => el.child(div().py(12).text_size(12).text_color(t.muted)
-          .child(this.filter || filter ? "No matching spaces" : "No open spaces. Start a task to begin.")))
+          .child(this.filter || count ? "No matching spaces" : "No open spaces. Start a task to begin.")))
         .children(groups.filter(group => group.records.length).flatMap(group => [
           this.section(group.name, group.records.length, group.color),
           ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
@@ -615,7 +670,6 @@ export default class LinearWorkspace extends LinearClient {
 
   projectsView() {
     const t = theme(), records = this.records();
-    const filter = this.delegateFilter();
     const enrichment = this.enrichment();
     const tree = this.tree(enrichment);
     const projectCount = tree.reduce((sum, team) =>
@@ -635,9 +689,6 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().flex_none().gap(6)
         .child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true }))
         .child(this.button("browse-linear", "Browse", () => dialog())))
-      .when(Boolean(filter), el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).child(`Only ${filter}`))
-        .child(this.button("clear-delegate", "Clear", cx => this.applyFilter(null, cx)))))
       .child(h_flex().h(22).flex_none().items_center().gap(8).pt(2)
         .child(div().text_size(10).font_semibold().text_color(t.dim).child(`${projectCount} PROJECT${projectCount === 1 ? "" : "S"}`))
         .child(div().flex_1())
@@ -645,7 +696,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(v_flex().id("board-tree").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().gap(2)
         .when(Boolean(this.signedOut), el => el.child(this.button("sign-in", "Sign in to Linear", cx => this.signIn(cx))))
         .when(!tree.length, el => el.child(div().py(10).text_size(12).text_color(t.muted)
-          .child(errors.length ? "Projects unavailable" : filter ? `Nothing delegated to ${filter}` : "Loading projects…")))
+          .child(errors.length ? "Projects unavailable" : "Loading projects…")))
         .children(tree.flatMap(team => [
           this.teamHeader(team),
           ...team.children
@@ -862,7 +913,6 @@ export default class LinearWorkspace extends LinearClient {
     const t = theme(), enrichment = this.enrichment();
     const counts = delegateCounts(enrichment.rows);
     const records = sharedRecords();
-    const filter = this.delegateFilter();
     const liveFor = name => records.filter(r => r.issue && enrichment.rows
       .some(x => x.identifier === r.issue.identifier && x.delegate?.name === name));
     return v_flex().id("crew-roster").size_full().min_h(0).p(10).gap(6).bg(t.popover)
@@ -878,11 +928,11 @@ export default class LinearWorkspace extends LinearClient {
         .children(counts.map(entry => {
           const running = liveFor(entry.name);
           const needs = entry.issues.filter(r => issueNeedsYou({ state: r.state, labels: r.labels }, this.attentionRules())).length;
-          const active = filter === entry.name;
+          const active = this.crewExpanded === entry.name;
           const color = needs ? t.blocked : running.length ? t.working : t.dim;
           return v_flex().id(`crew-${entry.name}`).flex_none().min_w(0).px(7).py(5).gap(3).rounded(6)
             .bg(active ? t.selected : t.popover).hover(s => s.bg(t.hover)).cursor_pointer()
-            .on_click((_e, cx) => this.setDelegateFilter(entry.name, cx))
+            .on_click((_e, cx) => { this.crewExpanded = active ? null : entry.name; cx.notify(); })
             .child(h_flex().gap(7).items_center().min_w(0)
               .child(div().size(7).rounded(7).flex_none().bg(color))
               .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(entry.name))
@@ -890,9 +940,16 @@ export default class LinearWorkspace extends LinearClient {
             .child(h_flex().gap(4).pl(14).flex_wrap().items_center()
               .when(needs > 0, el => el.child(this.chip(`crew-${entry.name}-needs`, `${needs} need you`, t.blocked)))
               .when(running.length > 0, el => el.child(this.chip(`crew-${entry.name}-live`, `${running.length} running`, t.working)))
-              .when(!needs && !running.length, el => el.child(div().text_size(10).text_color(t.dim).child("idle"))));
-        })))
-      .when(Boolean(filter), el => el.child(this.button("crew-clear", `Clear filter (${filter})`, cx => this.applyFilter(null, cx))));
+              .when(!needs && !running.length, el => el.child(div().text_size(10).text_color(t.dim).child("idle"))))
+            .when(active, el => el.children(entry.issues.map(issue => h_flex().id(`crew-issue-${issue.identifier}`)
+              .min_h(30).gap(6).px(5).items_center().rounded(4).hover(el => el.bg(t.hover))
+              .on_click((_e, cx) => {
+                cx.stop_propagation(); dialog({ issue: { key: issue.identifier } });
+              })
+              .child(div().flex_none().text_size(10).font_family(MONO).text_color(t.muted).child(issue.identifier))
+              .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.foreground).child(issue.project?.name ?? "No project"))
+              .child(div().flex_none().text_size(10).text_color(t.muted).child(issue.state?.name ?? "")))));
+        })));
   }
 
   render(cx) {
@@ -902,6 +959,7 @@ export default class LinearWorkspace extends LinearClient {
     if (this.role === "issue") return this.issuePanel();
     if (this.role === "agent") return this.agentPanel();
     if (this.role === "crew") return this.crewRoster();
+    if (this.role === "filters") return this.filtersView();
     if (this.role === "projects") return this.projectsView();
     if (this.role === "sidebar") return this.sidebar();
     const attaching = props().attachSpace;

@@ -12,9 +12,13 @@ The layout ID is `erics-linear`; its window header reads **Erics Linear**.
 
 - Puts work needing attention before finished, working, and idle spaces.
 - Shows each space's Linear ticket and machine. Click a space to return to its terminal.
+- Filters the home page by Team, Status, Project, and Crew, with multiple selections,
+  per-filter clearing, and Clear all. Filters combine with search and are saved per Linear
+  workspace. Status distinguishes space activity from Linear workflow status.
 - Keeps the full project tree in a separate popup, with search and task creation.
 - Shows live Herdr agents in a scrollable popup, including remote agents and subagents.
-- Shows Linear delegates in Crew without treating a delegated ticket as a running agent.
+- Groups delegated issues in the Crew report; click a crew member to expand their tickets.
+  Projects, Crew, and Agents reports stay independent of home filters.
 - Creates a ticket before starting a task in its worktree, or attaches an existing space
   to a ticket without moving its files or changing its branch.
 - Retains Herdr's terminal tabs, pane controls, Files, Changes, and status bar.
@@ -149,7 +153,7 @@ All bindings are scoped to `erics-linear`.
 | Issue delegate panel | Cmd+Shift+A | Alt+Shift+D |
 | Files | Cmd+Shift+F | Alt+Shift+F |
 | Toggle side panel | Cmd+Shift+E | Alt+Shift+E |
-| Clear delegate filter | Cmd+Shift+X | Alt+Shift+X |
+| Clear home filters | Cmd+Shift+X | Alt+Shift+X |
 
 The top buttons also open Projects, Crew, and Agents. Escape closes a dialog or popup.
 The desktop/window manager may reserve a shortcut; adjust this layout's section in
