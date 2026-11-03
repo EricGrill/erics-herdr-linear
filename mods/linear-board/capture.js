@@ -33,7 +33,7 @@ function validateDraft(value) {
 
 export function loadDraft(storage, workspace) {
   const raw = storage.getItem(keyFor(workspace));
-  if (raw === null || raw === "") return null;
+  if (raw == null || raw === "") return null;
   try {
     const value = JSON.parse(raw);
     if (value?.version !== VERSION || value.workspace !== workspace) throw new Error("The saved idea draft uses an unsupported format. It has not been replaced.");

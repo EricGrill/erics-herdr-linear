@@ -41,6 +41,14 @@ for (const mod of ["linear-workspace", "linear-board"]) {
     api.discardDraft(store, "workspace-one", next);
     assert.equal(api.loadDraft(store, "workspace-one"), null);
   });
+  test(`${mod}: an unset native storage value permits the first draft`, async () => {
+    const { api } = await helper(mod), store = storage();
+    store.getItem = key => store.values.get(key);
+    assert.equal(api.loadDraft(store, "one"), null);
+    const saved = api.saveDraft(store, "one", initial);
+    assert.equal(saved.revision, 1);
+    assert.equal(api.loadDraft(store, "one").idea, initial.idea);
+  });
   test(`${mod}: stale draft writers and discard cannot replace a newer revision`, async () => {
     const { api } = await helper(mod), store = storage();
     const saved = api.saveDraft(store, "one", initial);
