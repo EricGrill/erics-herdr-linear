@@ -675,7 +675,7 @@ export default class Linear extends View {
     }
     if (this.screen === "create" && this.form?.capture) {
       if (!this.form.leaving) return this.closeCapture(cx);
-      if (props()?.action === "capture") return this.dismiss();
+      if (["capture", "new"].includes(props()?.action)) return this.dismiss();
     }
     this.direct = false;
     const id = this.screen === "project" ? this.curProject?.id : this.cur?.id;
@@ -912,7 +912,7 @@ export default class Linear extends View {
         const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
           spec.argv = selectedAgent.run;
-          spec.task = this.taskFor?.(fresh) ?? res.prompt;
+          spec.task = this.taskFor?.(fresh, created?.description) ?? res.prompt;
         }
         this.busy = "Opening its space…";
         cx.notify();
@@ -949,30 +949,57 @@ export default class Linear extends View {
   }
 
   rememberRepository(target) {
-    if (this.demo || !this.ws || this.screen !== "create" || !this.form?.project ||
+    if (this.demo || !this.ws || this.screen !== "create" || !this.form ||
       typeof target?.folder !== "string" || !target.folder.startsWith("/")) return;
     const key = "linear-workspace.task-defaults", defaults = this.taskDefaults();
     const id = this.form.project, machine = target.machine ?? null;
     const project = defaults.projects?.[id] ?? {};
-    setShared(key, { ...shared(key), [this.ws]: { ...defaults, lastProject: id,
+    setShared(key, { ...shared(key), [this.ws]: { ...defaults, lastProject: id, lastRepository: { ...target, machine, project: id },
       projects: { ...defaults.projects, [id]: { ...project, machine,
         repositories: { ...project.repositories, [machine ?? ""]: target.folder } } } } });
   }
 
+  restoreTaskRepository(issue, f, cx) {
+    if (!issue?.id || (issue.project?.id ?? null) !== f.project || this.demo) return;
+    const generation = this.targetGeneration;
+    cx.spawn(async cx => {
+      try {
+        const result = await this.linear({ op: "detail", issue: issue.id }, f.workspace);
+        const saved = readExecutionTarget(result.description ?? "");
+        if (!saved) return;
+        const target = await resolveExecutionTarget(saved);
+        if (this.form !== f || this.screen !== "create" || this.busy || f.draft?.uncertain ||
+          this.targetGeneration !== generation || f.project !== (issue.project?.id ?? null)) return;
+        this.chooseComputer(target.machine, cx, target);
+      } catch { /* An unavailable previous target must not prevent capturing a task. */ }
+    });
+  }
+
   defaultTaskMachine() {
     const project = this.taskDefaults().projects?.[this.form?.project];
-    return project && Object.hasOwn(project, "machine") ? project.machine : this.launchTarget?.machine ?? null;
+    return project && Object.hasOwn(project, "machine") ? project.machine
+      : !this.form?.project && this.taskDefaults().lastRepository && !this.taskDefaults().lastRepository.project ? this.taskDefaults().lastRepository.machine ?? null
+      : this.launchTarget?.machine ?? null;
   }
 
   mappedRepository(machine) {
     return this.screen === "create" && this.form?.project
-      ? this.taskDefaults().projects?.[this.form.project]?.repositories?.[machine ?? ""] : undefined;
+      ? this.taskDefaults().projects?.[this.form.project]?.repositories?.[machine ?? ""]
+      : !this.form?.project && !this.taskDefaults().lastRepository?.project && (this.taskDefaults().lastRepository?.machine ?? null) === (machine ?? null)
+        ? this.taskDefaults().lastRepository?.folder : undefined;
+  }
+
+  rememberTaskContext(f) {
+    if (this.demo || !this.ws) return;
+    const key = "linear-workspace.task-defaults", defaults = this.taskDefaults();
+    setShared(key, { ...shared(key), [this.ws]: { ...defaults, lastProject: f.project,
+      context: { team: f.team?.id, project: f.project, state: f.state, priority: f.priority, assignToMe: f.assignToMe } } });
   }
 
   // The form: title, description, team, status, priority, project, and
   // whether it's yours. In a project (listed, or open), the issue goes in it.
   create(cx, capture = false, projectId = null) {
-    const context = this.screen === "project" ? this.curProject : this.drilled;
+    const context = this.screen === "project" ? this.curProject : (this.screen === "issue" ? this.cur?.project : props()?.taskIssue?.project) ?? this.drilled;
     const project = context ?? this.projectsFor(null).find((p) => p.id === this.taskDefaults().lastProject);
     const form = { team: null, state: null, priority: 0, project: projectId ?? project?.id ?? (capture ? this.taskDefaults().lastProject : null) ?? null, assignToMe: true, teams: null, states: {}, capture };
     if (capture) {
@@ -989,19 +1016,25 @@ export default class Linear extends View {
         return;
       }
       const d = form.draft;
+      const previous = this.taskDefaults().context;
+      if (!d.revision && previous?.project === form.project) {
+        Object.assign(form, { priority: previous.priority ?? 0, assignToMe: previous.assignToMe ?? true });
+        form.preferredContext = previous;
+      }
       if (d.revision) Object.assign(form, { project: d.project, priority: d.priority, assignToMe: d.assignToMe });
-      form.review = Boolean(d.review);
+      form.review = true;
+      if (d.execution?.folder) this.launchTarget = { ...d.execution };
     } else this.rememberProject(form.project);
     form.restoring = true;
     this.form = form;
     this.screen = "create";
     this.menu = null;
     this.err = this.flash = "";
-    this.title.set_value(form.draft?.title ?? "");
+    this.title.set_value(form.draft?.title || (!form.draft?.review && form.draft?.idea ? shapeIdea(form.draft.idea).title : ""));
     this.desc.set_value("");
     if (capture) {
       this.idea.set_value(form.draft.idea ?? "");
-      this.captureDescription.set_value(form.draft.description ?? "");
+      this.captureDescription.set_value(form.draft.description || (!form.draft.review ? form.draft.idea : "") || "");
     }
     form.restoring = false;
     form.waitingProjects = capture && form.project && !this.lists.projects?.loaded;
@@ -1019,7 +1052,7 @@ export default class Linear extends View {
         form.teams = res.teams;
         const selected = this.projectsFor(null).find((p) => p.id === form.project) ?? (project?.id === form.project ? project : null);
         const key = selected?.teams?.[0];
-        const t = res.teams.find(t => t.id === form.draft?.team) ?? res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
+        const t = res.teams.find(t => t.id === (form.draft?.team ?? form.preferredContext?.team)) ?? res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
         if (t) this.pickTeam(t, cx, true);
       } catch (e) {
         if (this.form !== form || this.screen !== "create") return;
@@ -1032,16 +1065,16 @@ export default class Linear extends View {
   pickTeam(t, cx, restoring = false) {
     if (this.busy) return;
     const f = this.form;
-    const savedState = restoring && f.draft?.team === t.id ? f.draft.state : null;
+    const preferred = f.draft?.revision ? f.draft : f.preferredContext;
+    const savedState = restoring && preferred?.team === t.id ? preferred.state : null;
     f.team = t;
     f.state = savedState ?? t.defaultIssueState?.id ?? null;
     localStorage.setItem("team", t.key);
     if (f.project && (!f.capture || this.lists.projects?.loaded) && !this.projectsFor(t).some((p) => p.id === f.project)) {
       f.project = null;
-      if (!f.capture) {
-        this.rememberProject(null);
-        if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
-      } else this.say("The saved project is unavailable for this team. Choose a project or continue without one.", cx);
+      this.rememberProject(null);
+      if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
+      if (f.capture) this.say("The saved project is unavailable for this team. Choose a project or continue without one.", cx);
     }
     const applyStates = () => {
       if (!f.capture || this.form !== f || f.team?.id !== t.id || f.draft.uncertain || this.screen !== "create") return;
@@ -1071,8 +1104,8 @@ export default class Linear extends View {
     try {
       const draft = { ...f.draft, idea: this.idea.value(), title: this.title.value(), description: this.captureDescription.value(),
         review: f.review, team: f.team?.id ?? f.draft.team ?? null, project: f.project, state: f.state ?? f.draft.state ?? null,
-        priority: f.priority, assignToMe: f.assignToMe, ...changes };
-      if (!draft.idea && !f.draft.revision) return true;
+        priority: f.priority, assignToMe: f.assignToMe, execution: f.draft.uncertain ? f.draft.execution : this.launchTarget?.folder ? { ...this.launchTarget } : f.restoringExecution ?? null, ...changes };
+      if (!draft.idea && !draft.title && !draft.description && !f.draft.revision) return true;
       if (Object.keys(draft).some(key => draft[key] !== f.draft[key])) f.draft = saveDraft(localStorage, f.storageKey, draft);
       f.saveError = "";
       return true;
@@ -1111,8 +1144,11 @@ export default class Linear extends View {
 
   improveCapture(cx) {
     const f = this.form;
-    if (!f?.capture || !f.review || f.shaping || f.draft.uncertain || this.busy || !this.saveCapture(cx)) return;
-    const { id, revision, idea } = f.draft;
+    if (!f?.capture || !f.review || f.shaping || f.draft.uncertain || this.busy) return;
+    const idea = this.idea.value() || [this.title.value(), this.captureDescription.value()].filter(Boolean).join("\n\n");
+    if (!idea.trim()) return this.say("Add a title or description first.", cx, true);
+    if (!this.saveCapture(cx)) return;
+    const { id, revision } = f.draft;
     f.shaping = true;
     cx.spawn(async cx => {
       try {
@@ -1123,6 +1159,7 @@ export default class Linear extends View {
         if (f.saveError || stored?.id !== id || f.draft.revision !== revision || stored?.revision !== revision)
           return this.say("The draft changed while shaping. Your edits were kept.", cx);
         f.restoring = true;
+        if (!this.idea.value()) this.idea.set_value(idea);
         this.title.set_value(result.title);
         this.captureDescription.set_value(result.description);
         f.restoring = false;
@@ -1154,7 +1191,7 @@ export default class Linear extends View {
     cx.notify();
   }
 
-  async completeCapture(issue, f, cx) {
+  async completeCapture(issue, f, cx, start = false) {
     f.confirmedIssue = issue;
     try {
       if (!f.draft.confirmedIssue) {
@@ -1163,15 +1200,23 @@ export default class Linear extends View {
       await localStorage.flush();
       this.lists.recent = null;
       this.loadAll(cx);
-      this.blockLaunchTarget("Choose a computer and repository when you are ready to start work.", cx);
+      const execution = f.draft.execution;
+      if (execution?.folder) this.rememberLaunchTarget(issue, execution);
+      else this.blockLaunchTarget("Choose a computer and repository when you are ready to start work.", cx);
       this.openIssue(issue, cx);
       if (!f.clearedConfirmed) {
         discardDraft(localStorage, f.storageKey, f.draft);
         f.clearedConfirmed = true;
       }
       await localStorage.flush();
-      this.say(`Ticket ${issue.identifier} is ready. Start work when ready.`, cx);
+      this.say(`Task ${issue.identifier} is ready. Start work when ready.`, cx);
+      this.createdLaunch = start && execution?.folder
+        ? { key: `${this.ws}/${issue.id}`, execution: { ...execution }, agentKey: f.creationAgentKey, description: f.draft.submittedDescription ?? f.draft.description } : null;
+      this.busy = "";
+      try { if (start) this.afterCreate?.(issue, cx, true); }
+      finally { this.createdLaunch = null; }
     } catch (error) {
+      this.busy = "";
       this.screen = "create";
       this.say(`Linear created ${issue.identifier}${issue.url ? " " + issue.url : ""}. Could not finish opening or clearing the draft: ${error.message}`, cx, true);
     }
@@ -1184,37 +1229,53 @@ export default class Linear extends View {
     cx.notify();
   }
 
-  submitCapture(cx) {
+  submitCapture(cx, startAfterCreate = false) {
     const f = this.form;
     if (!f?.capture || !f.review || this.busy || f.unreadable || f.draft.uncertain) return;
     if (this.ws !== f.workspace) return this.say("Reopen capture in the original workspace.", cx, true);
-    if (!this.idea.value().trim() || !this.title.value().trim()) return this.say("Add an idea and a ticket title first.", cx, true);
+    if (!this.title.value().trim()) return this.say("Give it a title first.", cx, true);
     if (!f.team || !f.states[f.team.id]?.some(s => s.id === f.state && !["completed", "canceled"].includes(s.type)))
       return this.say("Choose an available open status for this team before creating.", cx, true);
     if (f.project && !this.projectsFor(f.team).some(p => p.id === f.project)) return this.say("Choose a project that belongs to this team, or select No project.", cx, true);
     const preview = this.captureDescription.value();
-    const source = `## Source idea\n\n${this.idea.value()}`;
-    const description = preview.includes(source) ? preview : [preview, source].filter(Boolean).join("\n\n");
+    const source = this.idea.value().trim() ? `## Source idea\n\n${this.idea.value()}` : "";
+    const description = source && !preview.includes(source) ? [preview, source].filter(Boolean).join("\n\n") : preview;
     try {
       if (readExecutionTarget(description)) throw new Error("Reserved placement");
     } catch {
       return this.say("Remove the copied Herdr execution target from the idea or description before creating. Your draft is kept.", cx, true);
     }
-    if (!this.saveCapture(cx, { uncertain: true })) return;
-    const d = f.draft;
-    this.busy = "Creating ticket…";
+    const execution = this.launchTarget?.folder ? { ...this.launchTarget, machine: this.launchTarget.machine ?? null } : null;
+    if (startAfterCreate && (!execution || !this.agentsChecked || !this.agentChoices?.some(a => a.key === this.agentKey)))
+      return this.say("Choose an existing repository and an installed agent before starting.", cx, true);
+    if (!this.saveCapture(cx)) return;
+    const revision = f.draft.revision;
+    f.creationAgentKey = this.agentKey;
+    this.busy = "Creating task…";
     cx.notify();
     cx.spawn(async cx => {
-      try { await localStorage.flush(); }
-      catch (error) {
+      let savedDescription = description;
+      try {
+        if (execution && !this.demo) {
+          execution.folder = await validateRepository(execution);
+          if (startAfterCreate) await validateWorktreeRouting(execution, this.workspace()?.urlKey ?? "");
+          Object.assign(execution, await identifyExecutionTarget(execution));
+          savedDescription = descriptionWithExecutionTarget(description, execution);
+        }
+        if (this.form !== f || this.ws !== f.workspace || f.draft.revision !== revision)
+          throw new Error("The task changed while checking its repository. Review it and create again.");
+        if (!this.saveCapture(cx, { uncertain: true, execution, submittedDescription: savedDescription })) throw new Error(f.saveError);
+        await localStorage.flush();
+      } catch (error) {
         this.busy = "";
         this.saveCapture(cx, { uncertain: false });
-        this.say(`Could not save the draft before creation: ${error.message}. No ticket request was sent.`, cx, true);
+        this.say(`Could not prepare the task: ${error.message}. No ticket request was sent.`, cx, true);
         return;
       }
+      const d = f.draft;
       let issue;
       try {
-        const res = await this.linear({ op: "create", new: { team: d.team, title: d.title.trim(), description,
+        const res = await this.linear({ op: "create", new: { team: d.team, title: d.title.trim(), description: savedDescription,
           project: d.project ?? "", state: d.state ?? "", priority: d.priority, assignToMe: d.assignToMe } }, f.workspace);
         if (!res.issue?.id || !res.issue.identifier) throw new Error("Missing issue identifier");
         issue = res.issue;
@@ -1223,8 +1284,9 @@ export default class Linear extends View {
         this.say("Creation not confirmed. Check recent issues before retrying.", cx, true);
         return;
       }
-      await this.completeCapture(issue, f, cx);
-      this.busy = "";
+      this.rememberTaskContext(f);
+      if (execution) this.rememberRepository(execution);
+      await this.completeCapture(issue, f, cx, startAfterCreate);
       cx.notify();
     });
   }
@@ -1258,8 +1320,8 @@ export default class Linear extends View {
     if (this.busy) return;
     this.form.project = id;
     if (this.form.capture) this.saveCapture(cx);
-    else this.rememberProject(id);
-    if (!this.form.capture && this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
+    this.rememberProject(id);
+    if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
     this.projOpen = false;
     this.projSearch.set_value("");
     cx.timer.after(30, () => (this.form.capture && !this.form.review ? this.idea : this.title).focus());
@@ -1306,7 +1368,7 @@ export default class Linear extends View {
   submit(cx, startAfterCreate = false) {
     const f = this.form;
     if (!f || this.busy) return;
-    if (f.capture) return startAfterCreate ? undefined : this.submitCapture(cx);
+    if (f.capture) return this.submitCapture(cx, startAfterCreate);
     const title = this.title.value().trim();
     if (!title) return this.say("Give it a title first.", cx, true);
     if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
@@ -1786,15 +1848,17 @@ export default class Linear extends View {
     return v_flex().id("create-form").flex_1().min_h(0).overflow_y_scrollbar().gap(12)
       .child(h_flex().flex_none().gap(10).items_center()
         .child(this.backButton(o, this.fromLabel()))
-        .child(div().text_size(14).font_semibold().text_color(o.fg).child(f.capture ? "Capture idea" : `New issue in ${this.workspace()?.name ?? "Linear"}`)))
+        .child(div().text_size(14).font_semibold().text_color(o.fg).child(f.capture ? "New task" : `New issue in ${this.workspace()?.name ?? "Linear"}`)))
       .when(f.capture && !f.review, el => el
         .child(div().text_size(13).text_color(o.fg).child("What would you like to improve?"))
         .child(textarea(this.idea)))
       .when(f.capture && f.review, el => el
-        .child(div().text_size(12).text_color(o.muted).child("Review the ticket"))
+        .child(div().text_size(12).text_color(o.muted).child("Title and description"))
         .child(input(this.title)).child(textarea(this.captureDescription))
-        .child(div().text_size(12).text_color(o.muted).child("Source idea · included in the ticket"))
-        .child(div().text_size(13).text_color(o.fg).child(f.draft.idea)))
+        .when(Boolean(this.idea.value()), el => el
+          .child(this.button("source-toggle", f.editIdea ? "Hide source idea" : "Edit source idea", cx => { f.editIdea = !f.editIdea; cx.notify(); }))
+          .when(f.editIdea, el => el.child(textarea(this.idea))
+            .child(this.button("source-shape", "Shape ticket", cx => this.reviewCapture(cx))))))
       .when(!f.capture, el => el.child(input(this.title)).child(input(this.desc)))
       .child(this.field(o, "Team", f.teams
         ? pick("tm", f.teams.map((t) => ({ ...t, parts: [div().font_family(MONO).text_size(11.5).text_color(o.muted).child(t.key), t.name] })), (t) => t.id === f.team?.id, (t, cx) => this.pickTeam(t, cx))
@@ -1808,8 +1872,8 @@ export default class Linear extends View {
       .when(details, el => el.child(this.field(o, "Priority", pick("pr", PRIORITIES.map((n, i) => ({ i, parts: [priorityIcon(i) ? icon(priorityIcon(i), i === 1 ? o.fix : o.muted, 12) : null, n] })), (x) => x.i === f.priority, (x) => (f.priority = x.i)))))
       .when(!f.capture, el => el.child(this.field(o, "Project", this.projectField(o))))
       .when(details, el => el.child(this.field(o, "Assignee", pick("me", [{ me: true, parts: [icon("person", o.muted, 12), "Me"] }, { me: false, parts: ["Nobody"] }], (x) => x.me === f.assignToMe, (x) => (f.assignToMe = x.me)))))
+      .when(!props()?.attachSpace && Boolean(this.launchOptions), el => el.child(this.launchOptions()))
       .when(f.capture, el => el.child(this.captureActions(o, f)))
-      .when(!f.capture && !props()?.attachSpace && Boolean(this.launchOptions), el => el.child(this.launchOptions()))
       .when(!f.capture, el => el.child(h_flex().flex_none().gap(10).items_center()
         .child(div().flex_1().text_size(11).text_color(o.muted).child(props()?.attachSpace ? `Creating also attaches to ${props().attachSpace.name}` : "Create a ticket, or start work in its own worktree"))
         .child(h_flex().id("create-btn").flex_none().h(30).px(14).items_center().rounded(7).bg(o.accent).opacity(canCreate ? 1 : 0.5).when(canCreate, el => el.cursor_pointer().hover(s => s.opacity(0.85)))
@@ -1819,7 +1883,7 @@ export default class Linear extends View {
   }
 
   captureActions(o, f) {
-    const ready = !!(f.team && f.states[f.team.id]?.some(s => s.id === f.state && !["completed", "canceled"].includes(s.type)) && this.title.value().trim() && this.idea.value().trim() && !this.busy);
+    const ready = !!(f.team && f.states[f.team.id]?.some(s => s.id === f.state && !["completed", "canceled"].includes(s.type)) && this.title.value().trim() && !this.busy);
     return v_flex().flex_none().gap(7)
       .when(f.saveError, el => el.child(div().text_size(12).text_color(o.fix).child(f.saveError))
         .child(h_flex().gap(7).flex_wrap().child(this.button("capture-copy", "Copy my idea", cx => this.copy(this.idea.value(), cx)))
@@ -1827,8 +1891,8 @@ export default class Linear extends View {
       .when(f.draft.revision && !f.saveError, el => el.child(div().text_size(11).text_color(o.muted).child("Draft saved on this computer")))
       .child(h_flex().gap(7).flex_wrap().items_center()
         .when(!f.review, el => el.child(this.button("capture-review", "Shape ticket", cx => this.reviewCapture(cx), { primary: true, enabled: !!this.idea.value().trim() })))
-        .when(f.review, el => el.child(this.button("capture-create", "Create ticket", cx => this.submitCapture(cx), { primary: true, enabled: ready && !f.saveError }))
-          .child(this.button("capture-edit", "Edit idea", cx => { f.review = false; this.saveCapture(cx); cx.timer.after(0, () => this.idea.focus()); cx.notify(); })))
+        .when(f.review, el => el.child(this.button("capture-create", "Create task", cx => this.submitCapture(cx), { primary: true, enabled: ready && !f.saveError }))
+          .when(!props()?.attachSpace && Boolean(this.createStartButton), el => el.child(this.createStartButton())))
         .when(!f.teams || (f.team && !f.states[f.team.id]), el => el.child(this.button("capture-reload", "Reload ticket details", cx => this.loadFormTeams(cx))))
         .child(this.button("capture-close", "Save and close", cx => this.back(cx)))
         .child(this.button("capture-discard", "Discard draft", cx => { f.confirmDiscard = true; cx.notify(); })))
@@ -1836,7 +1900,7 @@ export default class Linear extends View {
         .child(this.button("capture-keep", "Keep draft", cx => { f.confirmDiscard = false; cx.notify(); }))))
       .when(f.review, el => el.child(h_flex().gap(7).flex_wrap().items_center()
         .child(this.button("capture-ai", f.shaping ? "Improving…" : "Improve with AI", cx => this.improveCapture(cx), { enabled: !f.shaping && !this.busy }))
-        .child(div().text_size(11.5).text_color(o.muted).child("Sends your idea to OpenAI to suggest a title and description."))));
+        .child(div().text_size(11.5).text_color(o.muted).child("Optional: sends task text to OpenAI to suggest a title and description."))));
   }
 
   uncertainCaptureView(o, f) {
@@ -1886,7 +1950,7 @@ export default class Linear extends View {
         k(["w"], "worktree", (cx) => this.worktree(cx, false), "f-w"),
         k(["s"], "start", (cx) => this.worktree(cx, true), "f-s"),
         k(["c"], "status", (cx) => this.statusMenu(cx), "f-c"),
-        k(["n"], "new issue", (cx) => this.create(cx), "f-n"),
+        k(["n"], "new task", (cx) => this.create(cx), "f-n"),
         k(["o"], "Linear", (cx) => this.open(this.cur.url, cx), "f-o"),
         k(["y"], "copy key", (cx) => this.copy(this.cur.identifier, cx), "f-y"),
         k(["b"], "copy branch", (cx) => this.copy(this.cur.branch, cx), "f-b"),
@@ -1899,8 +1963,7 @@ export default class Linear extends View {
         k(["enter"], "its issues", (cx) => this.drill(this.curProject, cx), "f-i"),
         k(["w"], "worktree", (cx) => this.worktree(cx, false, { project: this.curProject }), "f-w"),
         k(["s"], "start", (cx) => this.worktree(cx, true, { project: this.curProject }), "f-s"),
-        k(["n"], "new issue", (cx) => this.create(cx), "f-n"),
-        ...(!props()?.attachSpace ? [k(["i"], "capture idea", cx => this.create(cx, true), "f-idea")] : []),
+        k(["n"], "new task", (cx) => this.create(cx), "f-n"),
         k(["o"], "Linear", (cx) => this.open(this.curProject.url, cx), "f-o"),
         k(["esc"], "back", (cx) => this.escape(cx), "f-esc"),
       ];
@@ -1915,8 +1978,7 @@ export default class Linear extends View {
       k(["↑", "↓"], "choose", () => {}, "f-ch"),
       k(["enter"], "open", (cx) => this.enter(cx), "f-go"),
       k(["^s"], "start", (cx) => sel && this.worktree(cx, true, sel), "f-s"),
-      k(["^n"], "new issue", (cx) => this.create(cx), "f-n"),
-      ...(!props()?.attachSpace ? [k(["^i"], "capture idea", cx => this.create(cx, true), "f-idea")] : []),
+      k(["^n"], "new task", (cx) => this.create(cx), "f-n"),
       k(["^o"], "Linear", (cx) => sel && this.open((sel.issue ?? sel.project).url, cx), "f-o"),
     ];
     if (this.workspaces.length > 1 && !this.demo) out.push(k(["^t"], "workspace", (cx) => this.switchWorkspace(cx), "f-t"));

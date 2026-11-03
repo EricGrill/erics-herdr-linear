@@ -54,11 +54,13 @@ function sharedRecords(extraIssues = []) {
 
 function currentSource() {
   const s = spaces().find(s => s.active);
-  return s ? { id: s.id, name: s.name, folder: folderOf(s, panes()), machine: s.machine ?? null } : null;
+  return s ? { id: s.id, name: s.name, branch: s.branch, tabs: s.tabs, folder: folderOf(s, panes()), machine: s.machine ?? null } : null;
 }
 function dialog(extra = {}) {
+  const source = currentSource(), workspace = shared(ACTIVE);
+  const taskIssue = source ? matchIssue(source, shared(DATA)?.[workspace]?.issues ?? [], shared(LINKS) ?? [], workspace, panes()) : null;
   return openOverlay({ mod: "linear-board", kind: "dialog", width: 0.85, height: 0.85,
-    props: { role: "dialog", source: currentSource(), workspaceId: shared(ACTIVE), ...extra } });
+    props: { role: "dialog", source, taskIssue, workspaceId: workspace, ...extra } });
 }
 
 export default class LinearWorkspace extends LinearClient {
@@ -89,7 +91,7 @@ export default class LinearWorkspace extends LinearClient {
       this.startEnrich(cx);
       cx.timer.every(ENRICH_MS, cx => this.startEnrich(cx));
       this.loadTeams(cx);
-    } else if (p.action === "capture") {
+    } else if (["capture", "new"].includes(p.action)) {
       if (this.ws) this.create(cx, true, p.project);
     } else if (this.role !== "projects") this.chooseComputer(this.launchTarget.machine, cx);
   }
@@ -299,17 +301,10 @@ export default class LinearWorkspace extends LinearClient {
     if (tab === "projects" && this.screen === "create" && this.form?.waitingProjects) {
       this.form.waitingProjects = false;
       this.loadFormTeams(cx);
+      if (!this.launchTarget?.folder && !this.form.draft?.execution && !this.form.restoringExecution &&
+        this.targetGeneration === this.form.initialTargetGeneration) this.chooseComputer(this.defaultTaskMachine(), cx);
     }
-    if (this.role === "dialog" && p.action === "capture" && tab === "projects" && !this.startedForm) this.create(cx, true, p.project);
-    if (this.role === "dialog" && p.action === "new" && tab === "projects" && !this.startedForm) {
-      this.startedForm = true;
-      if (p.project) {
-        this.curProject = this.lists.projects?.items.find(x => x.id === p.project) ?? null;
-        if (this.curProject) this.screen = "project";
-      }
-      this.create(cx);
-      if (p.parentIssue) this.desc.set_value(`Follow-up to ${p.parentIssue.identifier}: ${p.parentIssue.url ?? ""}\n\n`);
-    }
+    if (this.role === "dialog" && ["capture", "new"].includes(p.action) && tab === "projects" && !this.startedForm) this.create(cx, true, p.project);
   }
 
   replaceRow(is) {
@@ -532,7 +527,7 @@ export default class LinearWorkspace extends LinearClient {
     setShared(LINKS, [...links, { workspace: this.ws, space: space?.id ?? "", folder, machine, issue: is }]);
     this.publish();
   }
-  taskFor(is) { return taskContext(is, this.detail?.issue?.id === is.id ? this.detail.description : this.desc.value()); }
+  taskFor(is, description) { return taskContext(is, description ?? (this.detail?.issue?.id === is.id ? this.detail.description : this.desc.value())); }
   worktree(cx, start, what = { issue: this.cur }) {
     if (this.busy) return;
     if (!what.issue) return this.say("Choose an issue before starting work.", cx, true);
@@ -546,6 +541,7 @@ export default class LinearWorkspace extends LinearClient {
   }
   chooseComputer(machine, cx, retain = null) {
     this.targetPicker = null;
+    if (this.screen === "create" && this.form?.capture) this.form.restoringExecution = retain;
     const source = this.repositorySource;
     const project = this.screen === "create"
       ? this.lists.projects?.items?.find(p => p.id === this.form?.project)
@@ -554,13 +550,26 @@ export default class LinearWorkspace extends LinearClient {
     if ((source?.machine ?? null) === (machine ?? null)) hints.push(source?.folder);
     loadTarget(this, cx, machine, { retain, hints, preferredFolder: this.mappedRepository(machine), preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
   }
-  create(cx, capture = false, projectId = null) {
+  create(cx, capture = !props()?.attachSpace, projectId = null) {
+    const issue = this.screen === "issue" ? this.cur : props()?.taskIssue;
     if (capture) this.startedForm = true;
     super.create(cx, capture, projectId);
-    if (!capture && !props().attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
+    const f = this.form;
+    if (props().attachSpace || f?.unreadable || f?.draft?.uncertain || this.screen !== "create") return;
+    const retain = f.draft?.execution ?? (issue && (issue.project?.id ?? null) === f.project ? this.savedLaunchTarget(issue) : null);
+    this.chooseComputer(retain ? retain.machine ?? null : this.defaultTaskMachine(), cx, retain);
+    f.initialTargetGeneration = this.targetGeneration;
+    if (!retain) this.restoreTaskRepository(issue, f, cx);
+    if (props().parentIssue && !f.draft?.revision) {
+      const parent = props().parentIssue;
+      (capture ? this.captureDescription : this.desc).set_value(`Follow-up to ${parent.identifier}: ${parent.url ?? ""}\n\n`);
+    }
   }
   selectRepository(repo, cx) {
-    if (selectTargetRepository(this, repo, cx)) this.rememberRepository(this.launchTarget);
+    if (selectTargetRepository(this, repo, cx)) {
+      this.rememberRepository(this.launchTarget);
+      if (this.form?.capture) { this.form.restoringExecution = null; this.saveCapture(cx); }
+    }
   }
 
   button(id, label, action, { primary = false, enabled = true } = {}) {
@@ -711,7 +720,7 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(list?.loading), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child("Loading issues…")))
         .when(Boolean(list?.loaded && !list.loading && !list.error && !rows.length), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.dim)
           .child("No matching issues")))
-        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`capture-${p.id}`, "Capture idea", () => dialog({ action: "capture", project: p.id }))).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
+        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`new-${p.id}`, "+ New task", () => dialog({ action: "new", project: p.id })))));
   }
   projectRow(group) {
     const t = theme(), p = group.project, open = Boolean(this.expanded[p.id]), list = this.lists[`project:${p.id}`];
@@ -739,7 +748,7 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(list?.warning), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child(list.warning)))
         .when(Boolean(list?.loading), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child("Loading issues…")))
         .when(Boolean(list?.loaded && !list.loading && !list.error && !issues.length && !group.work.length), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.dim).child("No matching issues")))
-        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`capture-${p.id}`, "Capture idea", () => dialog({ action: "capture", project: p.id }))).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
+        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`new-${p.id}`, "+ New task", () => dialog({ action: "new", project: p.id })))));
   }
 
   /** Issues per project, enriched, for the tree. A project not yet expanded contributes
@@ -807,7 +816,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().flex_none().items_center().flex_wrap().gap(7)
-        .child(this.button("capture-idea", "Capture idea", () => dialog({ action: "capture" }), { primary: true })).child(this.button("new-task", "+ New task", () => dialog({ action: "new" })))
+        .child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true }))
         .child(this.button("home-filter-button", count ? `Filters (${count})` : "Filters", () => this.openFilters()))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.muted).child(`${records.length} spaces`)))
@@ -844,7 +853,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().flex_none().flex_wrap().gap(6)
-        .child(this.button("capture-idea", "Capture idea", () => dialog({ action: "capture" }), { primary: true })).child(this.button("new-task", "+ New task", () => dialog({ action: "new" })))
+        .child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true }))
         .child(this.button("browse-linear", "Browse", () => dialog())))
       .child(h_flex().h(22).flex_none().items_center().gap(8).pt(2)
         .child(div().text_size(10).font_semibold().text_color(t.dim).child(`${projectCount} PROJECT${projectCount === 1 ? "" : "S"}`))
@@ -890,7 +899,6 @@ export default class LinearWorkspace extends LinearClient {
     const action = fn => { if (props().overlay) closeOverlay(props().overlay); fn(); };
     return v_flex().id("ticket-launcher").w_full().p(10).gap(8).bg(t.popover)
       .child(div().text_size(12).font_semibold().text_color(t.foreground).child("Work in a Linear issue"))
-      .child(this.button("launch-capture", "Capture idea…", () => action(() => dialog({ action: "capture" }))))
       .child(this.button("launch-new", "New task…", () => action(() => dialog({ action: "new" })), { primary: true }))
       .child(this.button("launch-existing", is ? `Continue ${is.identifier}…` : "Choose an existing issue…", () => action(() => dialog(is ? { issue: { key: is.identifier, workspaceKey: data?.workspace?.urlKey } } : {}))))
       .when(Boolean(is), el => el.child(this.button("utility-terminal", "Utility terminal for this issue", () => action(() => run("tab.new", { space: s.id, name: "Shell" })))))
@@ -915,7 +923,7 @@ export default class LinearWorkspace extends LinearClient {
         .child(this.button("refresh-repositories", "↻", cx => this.chooseComputer(machine, cx, this.launchTarget?.folder ? this.launchTarget : null), { enabled: !this.busy })))
       .child(div().text_size(11).text_color(t.muted).child(this.repositoriesLoading ? `Reading ~/code on ${label}…` : `Repository root: ${this.repoRoot || "~/code on the selected computer"}`))
       .when(Boolean(this.repositoryError), el => el.child(div().text_size(11).text_color(t.blocked).child(this.repositoryError)))
-      .child(div().text_size(12).font_family(MONO).text_color(t.foreground).child(`${label} · ${this.launchTarget?.folder || "Select a repository before creating or starting"}`))
+      .child(div().text_size(12).font_family(MONO).text_color(t.foreground).child(`${label} · ${this.launchTarget?.folder || "Optional for create; required to start"}`))
       .child(h_flex().gap(7).items_center().flex_wrap().child(div().text_size(11).text_color(t.muted).child("Agent"))
         .children(this.agentChoices.map(a => this.button(`agent-${a.key}`, a.name, cx => { this.agentKey = a.key; cx.notify(); }, { primary: a.key === this.agentKey, enabled: !this.busy })))
         .when(!this.agentChoices.length, el => el.child(div().text_size(11).text_color(t.muted).child(this.agentsChecked ? this.launchError || "No installed agents found" : "Checking installed agents…"))));
@@ -923,7 +931,7 @@ export default class LinearWorkspace extends LinearClient {
 
   createStartButton() {
     return this.button("create-start", "Create & start", cx => this.submit(cx, true), {
-      primary: true, enabled: !this.busy && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.length > 0,
+      primary: true, enabled: !this.busy && !this.form?.saveError && Boolean(this.title.value().trim()) && Boolean(this.form?.team) && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.some(a => a.key === this.agentKey),
     });
   }
 
