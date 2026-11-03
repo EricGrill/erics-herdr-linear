@@ -61,7 +61,7 @@ async function harness(options = {}) {
     let result;
     if (request.op === "status") result = options.statusReply ?? { workspaces: [] };
     else if (request.op === "teams") result = options.teamsReply ? await options.teamsReply() : { teams: options.teams ?? [] };
-    else if (request.op === "states") result = { states: options.states ?? [] };
+    else if (request.op === "states") result = options.statesReply ? await options.statesReply(request) : { states: options.states ?? [] };
     else if (request.op === "list" && request.tab === "recent") result = { issues: options.recent ?? [] };
     else if (request.op === "check-start") result = { issue: ticket };
     else if (request.op === "create") {
@@ -166,7 +166,7 @@ async function harness(options = {}) {
     launchTarget: Object.hasOwn(options, "launchTarget") ? options.launchTarget : { folder: sourceSpace.folder, machine: null },
     agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars", set_value: noop },
     projSearch: { set_value: noop },
-    desc: { value: () => "Reproduce the missing scheduled research.", set_value: noop },
+    desc: { value: () => options.request ?? "Reproduce the missing scheduled research.", set_value: noop },
     form: { team: { id: "team-one" }, project: "project-one", state: "state-one", priority: 2, assignToMe: true },
     replaceRow: noop,
     records: () => [], publish: noop,
@@ -191,12 +191,12 @@ async function harness(options = {}) {
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
-  const h = await harness({ title: "   " });
+  const h = await harness({ request: "   " });
   h.client.submit(h.cx, true);
   await h.flush();
-  assert.match(h.client.err, /Give it a title/);
+  assert.match(h.client.err, /Write a request/);
   assert.equal(h.requests.length, 0);
-  h.client.title = { value: () => "Valid title" };
+  h.client.desc = { value: () => "Valid request" };
   h.client.submit(h.cx);
   await h.flush();
   assert.deepEqual(h.modes, [false]);
@@ -1139,4 +1139,118 @@ test("a stale unreadable draft dialog cannot discard another window's replacemen
   await first.flush();
   assert.match(first.client.err, /another window/);
   assert.equal(storage.get(key), replacement);
+});
+
+
+test("ordinary creation derives a short title and preserves the full multiline request", async () => {
+  const request = "  Fix   the new task flow\n\nKeep all of these details.  ";
+  const h = await harness({ request });
+  h.client.submit(h.cx);
+  await h.flush();
+  const created = h.requests.find(x => x.request.op === "create").request.new;
+  assert.equal(created.title, "Fix the new task flow");
+  assert.ok(created.description.startsWith(request + "\n\n"));
+  assert.equal(h.commands.length, 0);
+
+  const long = await harness({ request: "😀".repeat(110) + "\nDetails" });
+  long.client.submit(long.cx, true);
+  await long.flush();
+  const next = long.requests.find(x => x.request.op === "create").request.new;
+  assert.equal(next.title, "😀".repeat(97) + "...");
+  assert.deepEqual(long.modes, [true]);
+});
+
+test("last issue options survive a new dialog and workspace isolation", async () => {
+  const first = await harness();
+  first.client.form = { ...first.client.form, team: teams[1], project: null, state: "two-active", priority: 3, assignToMe: false };
+  first.client.rememberProject(null);
+  first.client.rememberTaskOptions();
+  const sharedStore = serializedStore(first);
+  const fresh = await harness({ sharedStore, teams, states: [{ id: "two-active", type: "started" }] });
+  setProjects(fresh);
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.team.id, "team-two");
+  assert.equal(fresh.client.form.state, "two-active");
+  assert.equal(fresh.client.form.priority, 3);
+  assert.equal(fresh.client.form.assignToMe, false);
+  assert.equal(fresh.client.form.project, null);
+  fresh.client.ws = "workspace-two";
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.priority, 0);
+  assert.equal(fresh.client.form.assignToMe, true);
+  assert.equal(fresh.client.form.team.id, "team-one");
+});
+
+test("explicit project overrides an incompatible saved team and stale status", async () => {
+  for (const stale of ["removed", "completed", "canceled"]) {
+    const sharedStore = new Map([[defaultsKey, { "workspace-one": { issue: {
+      team: "team-two", states: { "team-one": "old-status" }, priority: 2, assignToMe: false,
+    } } }]]);
+    const h = await harness({ sharedStore, teams, states: [
+      { id: "backlog", type: "backlog" }, ...(stale === "removed" ? [] : [{ id: "old-status", type: stale }]),
+    ] });
+    setProjects(h);
+    h.client.create(h.cx, false, "project-one");
+    await h.flush();
+    assert.equal(h.client.form.team.id, "team-one");
+    assert.equal(h.client.form.state, "backlog");
+  }
+});
+
+test("demo and capture do not replace ordinary issue defaults", async () => {
+  const h = await harness();
+  h.client.rememberTaskOptions();
+  const before = JSON.stringify([...h.sharedStore]);
+  h.client.form.capture = true;
+  h.client.form.priority = 4;
+  h.client.rememberTaskOptions();
+  h.client.form.capture = false;
+  h.client.demo = true;
+  h.client.rememberTaskOptions();
+  assert.equal(JSON.stringify([...h.sharedStore]), before);
+});
+
+
+test("creation waits for saved status validation and blocks on failed status reads", async () => {
+  const states = delay();
+  const h = await harness({ teams, statesReply: () => states.promise });
+  h.client.create(h.cx);
+  const flushing = h.flush();
+  await new Promise(setImmediate);
+  h.client.desc = { value: () => "A new request" };
+  h.client.submit(h.cx, true);
+  assert.match(h.client.err, /loading team statuses/);
+  assert.equal(h.requests.some(x => x.request.op === "create"), false);
+  states.resolve({ states: [{ id: "ready", type: "unstarted" }] });
+  await flushing;
+  assert.equal(h.client.form.state, "ready");
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.requests.find(x => x.request.op === "create").request.new.state, "ready");
+
+  const failed = await harness({ teams, statesReply: () => { throw new Error("offline"); } });
+  failed.client.create(failed.cx);
+  await failed.flush();
+  failed.client.desc = { value: () => "Retain request" };
+  failed.client.submit(failed.cx);
+  await failed.flush();
+  assert.match(failed.client.err, /Could not load team statuses/);
+  assert.equal(failed.requests.some(x => x.request.op === "create"), false);
+});
+
+test("no-project tasks retain their own last computer and repository", async () => {
+  const h = await harness();
+  h.client.screen = "create";
+  h.client.form.project = null;
+  h.client.rememberRepository({ machine: "remote", folder: "/remote/general" });
+  h.client.form.project = "project-one";
+  h.client.rememberRepository({ machine: null, folder: "/local/one" });
+  h.client.form.project = null;
+  assert.equal(h.client.defaultTaskMachine(), "remote");
+  assert.equal(h.client.mappedRepository("remote"), "/remote/general");
+  h.client.form.project = "project-one";
+  assert.equal(h.client.defaultTaskMachine(), null);
+  assert.equal(h.client.mappedRepository(null), "/local/one");
 });
