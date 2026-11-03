@@ -89,6 +89,8 @@ export default class LinearWorkspace extends LinearClient {
       this.startEnrich(cx);
       cx.timer.every(ENRICH_MS, cx => this.startEnrich(cx));
       this.loadTeams(cx);
+    } else if (p.action === "capture") {
+      if (this.ws) this.create(cx, true, p.project);
     } else if (this.role !== "projects") this.chooseComputer(this.launchTarget.machine, cx);
   }
 
@@ -294,6 +296,11 @@ export default class LinearWorkspace extends LinearClient {
     this.publish(this.lists[tab]?.error ? [] : this.lists[tab]?.items ?? [], version);
     if (this.role === "sidebar") this.resolveSpaces(cx);
     const p = props();
+    if (tab === "projects" && this.screen === "create" && this.form?.waitingProjects) {
+      this.form.waitingProjects = false;
+      this.loadFormTeams(cx);
+    }
+    if (this.role === "dialog" && p.action === "capture" && tab === "projects" && !this.startedForm) this.create(cx, true, p.project);
     if (this.role === "dialog" && p.action === "new" && tab === "projects" && !this.startedForm) {
       this.startedForm = true;
       if (p.project) {
@@ -463,7 +470,8 @@ export default class LinearWorkspace extends LinearClient {
     if (["issue", "agent", "files", "changes"].includes(c)) return void this.showPanel(c);
     if (c === "panel") return void run("layout.toggle", { id: "panel" });
     if (c === "clear") return void this.applyFilter(null, cx);
-    if (c === "new") dialog({ action: "new" });
+    if (c === "capture") dialog({ action: "capture" });
+    else if (c === "new") dialog({ action: "new" });
     else if (c === "details") {
       const r = this.records().find(r => r.space.active);
       if (r?.issue) this.details(r.issue);
@@ -546,9 +554,10 @@ export default class LinearWorkspace extends LinearClient {
     if ((source?.machine ?? null) === (machine ?? null)) hints.push(source?.folder);
     loadTarget(this, cx, machine, { retain, hints, preferredFolder: this.mappedRepository(machine), preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
   }
-  create(cx) {
-    super.create(cx);
-    if (!props().attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
+  create(cx, capture = false, projectId = null) {
+    if (capture) this.startedForm = true;
+    super.create(cx, capture, projectId);
+    if (!capture && !props().attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
   }
   selectRepository(repo, cx) {
     if (selectTargetRepository(this, repo, cx)) this.rememberRepository(this.launchTarget);
@@ -702,7 +711,7 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(list?.loading), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child("Loading issues…")))
         .when(Boolean(list?.loaded && !list.loading && !list.error && !rows.length), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.dim)
           .child("No matching issues")))
-        .child(div().pl(22).py(5).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
+        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`capture-${p.id}`, "Capture idea", () => dialog({ action: "capture", project: p.id }))).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
   }
   projectRow(group) {
     const t = theme(), p = group.project, open = Boolean(this.expanded[p.id]), list = this.lists[`project:${p.id}`];
@@ -730,7 +739,7 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(list?.warning), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child(list.warning)))
         .when(Boolean(list?.loading), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child("Loading issues…")))
         .when(Boolean(list?.loaded && !list.loading && !list.error && !issues.length && !group.work.length), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.dim).child("No matching issues")))
-        .child(div().pl(22).py(5).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
+        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`capture-${p.id}`, "Capture idea", () => dialog({ action: "capture", project: p.id }))).child(this.button(`new-${p.id}`, "+ Task", () => dialog({ action: "new", project: p.id })))));
   }
 
   /** Issues per project, enriched, for the tree. A project not yet expanded contributes
@@ -797,8 +806,8 @@ export default class LinearWorkspace extends LinearClient {
           : "↻", cx => this.refresh(cx), { enabled: !this.refreshing }).tooltip(this.refreshing ? "Refreshing Linear tickets" : "Refresh Linear tickets")))
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
-      .child(h_flex().flex_none().items_center().gap(7)
-        .child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true }))
+      .child(h_flex().flex_none().items_center().flex_wrap().gap(7)
+        .child(this.button("capture-idea", "Capture idea", () => dialog({ action: "capture" }), { primary: true })).child(this.button("new-task", "+ New task", () => dialog({ action: "new" })))
         .child(this.button("home-filter-button", count ? `Filters (${count})` : "Filters", () => this.openFilters()))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.muted).child(`${records.length} spaces`)))
@@ -834,8 +843,8 @@ export default class LinearWorkspace extends LinearClient {
         .child(this.button("projects-close", "Close", () => closeOverlay(props().overlay))))
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
-      .child(h_flex().flex_none().gap(6)
-        .child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true }))
+      .child(h_flex().flex_none().flex_wrap().gap(6)
+        .child(this.button("capture-idea", "Capture idea", () => dialog({ action: "capture" }), { primary: true })).child(this.button("new-task", "+ New task", () => dialog({ action: "new" })))
         .child(this.button("browse-linear", "Browse", () => dialog())))
       .child(h_flex().h(22).flex_none().items_center().gap(8).pt(2)
         .child(div().text_size(10).font_semibold().text_color(t.dim).child(`${projectCount} PROJECT${projectCount === 1 ? "" : "S"}`))
@@ -881,6 +890,7 @@ export default class LinearWorkspace extends LinearClient {
     const action = fn => { if (props().overlay) closeOverlay(props().overlay); fn(); };
     return v_flex().id("ticket-launcher").w_full().p(10).gap(8).bg(t.popover)
       .child(div().text_size(12).font_semibold().text_color(t.foreground).child("Work in a Linear issue"))
+      .child(this.button("launch-capture", "Capture idea…", () => action(() => dialog({ action: "capture" }))))
       .child(this.button("launch-new", "New task…", () => action(() => dialog({ action: "new" })), { primary: true }))
       .child(this.button("launch-existing", is ? `Continue ${is.identifier}…` : "Choose an existing issue…", () => action(() => dialog(is ? { issue: { key: is.identifier, workspaceKey: data?.workspace?.urlKey } } : {}))))
       .when(Boolean(is), el => el.child(this.button("utility-terminal", "Utility terminal for this issue", () => action(() => run("tab.new", { space: s.id, name: "Shell" })))))

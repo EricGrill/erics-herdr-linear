@@ -14,8 +14,9 @@
 
 import { View, div } from "gpui-kit";
 import * as fs from "fs/promises";
-import { v_flex, h_flex, InputState, Input, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
 import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
+import { loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
 import { LinearAPI } from "./api.js";
 import { normalizeConfig } from "./config.js";
 import { validateRepository, validateWorktreeRouting } from "./repository.js";
@@ -178,9 +179,20 @@ export default class Linear extends View {
     });
     this.title = InputState.new({ placeholder: "Title" });
     this.title.on("focus", () => (this.formField = "title"));
-    this.title.on("submit", (_e, cx) => this.submit(cx));
+    this.title.on("submit", (_e, cx) => this.form?.capture ? this.captureDescription.focus() : this.submit(cx));
     this.desc = InputState.new({ placeholder: "Description (Markdown), optional" });
     this.desc.on("focus", () => (this.formField = "desc"));
+    this.idea = TextareaState.new({ placeholder: "What would you like to improve?", rows: 4 });
+    this.captureDescription = TextareaState.new({ placeholder: "Describe the outcome and how to check it", rows: 7 });
+    for (const field of [this.idea, this.title, this.captureDescription]) {
+      field.on("change", (_e, cx) => {
+        if (this.screen === "create" && this.form?.capture && !this.form.restoring && this.form.draft && !this.form.draft.uncertain) {
+          this.saveCapture(cx);
+          cx.notify();
+        }
+      });
+    }
+    this.captureDescription.on("focus", () => (this.formField = "desc"));
     // The new issue's project: a dropdown with a search field.
     this.projSearch = InputState.new({ placeholder: "Search projects…" });
     this.projSearch.on("change", (_e, cx) => cx.notify());
@@ -211,7 +223,9 @@ export default class Linear extends View {
         // Tab (keys.json binds it here, over the app's own): on the new
         // issue's form, from the title to the description and back.
         else if ((c === "tab" || c === "backtab") && this.screen === "create" && !this.projOpen) {
-          const next = this.formField === "title" ? this.desc : this.title;
+          const next = this.form?.capture
+            ? (this.form.review ? (this.formField === "title" ? this.captureDescription : this.title) : this.idea)
+            : (this.formField === "title" ? this.desc : this.title);
           cx.timer.after(0, () => next.focus());
         }
         else if (c === "demo") {
@@ -294,16 +308,17 @@ export default class Linear extends View {
     throw e;
   }
 
-  async linear(req) {
+  async linear(req, expectedWorkspace = null) {
     if (this.demo) return ask({ ...req, demo: true }, null);
     if (this.on == null) await this.findLinear();
+    if (expectedWorkspace && expectedWorkspace !== this.ws) throw new Error("The Linear workspace changed. Reopen capture in the original workspace.");
     // API writes must never be retried automatically: a lost response may
     // follow a successful create or update.
     if (this.api) return this.api.ask({ ...req, workspace: this.ws });
     try {
       return await ask({ ...req, workspace: this.ws }, this.on || null);
     } catch (e) {
-      if (e instanceof AppError) throw e;
+      if (e instanceof AppError || req.op === "create" || expectedWorkspace) throw e;
       await this.findLinear();
       if (this.api) return this.api.ask({ ...req, workspace: this.ws });
       return ask({ ...req, workspace: this.ws }, this.on || null);
@@ -658,6 +673,10 @@ export default class Linear extends View {
       if (this.demo) return openOverlay({ mod: this.from, kind: "dialog", width: 0.8, height: 0.8, props: { demo: true } });
       return run("mod.open", { name: this.from });
     }
+    if (this.screen === "create" && this.form?.capture) {
+      if (!this.form.leaving) return this.closeCapture(cx);
+      if (props()?.action === "capture") return this.dismiss();
+    }
     this.direct = false;
     const id = this.screen === "project" ? this.curProject?.id : this.cur?.id;
     this.screen = "list";
@@ -952,55 +971,277 @@ export default class Linear extends View {
 
   // The form: title, description, team, status, priority, project, and
   // whether it's yours. In a project (listed, or open), the issue goes in it.
-  create(cx) {
+  create(cx, capture = false, projectId = null) {
     const context = this.screen === "project" ? this.curProject : this.drilled;
     const project = context ?? this.projectsFor(null).find((p) => p.id === this.taskDefaults().lastProject);
-    this.form = { team: null, state: null, priority: 0, project: project?.id ?? null, assignToMe: true, teams: null, states: {} };
-    const form = this.form;
-    this.rememberProject(form.project);
+    const form = { team: null, state: null, priority: 0, project: projectId ?? project?.id ?? (capture ? this.taskDefaults().lastProject : null) ?? null, assignToMe: true, teams: null, states: {}, capture };
+    if (capture) {
+      if (!this.ws && !this.demo) return this.say("Select a Linear workspace to save an idea.", cx, true);
+      form.workspace = this.ws;
+      form.storageKey = this.demo ? "demo/w-halcyon" : this.ws;
+      try { form.draft = loadDraft(localStorage, form.storageKey) ?? { revision: 0 }; }
+      catch (error) {
+        form.unreadable = error.message;
+        form.unreadableRaw = error.unreadableRaw;
+        this.form = form;
+        this.screen = "create";
+        this.say(error.message, cx, true);
+        return;
+      }
+      const d = form.draft;
+      if (d.revision) Object.assign(form, { project: d.project, priority: d.priority, assignToMe: d.assignToMe });
+      form.review = Boolean(d.review);
+    } else this.rememberProject(form.project);
+    form.restoring = true;
+    this.form = form;
     this.screen = "create";
     this.menu = null;
     this.err = this.flash = "";
-    this.title.set_value("");
+    this.title.set_value(form.draft?.title ?? "");
     this.desc.set_value("");
+    if (capture) {
+      this.idea.set_value(form.draft.idea ?? "");
+      this.captureDescription.set_value(form.draft.description ?? "");
+    }
+    form.restoring = false;
+    form.waitingProjects = capture && form.project && !this.lists.projects?.loaded;
+    if (!form.waitingProjects) this.loadFormTeams(cx, project);
+    cx.timer.after(30, () => (capture && !form.review ? this.idea : this.title).focus());
+    cx.notify();
+  }
+
+  loadFormTeams(cx, project = null) {
+    const form = this.form;
     cx.spawn(async (cx) => {
       try {
-        const res = await this.linear({ op: "teams" });
+        const res = await this.linear({ op: "teams" }, form.workspace);
         if (this.form !== form || this.screen !== "create") return;
         form.teams = res.teams;
         const selected = this.projectsFor(null).find((p) => p.id === form.project) ?? (project?.id === form.project ? project : null);
         const key = selected?.teams?.[0];
-        const t = res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
-        if (t) this.pickTeam(t, cx);
+        const t = res.teams.find(t => t.id === form.draft?.team) ?? res.teams.find((t) => t.key === key) ?? res.teams.find((t) => t.key === localStorage.getItem("team")) ?? res.teams[0];
+        if (t) this.pickTeam(t, cx, true);
       } catch (e) {
         if (this.form !== form || this.screen !== "create") return;
         this.say(String(e?.message ?? e), cx, true);
       }
       cx.notify();
     });
-    cx.timer.after(30, () => this.title.focus());
-    cx.notify();
   }
 
-  pickTeam(t, cx) {
+  pickTeam(t, cx, restoring = false) {
     if (this.busy) return;
     const f = this.form;
+    const savedState = restoring && f.draft?.team === t.id ? f.draft.state : null;
     f.team = t;
-    f.state = t.defaultIssueState?.id ?? null;
+    f.state = savedState ?? t.defaultIssueState?.id ?? null;
     localStorage.setItem("team", t.key);
-    if (f.project && !this.projectsFor(t).some((p) => p.id === f.project)) {
+    if (f.project && (!f.capture || this.lists.projects?.loaded) && !this.projectsFor(t).some((p) => p.id === f.project)) {
       f.project = null;
-      this.rememberProject(null);
-      if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
+      if (!f.capture) {
+        this.rememberProject(null);
+        if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.launchTarget?.machine ?? null, cx);
+      } else this.say("The saved project is unavailable for this team. Choose a project or continue without one.", cx);
     }
+    const applyStates = () => {
+      if (!f.capture || this.form !== f || f.team?.id !== t.id || f.draft.uncertain || this.screen !== "create") return;
+      const states = f.states[t.id] ?? [];
+      if (savedState && states.some(x => x.id === savedState && !["completed", "canceled"].includes(x.type))) f.state = savedState;
+      else f.state = (states.find(x => x.type === "backlog") ?? states.find(x => x.type === "triage") ?? states.find(x => x.id === t.defaultIssueState?.id && !["completed", "canceled"].includes(x.type)) ?? states.find(x => x.type === "unstarted"))?.id ?? null;
+      this.saveCapture(cx);
+    };
     if (!f.states[t.id]) {
       cx.spawn(async (cx) => {
         try {
-          f.states[t.id] = (await this.linear({ op: "states", team: t.id })).states;
-        } catch {}
+          f.states[t.id] = (await this.linear({ op: "states", team: t.id }, f.workspace)).states;
+          applyStates();
+        } catch (error) {
+          if (f.capture && this.form === f && f.team?.id === t.id) this.say("Could not load team statuses. Retry loading ticket details.", cx, true);
+        }
         cx.notify();
       });
+    } else applyStates();
+    if (f.capture && !f.draft.uncertain) this.saveCapture(cx);
+    cx.notify();
+  }
+
+  saveCapture(cx, changes = {}) {
+    const f = this.form;
+    if (!f?.capture || f.restoring || this.screen !== "create") return false;
+    try {
+      const draft = { ...f.draft, idea: this.idea.value(), title: this.title.value(), description: this.captureDescription.value(),
+        review: f.review, team: f.team?.id ?? f.draft.team ?? null, project: f.project, state: f.state ?? f.draft.state ?? null,
+        priority: f.priority, assignToMe: f.assignToMe, ...changes };
+      if (!draft.idea && !f.draft.revision) return true;
+      if (Object.keys(draft).some(key => draft[key] !== f.draft[key])) f.draft = saveDraft(localStorage, f.storageKey, draft);
+      f.saveError = "";
+      return true;
+    } catch (error) {
+      f.saveError = error.message;
+      this.say(f.saveError, cx, true);
+      return false;
     }
+  }
+
+  reviewCapture(cx) {
+    const f = this.form;
+    if (this.busy || !f?.capture || f.draft.uncertain) return;
+    if (!this.idea.value().trim()) return this.say("Write an idea first.", cx, true);
+    if (!this.saveCapture(cx)) return;
+    const idea = this.idea.value();
+    const previous = f.draft.generated;
+    let generated = previous;
+    let preservedEdits = false;
+    if (previous?.idea !== idea) {
+      generated = { idea, ...shapeIdea(idea) };
+      f.restoring = true;
+      for (const [key, field] of [["title", this.title], ["description", this.captureDescription]]) {
+        const generatedField = previous ? field.value() === previous[key] : !field.value();
+        if (generatedField) field.set_value(generated[key]);
+        else preservedEdits = true;
+      }
+      f.restoring = false;
+    }
+    f.review = true;
+    if (this.saveCapture(cx, { generated }) && preservedEdits)
+      this.say("The source idea changed. Review the custom ticket text kept from your earlier draft.", cx);
+    cx.timer.after(0, () => this.title.focus());
+    cx.notify();
+  }
+
+  improveCapture(cx) {
+    const f = this.form;
+    if (!f?.capture || !f.review || f.shaping || f.draft.uncertain || this.busy || !this.saveCapture(cx)) return;
+    const { id, revision, idea } = f.draft;
+    f.shaping = true;
+    cx.spawn(async cx => {
+      try {
+        await localStorage.flush();
+        const result = await shapeWithAI(idea);
+        if (this.form !== f || this.screen !== "create" || this.closing || !f.review || this.busy || f.draft.uncertain) return;
+        const stored = loadDraft(localStorage, f.storageKey);
+        if (f.saveError || stored?.id !== id || f.draft.revision !== revision || stored?.revision !== revision)
+          return this.say("The draft changed while shaping. Your edits were kept.", cx);
+        f.restoring = true;
+        this.title.set_value(result.title);
+        this.captureDescription.set_value(result.description);
+        f.restoring = false;
+        if (this.saveCapture(cx, { generated: { idea, ...result } })) this.say("Suggestions are ready to edit.", cx);
+      } catch (error) {
+        if (this.form === f && this.screen === "create" && !this.closing && !this.busy && !f.draft.uncertain)
+          this.say(`AI shaping unavailable: ${error.message}. Your draft is ready to edit.`, cx, true);
+      } finally { f.shaping = false; cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  closeCapture(cx, discard = false) {
+    const f = this.form;
+    if (this.busy || f.leaving) return;
+    try {
+      if (discard && (f.unreadable || f.draft.revision)) discardDraft(localStorage, f.storageKey, f.unreadable ? f.unreadableRaw : f.draft);
+      else if (!f.unreadable && !f.draft.uncertain && !this.saveCapture(cx)) return;
+    } catch (error) { return this.say(error.message, cx, true); }
+    this.busy = discard ? "Discarding draft…" : "Saving draft…";
+    cx.spawn(async cx => {
+      try {
+        await localStorage.flush();
+        this.busy = "";
+        f.leaving = true;
+        this.back(cx);
+      } catch (error) { this.busy = ""; this.say(`Could not save the draft change: ${error.message}`, cx, true); }
+    });
+    cx.notify();
+  }
+
+  async completeCapture(issue, f, cx) {
+    f.confirmedIssue = issue;
+    try {
+      if (!f.draft.confirmedIssue) {
+        if (!this.saveCapture(cx, { uncertain: true, confirmedIssue: issue })) throw new Error(f.saveError);
+      }
+      await localStorage.flush();
+      this.lists.recent = null;
+      this.loadAll(cx);
+      this.blockLaunchTarget("Choose a computer and repository when you are ready to start work.", cx);
+      this.openIssue(issue, cx);
+      if (!f.clearedConfirmed) {
+        discardDraft(localStorage, f.storageKey, f.draft);
+        f.clearedConfirmed = true;
+      }
+      await localStorage.flush();
+      this.say(`Ticket ${issue.identifier} is ready. Start work when ready.`, cx);
+    } catch (error) {
+      this.screen = "create";
+      this.say(`Linear created ${issue.identifier}${issue.url ? " " + issue.url : ""}. Could not finish opening or clearing the draft: ${error.message}`, cx, true);
+    }
+  }
+
+  openConfirmedCapture(issue, f, cx) {
+    if (this.busy) return;
+    this.busy = "Opening ticket…";
+    cx.spawn(async cx => { await this.completeCapture(issue, f, cx); this.busy = ""; cx.notify(); });
+    cx.notify();
+  }
+
+  submitCapture(cx) {
+    const f = this.form;
+    if (!f?.capture || !f.review || this.busy || f.unreadable || f.draft.uncertain) return;
+    if (this.ws !== f.workspace) return this.say("Reopen capture in the original workspace.", cx, true);
+    if (!this.idea.value().trim() || !this.title.value().trim()) return this.say("Add an idea and a ticket title first.", cx, true);
+    if (!f.team || !f.states[f.team.id]?.some(s => s.id === f.state && !["completed", "canceled"].includes(s.type)))
+      return this.say("Choose an available open status for this team before creating.", cx, true);
+    if (f.project && !this.projectsFor(f.team).some(p => p.id === f.project)) return this.say("Choose a project that belongs to this team, or select No project.", cx, true);
+    const preview = this.captureDescription.value();
+    const source = `## Source idea\n\n${this.idea.value()}`;
+    const description = preview.includes(source) ? preview : [preview, source].filter(Boolean).join("\n\n");
+    try {
+      if (readExecutionTarget(description)) throw new Error("Reserved placement");
+    } catch {
+      return this.say("Remove the copied Herdr execution target from the idea or description before creating. Your draft is kept.", cx, true);
+    }
+    if (!this.saveCapture(cx, { uncertain: true })) return;
+    const d = f.draft;
+    this.busy = "Creating ticket…";
+    cx.notify();
+    cx.spawn(async cx => {
+      try { await localStorage.flush(); }
+      catch (error) {
+        this.busy = "";
+        this.saveCapture(cx, { uncertain: false });
+        this.say(`Could not save the draft before creation: ${error.message}. No ticket request was sent.`, cx, true);
+        return;
+      }
+      let issue;
+      try {
+        const res = await this.linear({ op: "create", new: { team: d.team, title: d.title.trim(), description,
+          project: d.project ?? "", state: d.state ?? "", priority: d.priority, assignToMe: d.assignToMe } }, f.workspace);
+        if (!res.issue?.id || !res.issue.identifier) throw new Error("Missing issue identifier");
+        issue = res.issue;
+      } catch (error) {
+        this.busy = "";
+        this.say("Creation not confirmed. Check recent issues before retrying.", cx, true);
+        return;
+      }
+      await this.completeCapture(issue, f, cx);
+      this.busy = "";
+      cx.notify();
+    });
+  }
+
+  checkCaptureResult(cx) {
+    const f = this.form;
+    if (!f?.draft.uncertain || this.busy) return;
+    this.busy = "Checking recent issues…";
+    cx.spawn(async cx => {
+      try {
+        const { issues } = await this.linear({ op: "list", tab: "recent" }, f.workspace);
+        if (!Array.isArray(issues)) throw new Error("Recent issues could not be verified.");
+        f.matches = issues.filter(is => is.title === f.draft.title.trim() && (!is.teamId || is.teamId === f.draft.team));
+        this.say(f.matches.length ? "Open a match in Linear to verify its source idea." : "No matching title in recent issues. Check Linear before allowing a retry.", cx);
+      } catch (error) { f.matches = null; this.say(error.message, cx, true); }
+      finally { this.busy = ""; cx.notify(); }
+    });
     cx.notify();
   }
 
@@ -1016,11 +1257,12 @@ export default class Linear extends View {
   pickProject(id, cx) {
     if (this.busy) return;
     this.form.project = id;
-    this.rememberProject(id);
-    if (this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
+    if (this.form.capture) this.saveCapture(cx);
+    else this.rememberProject(id);
+    if (!this.form.capture && this.chooseComputer && !props()?.attachSpace) this.chooseComputer(this.defaultTaskMachine(), cx);
     this.projOpen = false;
     this.projSearch.set_value("");
-    cx.timer.after(30, () => this.title.focus());
+    cx.timer.after(30, () => (this.form.capture && !this.form.review ? this.idea : this.title).focus());
     cx.notify();
   }
 
@@ -1037,7 +1279,7 @@ export default class Linear extends View {
         cx.notify();
       })
       .when(Boolean(cur), (el) => el.child(icon(projectIcon(cur.status.type), hue(o, cur.status.color), 12)))
-      .child(div().text_size(12).text_color(cur ? o.fg : o.muted).child(cur ? cur.name : "No project"))
+      .child(div().text_size(12).text_color(cur ? o.fg : o.muted).child(cur ? cur.name : f.capture && f.project ? "Project unavailable" : "No project"))
       .child(icon("chevron", o.dim, 11));
     const matches = this.projOpen ? this.projectMatches() : [];
     const row = (id, label, lead, on) => h_flex().id(`pj-opt-${id ?? "none"}`).h(28).px(8).gap(8).items_center().rounded(5).cursor_pointer()
@@ -1064,6 +1306,7 @@ export default class Linear extends View {
   submit(cx, startAfterCreate = false) {
     const f = this.form;
     if (!f || this.busy) return;
+    if (f.capture) return startAfterCreate ? undefined : this.submitCapture(cx);
     const title = this.title.value().trim();
     if (!title) return this.say("Give it a title first.", cx, true);
     if (!f.team) return this.say("Still loading your teams; try again in a moment.", cx, true);
@@ -1184,6 +1427,9 @@ export default class Linear extends View {
       case "n":
         this.create(cx);
         break;
+      case "i":
+        if (!props()?.attachSpace) this.create(cx, true);
+        break;
       case "o":
         this.open(p.url, cx);
         break;
@@ -1206,6 +1452,7 @@ export default class Linear extends View {
     else if (k === "ctrl-s" && r) this.worktree(cx, true, r);
     else if (k === "ctrl-o" && r) this.open((r.issue ?? r.project).url, cx);
     else if (k === "ctrl-n") this.create(cx);
+    else if (k === "ctrl-i" && !props()?.attachSpace) this.create(cx, true);
     else if (k === "ctrl-t") this.switchWorkspace(cx);
     else return false;
     return true;
@@ -1513,40 +1760,104 @@ export default class Linear extends View {
     const f = this.form;
     const canCreate = !this.busy && (Boolean(props()?.attachSpace) || Boolean(this.launchTarget?.folder));
     const states = f.team ? f.states[f.team.id] ?? [] : [];
+    if (f.unreadable) return v_flex().gap(8).child(div().text_color(o.fix).child(f.unreadable))
+      .child(this.button("capture-corrupt-close", "Close", cx => this.back(cx)))
+      .when(typeof f.unreadableRaw === "string", el => el.child(this.button("capture-corrupt-discard", f.confirmDiscard ? "Confirm delete unreadable draft" : "Discard unreadable draft", cx => {
+        if (f.confirmDiscard) this.closeCapture(cx, true); else { f.confirmDiscard = true; cx.notify(); }
+      })));
+    if (f.capture && f.draft.uncertain) return this.uncertainCaptureView(o, f);
     const pick = (id, items, isOn, onPick) => h_flex().gap(6).flex_wrap().items_center().children(items.map((x, i) => {
       const on = isOn(x);
       return h_flex().id(`${id}-${i}`).flex_none().h(24).px(8).gap(5).items_center().rounded(6).cursor_pointer()
         .border_1().border_color(on ? o.accent : o.line).when(on, (el) => el.bg(tint(o.accent, 0.14))).when(!on, (el) => el.hover((s) => s.bg(o.raised)))
         .on_click((_e, cx) => {
+          if (this.busy) return;
           onPick(x, cx);
+          if (f.capture) this.saveCapture(cx);
           cx.notify();
         })
         .children(x.parts.filter(Boolean).map((p) => (typeof p === "string" ? div().text_size(12).text_color(on ? o.fg : o.muted).child(p) : p)));
     }));
     const input = (state) => h_flex().h(36).flex_none().px(12).items_center().rounded(8).border_1().border_color(o.line).bg(o.sunk)
       .child(Input.new(state).flex_1().h_full().text_size(13).text_color(o.fg));
+    const textarea = state => v_flex().flex_none().p(10).rounded(8).border_1().border_color(o.line).bg(o.sunk)
+      .child(Textarea.new(state).w_full().text_size(13).text_color(o.fg));
+    const details = !f.capture || f.details;
     return v_flex().id("create-form").flex_1().min_h(0).overflow_y_scrollbar().gap(12)
       .child(h_flex().flex_none().gap(10).items_center()
         .child(this.backButton(o, this.fromLabel()))
-        .child(div().text_size(14).font_semibold().text_color(o.fg).child(`New issue in ${this.workspace()?.name ?? "Linear"}`)))
-      .child(input(this.title))
-      .child(input(this.desc))
+        .child(div().text_size(14).font_semibold().text_color(o.fg).child(f.capture ? "Capture idea" : `New issue in ${this.workspace()?.name ?? "Linear"}`)))
+      .when(f.capture && !f.review, el => el
+        .child(div().text_size(13).text_color(o.fg).child("What would you like to improve?"))
+        .child(textarea(this.idea)))
+      .when(f.capture && f.review, el => el
+        .child(div().text_size(12).text_color(o.muted).child("Review the ticket"))
+        .child(input(this.title)).child(textarea(this.captureDescription))
+        .child(div().text_size(12).text_color(o.muted).child("Source idea · included in the ticket"))
+        .child(div().text_size(13).text_color(o.fg).child(f.draft.idea)))
+      .when(!f.capture, el => el.child(input(this.title)).child(input(this.desc)))
       .child(this.field(o, "Team", f.teams
         ? pick("tm", f.teams.map((t) => ({ ...t, parts: [div().font_family(MONO).text_size(11.5).text_color(o.muted).child(t.key), t.name] })), (t) => t.id === f.team?.id, (t, cx) => this.pickTeam(t, cx))
         : div().text_color(o.dim).child("Loading…")))
-      .child(this.field(o, "Status", states.length
+      .when(f.capture, el => el.child(this.field(o, "Project", this.projectField(o))))
+      .when(f.capture, el => el.child(h_flex().flex_wrap().gap(6).child(this.button("capture-details", f.details ? "Hide ticket details" : "Ticket details", cx => { f.details = !f.details; cx.notify(); }))
+        .child(div().text_size(11.5).text_color(o.muted).child([states.find(s => s.id === f.state)?.name, PRIORITIES[f.priority], f.assignToMe ? "Me" : "Nobody"].filter(Boolean).join(" · ")))))
+      .when(details, el => el.child(this.field(o, "Status", states.length
         ? pick("st", states.filter((s) => s.type !== "completed" && s.type !== "canceled").map((s) => ({ ...s, parts: [icon(stateIcon(s), hue(o, s.color), 12), s.name] })), (s) => s.id === f.state, (s) => (f.state = s.id))
-        : div().text_color(o.dim).child("…")))
-      .child(this.field(o, "Priority", pick("pr", PRIORITIES.map((n, i) => ({ i, parts: [priorityIcon(i) ? icon(priorityIcon(i), i === 1 ? o.fix : o.muted, 12) : null, n] })), (x) => x.i === f.priority, (x) => (f.priority = x.i))))
-      .child(this.field(o, "Project", this.projectField(o)))
-      .child(this.field(o, "Assignee", pick("me", [{ me: true, parts: [icon("person", o.muted, 12), "Me"] }, { me: false, parts: ["Nobody"] }], (x) => x.me === f.assignToMe, (x) => (f.assignToMe = x.me))))
-      .when(!props()?.attachSpace && Boolean(this.launchOptions), el => el.child(this.launchOptions()))
-      .child(h_flex().flex_none().gap(10).items_center()
+        : div().text_color(o.dim).child("…"))))
+      .when(details, el => el.child(this.field(o, "Priority", pick("pr", PRIORITIES.map((n, i) => ({ i, parts: [priorityIcon(i) ? icon(priorityIcon(i), i === 1 ? o.fix : o.muted, 12) : null, n] })), (x) => x.i === f.priority, (x) => (f.priority = x.i)))))
+      .when(!f.capture, el => el.child(this.field(o, "Project", this.projectField(o))))
+      .when(details, el => el.child(this.field(o, "Assignee", pick("me", [{ me: true, parts: [icon("person", o.muted, 12), "Me"] }, { me: false, parts: ["Nobody"] }], (x) => x.me === f.assignToMe, (x) => (f.assignToMe = x.me)))))
+      .when(f.capture, el => el.child(this.captureActions(o, f)))
+      .when(!f.capture && !props()?.attachSpace && Boolean(this.launchOptions), el => el.child(this.launchOptions()))
+      .when(!f.capture, el => el.child(h_flex().flex_none().gap(10).items_center()
         .child(div().flex_1().text_size(11).text_color(o.muted).child(props()?.attachSpace ? `Creating also attaches to ${props().attachSpace.name}` : "Create a ticket, or start work in its own worktree"))
         .child(h_flex().id("create-btn").flex_none().h(30).px(14).items_center().rounded(7).bg(o.accent).opacity(canCreate ? 1 : 0.5).when(canCreate, el => el.cursor_pointer().hover(s => s.opacity(0.85)))
           .on_click((_e, cx) => { if (canCreate) this.submit(cx); })
           .child(div().text_size(12.5).font_semibold().text_color(o.surface).child("Create issue")))
-        .when(!props()?.attachSpace && Boolean(this.createStartButton), el => el.child(this.createStartButton())));
+        .when(!props()?.attachSpace && Boolean(this.createStartButton), el => el.child(this.createStartButton()))));
+  }
+
+  captureActions(o, f) {
+    const ready = !!(f.team && f.states[f.team.id]?.some(s => s.id === f.state && !["completed", "canceled"].includes(s.type)) && this.title.value().trim() && this.idea.value().trim() && !this.busy);
+    return v_flex().flex_none().gap(7)
+      .when(f.saveError, el => el.child(div().text_size(12).text_color(o.fix).child(f.saveError))
+        .child(h_flex().gap(7).flex_wrap().child(this.button("capture-copy", "Copy my idea", cx => this.copy(this.idea.value(), cx)))
+          .child(this.button("capture-reopen", "Reload saved draft", cx => this.create(cx, true, f.project)))))
+      .when(f.draft.revision && !f.saveError, el => el.child(div().text_size(11).text_color(o.muted).child("Draft saved on this computer")))
+      .child(h_flex().gap(7).flex_wrap().items_center()
+        .when(!f.review, el => el.child(this.button("capture-review", "Shape ticket", cx => this.reviewCapture(cx), { primary: true, enabled: !!this.idea.value().trim() })))
+        .when(f.review, el => el.child(this.button("capture-create", "Create ticket", cx => this.submitCapture(cx), { primary: true, enabled: ready && !f.saveError }))
+          .child(this.button("capture-edit", "Edit idea", cx => { f.review = false; this.saveCapture(cx); cx.timer.after(0, () => this.idea.focus()); cx.notify(); })))
+        .when(!f.teams || (f.team && !f.states[f.team.id]), el => el.child(this.button("capture-reload", "Reload ticket details", cx => this.loadFormTeams(cx))))
+        .child(this.button("capture-close", "Save and close", cx => this.back(cx)))
+        .child(this.button("capture-discard", "Discard draft", cx => { f.confirmDiscard = true; cx.notify(); })))
+      .when(f.confirmDiscard, el => el.child(h_flex().gap(7).flex_wrap().child(this.button("capture-confirm-discard", "Delete this draft", cx => this.closeCapture(cx, true)))
+        .child(this.button("capture-keep", "Keep draft", cx => { f.confirmDiscard = false; cx.notify(); }))))
+      .when(f.review, el => el.child(h_flex().gap(7).flex_wrap().items_center()
+        .child(this.button("capture-ai", f.shaping ? "Improving…" : "Improve with AI", cx => this.improveCapture(cx), { enabled: !f.shaping && !this.busy }))
+        .child(div().text_size(11.5).text_color(o.muted).child("Sends your idea to OpenAI to suggest a title and description."))));
+  }
+
+  uncertainCaptureView(o, f) {
+    const confirmed = f.confirmedIssue ?? f.draft.confirmedIssue;
+    if (confirmed) return v_flex().gap(8)
+      .child(div().text_color(o.fg).child(`Linear created ${confirmed.identifier}.`))
+      .when(confirmed.url, el => el.child(this.button("capture-confirmed-link", "Open in Linear", cx => this.open(confirmed.url, cx))))
+      .child(this.button("capture-confirmed-open", "Open ticket and clear draft", cx => this.openConfirmedCapture(confirmed, f, cx), { enabled: !this.busy }))
+      .child(this.button("capture-confirmed-close", "Close", cx => this.back(cx), { enabled: !this.busy }));
+    return v_flex().id("capture-recovery").flex_1().min_h(0).overflow_y_scrollbar().gap(10)
+      .child(div().text_size(15).font_semibold().text_color(o.fg).child(this.busy ? "Checking ticket creation" : "Creation not confirmed"))
+      .child(div().text_size(13).text_color(o.fg).child(f.draft.title))
+      .child(div().text_size(12).text_color(o.muted).child("Your draft is saved. Check recent issues for an existing ticket before trying again."))
+      .child(h_flex().flex_wrap().gap(7).child(this.button("capture-check", "Check recent issues", cx => this.checkCaptureResult(cx), { primary: true, enabled: !this.busy }))
+        .child(this.button("capture-later", "Close", cx => this.back(cx), { enabled: !this.busy })))
+      .children((f.matches ?? []).map(is => h_flex().gap(6).flex_wrap()
+        .child(this.button(`capture-open-${is.id}`, `Open ${is.identifier} in Linear`, cx => this.open(is.url, cx)))
+        .child(this.button(`capture-use-${is.id}`, `Use ${is.identifier}`, cx => this.openConfirmedCapture(is, f, cx), { enabled: !this.busy }))))
+      .when(Array.isArray(f.matches) && !this.busy, el => el.child(h_flex().flex_wrap().child(this.button("capture-allow-retry", "I checked Linear. Allow another attempt", cx => {
+        if (this.saveCapture(cx, { uncertain: false })) { f.matches = null; this.say("Review the draft before creating another ticket.", cx); }
+      }))));
   }
 
   menuView(o) {
@@ -1589,11 +1900,13 @@ export default class Linear extends View {
         k(["w"], "worktree", (cx) => this.worktree(cx, false, { project: this.curProject }), "f-w"),
         k(["s"], "start", (cx) => this.worktree(cx, true, { project: this.curProject }), "f-s"),
         k(["n"], "new issue", (cx) => this.create(cx), "f-n"),
+        ...(!props()?.attachSpace ? [k(["i"], "capture idea", cx => this.create(cx, true), "f-idea")] : []),
         k(["o"], "Linear", (cx) => this.open(this.curProject.url, cx), "f-o"),
         k(["esc"], "back", (cx) => this.escape(cx), "f-esc"),
       ];
     }
     if (this.screen === "create") {
+      if (this.form?.capture) return [k(["esc"], "close draft", cx => this.escape(cx), "f-esc")];
       return [k(["tab"], "next field", () => {}, "f-tab"), k(["enter"], "create", (cx) => this.submit(cx), "f-go"), k(["esc"], "cancel", (cx) => this.escape(cx), "f-esc")];
     }
     if (this.signedOut) return [k(["esc"], "close", (cx) => this.escape(cx), "f-esc")];
@@ -1603,6 +1916,7 @@ export default class Linear extends View {
       k(["enter"], "open", (cx) => this.enter(cx), "f-go"),
       k(["^s"], "start", (cx) => sel && this.worktree(cx, true, sel), "f-s"),
       k(["^n"], "new issue", (cx) => this.create(cx), "f-n"),
+      ...(!props()?.attachSpace ? [k(["^i"], "capture idea", cx => this.create(cx, true), "f-idea")] : []),
       k(["^o"], "Linear", (cx) => sel && this.open((sel.issue ?? sel.project).url, cx), "f-o"),
     ];
     if (this.workspaces.length > 1 && !this.demo) out.push(k(["^t"], "workspace", (cx) => this.switchWorkspace(cx), "f-t"));

@@ -26,6 +26,35 @@ The grouping is a view of work, not a workflow automation. Finishing an agent ru
 not mark a Linear ticket Done. Commands typed directly into a terminal can still start
 unlinked work; the issue header identifies spaces that have no ticket.
 
+## Capture an idea first
+
+Choose **Capture idea** from the issue list or a project's view. Write the thought in
+one field. Team and project remain visible and editable; computer, repository and agent
+selection wait until you choose to start work. The existing **New task** flow retains
+its execution checks.
+
+Capture saves a local draft as you type, scoped to the selected Linear workspace in
+that mod. Closing the dialog or restarting Herdr restores it. **Discard draft** removes
+it explicitly. Storage failures and conflicting revisions are shown instead of silently
+replacing another window's draft. Drafts remain local to this app and are not synced
+between computers or the two mods.
+
+**Shape ticket** makes an immediate local template you can edit. **Improve with AI** is
+an explicit optional action that sends the idea text to OpenAI and returns a proposed
+title, problem, outcome, acceptance checks and open questions. It uses `gpt-6-luna` via
+the Responses API with tools disabled and `store: false`; this does not disable all
+provider retention. It requires `OPENAI_API_KEY` in the Herdr process environment and
+uses the account's API billing. Keys are not placed in preferences or command arguments.
+No agent session or worktree is started for shaping. Without a key or on failure, the
+local draft and basic ticket path remain available.
+
+Review the title and description, then choose **Create ticket**. The original idea is
+preserved in the ticket description. Capture-only tickets do not contain a fabricated
+execution target. After creation, choose **Start agent** and select a validated computer
+and existing repository. A failed or unconfirmed create retains the draft and asks you
+to check recent issues before retrying, since a lost response can follow a successful
+write. Finishing a capture or agent run does not mark an issue Done.
+
 ## Choose where a task runs
 
 In New task, select **Computer**, then **Repository**. The repository list comes from
