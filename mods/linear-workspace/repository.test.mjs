@@ -151,3 +151,15 @@ test("explicit repository choice cancels pending ticket restoration without drop
   assert.equal(view.agentsChecked, true);
   assert.equal(notified, true);
 });
+
+
+test("ambiguous repository paths are rejected before the trimming backend can select a sibling", async t => {
+  const home = await fixture(t), root = join(home, "code");
+  await mkdir(root);
+  const h = await harness({ home });
+  for (const name of ["trailing ", "line\nbreak"]) {
+    const folder = join(root, name);
+    await run("git", ["init", folder]);
+    await assert.rejects(h.validateRepository({ machine: null, folder }), /unambiguous path/);
+  }
+});
