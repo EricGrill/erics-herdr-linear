@@ -827,3 +827,39 @@ test("API create transport failure is never retried through either authenticatio
   await assert.rejects(h.client.linear({ op: "create", new: { title: "Task", team: "team-one" } }), /response lost after write/);
   assert.equal(h.requests.length, 0);
 });
+
+test("OAuth transport retry dispatches to API when rediscovery finds a configured key", async () => {
+  const h = await harness({
+    teamsReply: () => { throw new Error("previous backend unavailable"); },
+    config: { enrichment: { envKey: "TASK_LINEAR_KEY" } },
+    apiReply: ({ query }) => query.includes("TaskIdentity")
+      ? { data: { organization: { id: "workspace-one" }, viewer: { id: "viewer" } } }
+      : { data: { teams: { nodes: [{ id: "api-team", name: "API team" }], pageInfo: { hasNextPage: false } } } },
+  });
+  assert.equal((await h.client.linear({ op: "teams" })).teams[0].id, "api-team");
+  assert.equal(h.requests.length, 1, "the failed old request is not retried through OAuth");
+});
+
+test("real New Task submit uses configured authentication and retains selected project and target", async () => {
+  const writes = [];
+  const h = await harness({ config: { enrichment: { envKey: "TASK_LINEAR_KEY" } }, apiReply: ({ query, variables }) => {
+    if (query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one", urlKey: "example" }, viewer: { id: "viewer-one" } } };
+    assert.match(query, /mutation TaskCreate/);
+    writes.push(variables.input);
+    return { data: { issueCreate: { success: true, issue: { ...ticket,
+      branchName: ticket.branch, team: { id: ticket.teamId, key: ticket.teamKey },
+      state: { id: "state-one", name: "Todo", type: "unstarted" }, assignee: null,
+    } } } };
+  } });
+  await h.client.findLinear();
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].projectId, "project-one");
+  assert.equal(writes[0].assigneeId, "viewer-one");
+  assert.match(writes[0].description, /ericsHerdrLinearExecutionTarget/);
+  assert.equal(h.validations[0].folder, sourceSpace.folder);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.commands.length, 0, "ordinary Create does not create a terminal or agent");
+});
