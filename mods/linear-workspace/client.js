@@ -16,7 +16,7 @@ import { View, div } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
 import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
-import { loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
+import { draftStorage, loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
 import { LinearAPI } from "./api.js";
 import { normalizeConfig } from "./config.js";
 import { validateRepository, validateWorktreeRouting } from "./repository.js";
@@ -990,7 +990,8 @@ export default class Linear extends View {
       if (!this.ws && !this.demo) return this.say("Select a Linear workspace to save an idea.", cx, true);
       form.workspace = this.ws;
       form.storageKey = this.demo ? "demo/w-halcyon" : this.ws;
-      try { form.draft = loadDraft(localStorage, form.storageKey) ?? { revision: 0 }; }
+      this.draftStore ??= draftStorage(localStorage, shared, setShared);
+      try { form.draft = loadDraft(this.draftStore, form.storageKey) ?? { revision: 0 }; }
       catch (error) {
         form.unreadable = error.message;
         form.unreadableRaw = error.unreadableRaw;
@@ -1096,7 +1097,7 @@ export default class Linear extends View {
         review: f.review, team: f.team?.id ?? f.draft.team ?? null, project: f.project, state: f.state ?? f.draft.state ?? null,
         priority: f.priority, assignToMe: f.assignToMe, ...changes };
       if (!draft.idea && !f.draft.revision) return true;
-      if (Object.keys(draft).some(key => draft[key] !== f.draft[key])) f.draft = saveDraft(localStorage, f.storageKey, draft);
+      if (Object.keys(draft).some(key => draft[key] !== f.draft[key])) f.draft = saveDraft(this.draftStore, f.storageKey, draft);
       f.saveError = "";
       return true;
     } catch (error) {
@@ -1139,10 +1140,9 @@ export default class Linear extends View {
     f.shaping = true;
     cx.spawn(async cx => {
       try {
-        await localStorage.flush();
         const result = await shapeWithAI(idea);
         if (this.form !== f || this.screen !== "create" || this.closing || !f.review || this.busy || f.draft.uncertain) return;
-        const stored = loadDraft(localStorage, f.storageKey);
+        const stored = loadDraft(this.draftStore, f.storageKey);
         if (f.saveError || stored?.id !== id || f.draft.revision !== revision || stored?.revision !== revision)
           return this.say("The draft changed while shaping. Your edits were kept.", cx);
         f.restoring = true;
@@ -1162,19 +1162,11 @@ export default class Linear extends View {
     const f = this.form;
     if (this.busy || f.leaving) return;
     try {
-      if (discard && (f.unreadable || f.draft.revision)) discardDraft(localStorage, f.storageKey, f.unreadable ? f.unreadableRaw : f.draft);
+      if (discard && (f.unreadable || f.draft.revision)) discardDraft(this.draftStore, f.storageKey, f.unreadable ? f.unreadableRaw : f.draft);
       else if (!f.unreadable && !f.draft.uncertain && !this.saveCapture(cx)) return;
     } catch (error) { return this.say(error.message, cx, true); }
-    this.busy = discard ? "Discarding draft…" : "Saving draft…";
-    cx.spawn(async cx => {
-      try {
-        await localStorage.flush();
-        this.busy = "";
-        f.leaving = true;
-        this.back(cx);
-      } catch (error) { this.busy = ""; this.say(`Could not save the draft change: ${error.message}`, cx, true); }
-    });
-    cx.notify();
+    f.leaving = true;
+    this.back(cx);
   }
 
   async completeCapture(issue, f, cx) {
@@ -1183,16 +1175,14 @@ export default class Linear extends View {
       if (!f.draft.confirmedIssue) {
         if (!this.saveCapture(cx, { uncertain: true, confirmedIssue: issue })) throw new Error(f.saveError);
       }
-      await localStorage.flush();
       this.lists.recent = null;
       this.loadAll(cx);
       this.blockLaunchTarget("Choose a computer and repository when you are ready to start work.", cx);
       this.openIssue(issue, cx);
       if (!f.clearedConfirmed) {
-        discardDraft(localStorage, f.storageKey, f.draft);
+        discardDraft(this.draftStore, f.storageKey, f.draft);
         f.clearedConfirmed = true;
       }
-      await localStorage.flush();
       this.say(`Ticket ${issue.identifier} is ready. Start work when ready.`, cx);
     } catch (error) {
       this.screen = "create";
@@ -1228,13 +1218,6 @@ export default class Linear extends View {
     this.busy = "Creating ticket…";
     cx.notify();
     cx.spawn(async cx => {
-      try { await localStorage.flush(); }
-      catch (error) {
-        this.busy = "";
-        this.saveCapture(cx, { uncertain: false });
-        this.say(`Could not save the draft before creation: ${error.message}. No ticket request was sent.`, cx, true);
-        return;
-      }
       let issue;
       try {
         const res = await this.linear({ op: "create", new: { team: d.team, title: d.title.trim(), description,
