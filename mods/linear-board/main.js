@@ -71,6 +71,7 @@ export default class LinearWorkspace extends LinearClient {
       // strip is the only one that needs a clock, to settle its own height.
       return;
     }
+    this.readVersion = 0;
     this.extraIssues = {};
     this.resolved = {};
     this.expanded = JSON.parse(localStorage.getItem("expandedProjects") ?? "{}");
@@ -93,10 +94,13 @@ export default class LinearWorkspace extends LinearClient {
   /** Delegates and labels, which herdr-linear cannot answer. One copy of the mod fetches
    *  and publishes; a failure leaves the last good read in place and shows why. */
   startEnrich(cx) {
-    if (this.enriching || this.demo || this.signedOut) return;
+    if (this.enriching) return this.enrichPromise;
+    if (this.demo || this.signedOut) return Promise.resolve();
+    const workspace = this.ws, epoch = this.workspaceEpoch;
     this.enriching = true;
-    cx.spawn(async cx => {
-      const current = enrichmentRequest();
+    this.enrichPromise = new Promise(resolve => cx.spawn(async cx => {
+      const latest = enrichmentRequest();
+      const current = () => latest() && workspace === this.ws && epoch === this.workspaceEpoch;
       try {
         const text = await fs.readFile(`${appHome()}/erics-linear.config.json`, "utf8").catch(error => {
           if (error?.code === "ENOENT" || /no such file|not found|ENOENT/i.test(String(error?.message ?? error))) return "{}";
@@ -116,8 +120,9 @@ export default class LinearWorkspace extends LinearClient {
       } catch (error) {
         if (!current()) return;
         setShared(ENRICH, { ...sharedEnrich(), error: `Layout config: ${error?.message ?? error}`, on: this.on || null });
-      } finally { this.enriching = false; cx.notify(); }
-    });
+      } finally { this.enriching = false; cx.notify(); resolve(); }
+    }));
+    return this.enrichPromise;
   }
 
   loadTeams(cx) {
@@ -215,18 +220,22 @@ export default class LinearWorkspace extends LinearClient {
     return [...byId.values()];
   }
 
-  publish(incoming = []) {
+  publish(incoming = [], version = (this.readVersion = (this.readVersion ?? 0) + 1)) {
     if (!this.ws || this.demo) return;
     const data = shared(DATA) ?? {};
     const issues = new Map(this.allIssues().map(i => [i.id, i]));
-    for (const is of incoming) if (is.identifier) issues.set(is.id, is);
+    this.issueVersions ??= {};
+    for (const is of incoming) if (is.identifier && version >= (this.issueVersions[`${this.ws}/${is.id}`] ?? 0)) {
+      issues.set(is.id, is);
+      this.issueVersions[`${this.ws}/${is.id}`] = version;
+    }
     const next = { workspace: this.workspace(), projects: this.lists.projects?.items ?? data[this.ws]?.projects ?? [], issues: [...issues.values()] };
     if (JSON.stringify(data[this.ws]) !== JSON.stringify(next)) setShared(DATA, { ...data, [this.ws]: next });
     if (this.role === "sidebar" && shared(ACTIVE) !== this.ws) setShared(ACTIVE, this.ws);
   }
 
-  didLoad(tab, cx) {
-    this.publish(this.lists[tab]?.error ? [] : this.lists[tab]?.items ?? []);
+  didLoad(tab, cx, version) {
+    this.publish(this.lists[tab]?.error ? [] : this.lists[tab]?.items ?? [], version);
     if (this.role === "sidebar") this.resolveSpaces(cx);
     const p = props();
     if (this.role === "dialog" && p.action === "new" && tab === "projects" && !this.startedForm) {
@@ -244,40 +253,129 @@ export default class LinearWorkspace extends LinearClient {
     super.replaceRow(is);
     this.publish([is]);
   }
+  load(tab, cx, req = { op: "list", tab }) {
+    if (this.role !== "sidebar") return super.load(tab, cx, req);
+    const list = (this.lists[tab] ??= { items: [], loaded: false });
+    if (list.loading) return list.pending;
+    const workspace = this.ws, epoch = this.workspaceEpoch, version = (this.readVersion = (this.readVersion ?? 0) + 1);
+    list.loading = true;
+    cx.notify();
+    list.pending = new Promise(resolve => cx.spawn(async cx => {
+      try {
+        const result = await this.linear(req);
+        if ((workspace !== this.ws || epoch !== this.workspaceEpoch) || this.lists[tab] !== list) return;
+        list.items = result.issues ?? result.projects ?? [];
+        list.warning = result.warning ?? "";
+        list.error = "";
+        list.cached = false;
+        this.signedOut = false;
+        this.keep(tab, list.items);
+        this.didLoad(tab, cx, version);
+      } catch (error) {
+        if (workspace === this.ws && epoch === this.workspaceEpoch && this.lists[tab] === list) list.error = String(error?.message ?? error);
+      } finally {
+        list.loading = false;
+        list.loaded = true;
+        cx.notify();
+        resolve();
+      }
+    }));
+    return list.pending;
+  }
+
   loadAll(cx) {
     super.loadAll(cx);
-    for (const [id, open] of Object.entries(this.expanded)) {
+    for (const [id, open] of Object.entries(this.expanded ?? {})) {
       if (open) this.load(`project:${id}`, cx, { op: "list", tab: "project", project: id });
     }
+    return Promise.all(Object.values(this.lists ?? {}).map(list => list?.pending));
   }
-  switchWorkspace(cx) { super.switchWorkspace(cx); this.publish(); }
+  switchWorkspace(cx) {
+    this.workspaceEpoch = (this.workspaceEpoch ?? 0) + 1;
+    super.switchWorkspace(cx);
+    this.publish();
+  }
   records() {
     return workRecords({ allSpaces: spaces(), allPanes: panes(), allAgents: agents(),
       issues: this.allIssues(), links: shared(LINKS) ?? [], workspace: this.ws });
   }
 
-  resolveSpaces(cx) {
-    if (this.resolving || !this.ws || this.on == null || this.signedOut || this.demo) return;
-    const issues = this.allIssues();
-    const keys = [...new Set(spaces().filter(s => !matchIssue(s, issues, shared(LINKS) ?? [], this.ws, panes()))
-      .map(s => issueKey(s.branch) ?? issueKey(s.name) ?? issueKey(folderOf(s, panes()))).filter(Boolean))]
-      .filter(k => Date.now() - (this.resolved[`${this.ws}/${k}`] ?? 0) > 60000).slice(0, 8);
-    if (!keys.length) return;
-    const workspace = this.ws;
-    this.resolving = true;
+  reload(cx) {
+    if (this.role === "sidebar") return this.refresh(cx);
+    return super.reload(cx);
+  }
+
+  refresh(cx) {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    this.err = "";
+    let workspace = this.ws;
+    let epoch = this.workspaceEpoch;
+    cx.notify();
     cx.spawn(async cx => {
       try {
+        // Let older reads settle before requesting a new snapshot.
+        await Promise.all([...Object.values(this.lists ?? {}).map(list => list?.pending), this.resolvePending, this.enrichPromise]);
+        if ((workspace !== this.ws || epoch !== this.workspaceEpoch)) return;
+        if (!this.demo && (this.signedOut || this.on == null)) {
+          await this.findLinear();
+          if (epoch !== this.workspaceEpoch) return;
+          if (workspace !== this.ws) {
+            this.lists = {};
+            this.expanded = {};
+            this.drilled = this.found = null;
+            this.seedAll();
+            epoch = this.workspaceEpoch = (this.workspaceEpoch ?? 0) + 1;
+          }
+          workspace = this.ws;
+          this.signedOut = false;
+        }
+        await this.loadAll(cx);
+        if ((workspace !== this.ws || epoch !== this.workspaceEpoch)) return;
+        const failures = [];
+        await Promise.all([this.resolveSpaces(cx, true, failures), this.startEnrich(cx)]);
+        if ((workspace !== this.ws || epoch !== this.workspaceEpoch)) return;
+        failures.push(...Object.values(this.lists ?? {}).map(list => list?.error).filter(Boolean));
+        if (sharedEnrich().error) failures.push(sharedEnrich().error);
+        this.err = failures.length ? `Refresh incomplete: ${[...new Set(failures)].join("; ")}` : "";
+      } catch (error) {
+        if (workspace === this.ws && epoch === this.workspaceEpoch) {
+          if (error?.signedOut) this.signedOut = true;
+          this.err = `Refresh failed: ${error?.message ?? error}`;
+        }
+      } finally { this.refreshing = false; cx.notify(); }
+    });
+  }
+
+  resolveSpaces(cx, force = false, failures = []) {
+    if (this.refreshing && !force) return Promise.resolve();
+    if (this.resolving) return this.resolvePending;
+    if (!this.ws || this.demo || (!force && (this.on == null || this.signedOut))) return Promise.resolve();
+    const issues = this.allIssues();
+    let keys = [...new Set(spaces().map(space => {
+      const matched = matchIssue(space, issues, shared(LINKS) ?? [], this.ws, panes());
+      if (matched && !force) return null;
+      return matched?.identifier ?? issueKey(space.branch) ?? issueKey(space.name) ?? issueKey(folderOf(space, panes()));
+    }).filter(Boolean))];
+    if (!force) keys = keys.filter(key => Date.now() - (this.resolved[`${this.ws}/${key}`] ?? 0) > 60000).slice(0, 8);
+    if (!keys.length) return Promise.resolve();
+    const workspace = this.ws, epoch = this.workspaceEpoch, version = (this.readVersion = (this.readVersion ?? 0) + 1);
+    this.resolving = true;
+    this.resolvePending = new Promise(resolve => cx.spawn(async cx => {
+      try {
         for (const key of keys) {
-          if (workspace !== this.ws) break;
+          if ((workspace !== this.ws || epoch !== this.workspaceEpoch)) break;
           this.resolved[`${workspace}/${key}`] = Date.now();
           try {
-            const res = await this.linear({ op: "find", key });
-            if (workspace === this.ws) this.publish(res.issues ?? []);
-          } catch { /* Local work stays visible if Linear cannot be reached. */ }
+            const result = await this.linear({ op: "find", key });
+            if ((workspace !== this.ws || epoch !== this.workspaceEpoch)) break;
+            if (!result.issues?.length) failures.push(`${key}: Linear returned no issue`);
+            this.publish(result.issues ?? [], version);
+          } catch (error) { failures.push(`${key}: ${error?.message ?? error}`); }
         }
-        this.publish();
-      } finally { this.resolving = false; cx.notify(); }
-    });
+      } finally { this.resolving = false; cx.notify(); resolve(); }
+    }));
+    return this.resolvePending;
   }
 
   /** Opens Crew as a kept window: it reopens where it was dropped, and on the next start,
@@ -423,7 +521,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
-        .child(div().truncate().text_size(11).text_color(color).child(`${label}${!is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`)))
+        .child(div().truncate().text_size(11).text_color(color).child(`${label}${is?.state?.name ? ` · Linear: ${is.state.name}` : !is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`)))
       .children(this.harnessIcons([record]))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -637,7 +735,9 @@ export default class LinearWorkspace extends LinearClient {
         .child(this.button("crew", "Crew", () => this.openCrew()))
         .child(this.button("live-agents", "Agents", () => run("mod.open", { name: "erics-linear-agents" })).tooltip("Show agents · ⌘⌥A"))
         .child(div().flex_1())
-        .child(this.button("refresh", "↻", cx => { this.loadAll(cx); this.resolveSpaces(cx); this.startEnrich(cx); })))
+        .child(this.button("refresh", this.refreshing
+          ? h_flex().gap(5).child(div().frames(["◐", "◓", "◑", "◒"], 120)).child("Refreshing…")
+          : "↻", cx => this.refresh(cx), { enabled: !this.refreshing }).tooltip(this.refreshing ? "Refreshing Linear tickets" : "Refresh Linear tickets")))
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().flex_none().items_center().gap(7)
