@@ -41,7 +41,8 @@ Linear workspace, project and computer. Existing capture commands and shortcuts 
 the same form.
 
 New task saves a local draft as you type, scoped to the selected Linear workspace in
-that mod. Closing the dialog or restarting Herdr restores it, including the selected
+that mod, using a stable persisted app key across dialog instances.
+Closing the dialog or restarting Herdr restores it, including the selected
 repository. **Discard draft** removes it explicitly. Storage failures and conflicting
 revisions are shown instead of silently replacing another window's draft. Drafts remain
 local to this app and are not synced between computers or the two mods. Existing idea

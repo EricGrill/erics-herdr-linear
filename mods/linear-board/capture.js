@@ -11,6 +11,31 @@ const keyFor = workspace => {
   return PREFIX + workspace;
 };
 
+// Native localStorage belongs to one overlay instance. Shared state is persisted
+// by Herdr and has a stable key across openings. Retain the native checkpoint
+// for legacy recovery, but do not await its per-overlay background writer.
+export function draftStorage(local, readShared, writeShared) {
+  const sharedKey = key => "linear-board.idea-drafts:" + key;
+  return {
+    getItem(key) {
+      const saved = readShared(sharedKey(key));
+      if (saved != null) return saved;
+      const legacy = local.getItem(key);
+      if (legacy != null && legacy !== "") writeShared(sharedKey(key), legacy);
+      return legacy;
+    },
+    setItem(key, value) {
+      local.setItem(key, value);
+      writeShared(sharedKey(key), value);
+    },
+    removeItem(key) {
+      local.removeItem(key);
+      // A tombstone prevents another old overlay from reviving its checkpoint.
+      writeShared(sharedKey(key), "");
+    },
+  };
+}
+
 function validateDraft(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("The saved idea draft is invalid. It has not been replaced.");
   const draft = { ...value };
