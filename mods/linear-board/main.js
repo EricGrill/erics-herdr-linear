@@ -484,6 +484,12 @@ export default class LinearWorkspace extends LinearClient {
     run("space.select", { id: record.space.id });
     if (a) run("agent.focus", { terminal: a.address });
   }
+  // Right-click: Herdr's own space menu (Rename, worktrees, Close) for the space clicked,
+  // not the focused one. Closing a space is Herdr's confirmed close; its ticket is untouched.
+  spaceMenu(space, cx) {
+    cx.stop_propagation();
+    return openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space.id } } });
+  }
   visit(is) {
     const record = this.records().find(r => r.issue?.id === is.id);
     if (this.role === "projects") this.dismiss();
@@ -594,6 +600,7 @@ export default class LinearWorkspace extends LinearClient {
     return h_flex().id(id).min_w(0).h(49).flex_none().px(8).gap(8).items_center().rounded(6)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
+      .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
@@ -977,6 +984,7 @@ export default class LinearWorkspace extends LinearClient {
     return h_flex().id(id).min_w(0).h(26).flex_none().px(6).gap(6).items_center().rounded(5)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
+      .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx))
       .child(icon(record.needs ? "need" : record.status === "working" ? "work" : "idle", color, 11)
         .when(record.status === "working", el => el.spin(1100)))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
