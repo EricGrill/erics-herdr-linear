@@ -101,7 +101,10 @@ async function harness(options = {}) {
       if (options.routingError) throw new Error(options.routingError);
     } },
     "herdr": {
-      shared: key => sharedStore.get(key), setShared: (key, value) => sharedStore.set(key, value), setAgentOrder: noop,
+      shared: key => sharedStore.get(key), setShared: (key, value) => {
+        if (key.includes(".idea-drafts:") && options.failDraftWrite?.()) throw new Error("Disk full");
+        sharedStore.set(key, value);
+      }, setAgentOrder: noop,
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
       run: (name, args) => { commands.push({ name, args }); return {}; }, exec, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
@@ -903,7 +906,7 @@ test("quick capture restores multiline text and edited preview across reopening,
   h.client.captureDescription.set_value("Proposed check: create with no repository.");
   h.client.closeCapture(h.cx);
   await h.flush();
-  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
   reopened.openCapture();
   await reopened.flush();
   assert.equal(reopened.client.idea.value(), raw);
@@ -913,6 +916,44 @@ test("quick capture restores multiline text and edited preview across reopening,
   reopened.openCapture("second-workspace");
   await reopened.flush();
   assert.equal(reopened.client.idea.value(), "");
+});
+
+test("capture survives a new native overlay with separate localStorage", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  const idea = "CHA-4216: save this idea across dialogs\nKeep the edited ticket too.";
+  h.client.idea.set_value(idea);
+  h.client.reviewCapture(h.cx);
+  h.client.title.set_value("Saved ticket preview");
+  h.client.captureDescription.set_value("My acceptance checks");
+  h.client.back(h.cx);
+  await h.flush();
+  // Herdr gives each overlay its own localStorage. Persisted shared state
+  // survives both a fresh overlay and a host restart.
+  const reopened = await harness({ ...captureOptions(),
+    sharedStore: new Map(JSON.parse(JSON.stringify([...h.sharedStore]))) });
+  reopened.openCapture();
+  await reopened.flush();
+  assert.equal(reopened.client.idea.value(), idea);
+  assert.equal(reopened.client.title.value(), "Saved ticket preview");
+  assert.equal(reopened.client.captureDescription.value(), "My acceptance checks");
+  assert.equal(reopened.client.form.review, true);
+  assert.equal(reopened.requests.some(x => x.request.op === "create"), false);
+});
+
+test("Save and close does not wait on an unrelated overlay storage flush", async () => {
+  let flushes = 0;
+  const h = await harness({ ...captureOptions(), props: { action: "capture" },
+    flushStorage: () => { flushes++; return new Promise(() => {}); } });
+  h.openCapture();
+  await h.flush();
+  h.client.idea.set_value("Keep this when native flush never settles");
+  h.client.back(h.cx);
+  // Allow native async work to start, without waiting forever on its promise.
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(h.client.form.leaving, true, "the persisted draft allows the dialog to close");
+  assert.equal(flushes, 0, "draft durability uses persisted host state");
 });
 
 test("capture create needs only ticket context and one click, preserves source, and does not launch", async () => {
@@ -967,7 +1008,7 @@ test("uncertain create survives restart, avoids automatic OAuth retry, and requi
   await h.flush();
   assert.equal(h.requests.filter(x => x.request.op === "create").length, 1);
   assert.match(h.client.err, /not confirmed/);
-  const reopened = await harness({ ...captureOptions(), storage: h.storage, recent: [{ ...ticket, title: h.client.title.value() }] });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h), recent: [{ ...ticket, title: h.client.title.value() }] });
   reopened.openCapture();
   await reopened.flush();
   reopened.client.submitCapture(reopened.cx);
@@ -1022,7 +1063,7 @@ test("late AI suggestion cannot replace a human edit and failed AI preserves the
   assert.match(offline.client.err, /AI shaping unavailable/);
 });
 
-test("capture preserves drafts offline and refuses to publish on a failed local flush", async () => {
+test("capture preserves drafts offline and refuses to publish on a failed persisted draft write", async () => {
   const h = await harness({ ...captureOptions(), teamsReply: () => { throw new Error("Offline"); } });
   h.openCapture();
   h.client.idea.set_value("Save this while offline");
@@ -1030,16 +1071,18 @@ test("capture preserves drafts offline and refuses to publish on a failed local 
   assert.match(h.client.err, /Offline/);
   assert.equal(h.client.form.draft.idea, "Save this while offline");
 
-  const disk = await harness({ ...captureOptions(), flushStorage: async () => { throw new Error("Disk full"); } });
+  let failWrite = false;
+  const disk = await harness({ ...captureOptions(), failDraftWrite: () => failWrite });
   disk.openCapture();
   await disk.flush();
   disk.client.idea.set_value("Protect the draft");
   disk.client.reviewCapture(disk.cx);
+  failWrite = true;
   disk.client.submitCapture(disk.cx);
   await disk.flush();
   assert.equal(disk.requests.some(x => x.request.op === "create"), false);
-  assert.match(disk.client.err, /No ticket request was sent/);
-  assert.equal(disk.client.form.draft.uncertain, false);
+  assert.match(disk.client.err, /Disk full/);
+  assert.equal(Boolean(disk.client.form.draft.uncertain), false);
 });
 
 test("corrupt draft is preserved until explicitly discarded", async () => {
@@ -1063,7 +1106,7 @@ test("reshaping a changed source updates generated fields and retains reviewed e
   h.client.title.set_value("A custom title");
   h.client.form.review = false;
   h.client.idea.set_value("Second idea");
-  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
   reopened.openCapture();
   await reopened.flush();
   reopened.client.reviewCapture(reopened.cx);
@@ -1090,7 +1133,7 @@ test("confirmed create survives a local navigation failure and can be reopened w
   assert.match(h.client.err, /Linear created DEMO-3785/);
   assert.match(h.client.err, /https:\/\/linear.app/);
   assert.equal(h.requests.filter(x => x.request.op === "create").length, 1);
-  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
   reopened.openCapture();
   await reopened.flush();
   const form = reopened.client.form;
@@ -1125,8 +1168,9 @@ test("a source edit refreshes an accepted AI shape but keeps a subsequent custom
 test("a stale unreadable draft dialog cannot discard another window's replacement", async () => {
   const key = "linear.idea-draft.v1:workspace-one";
   const storage = new Map([[key, "{bad"]]);
-  const first = await harness({ ...captureOptions(), storage });
-  const second = await harness({ ...captureOptions(), storage });
+  const sharedStore = new Map();
+  const first = await harness({ ...captureOptions(), storage, sharedStore });
+  const second = await harness({ ...captureOptions(), storage, sharedStore });
   first.openCapture();
   second.openCapture();
   second.client.closeCapture(second.cx, true);

@@ -37,7 +37,8 @@ selection wait until you choose to start work. The existing **New task** flow re
 its execution checks.
 
 Capture saves a local draft as you type, scoped to the selected Linear workspace in
-that mod. Closing the dialog or restarting Herdr restores it. **Discard draft** removes
+that mod, using a stable persisted app key shared across its dialog instances.
+Closing the dialog or restarting Herdr restores it. **Discard draft** removes
 it explicitly. Storage failures and conflicting revisions are shown instead of silently
 replacing another window's draft. Drafts remain local to this app and are not synced
 between computers or the two mods.
