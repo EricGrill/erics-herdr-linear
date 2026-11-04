@@ -69,3 +69,23 @@ export function projectGroups(projects, records, attention = []) {
 export function taskContext(issue, description = "") {
   return `Work on Linear issue ${issue.identifier}: ${issue.title}\n${issue.url ?? ""}\n\n${description}\n\nKeep this work scoped to ${issue.identifier}. Use this issue for progress and findings; create linked issues for separate follow-up work. Verify the result and report checks and remaining risks. Do not mark the issue Done just because the agent run finishes.`;
 }
+
+/** The Linear desktop app's link for a linear.app web link: the same path under linear://.
+ *  Anything that is not a linear.app link has no app link. */
+export function linearAppUrl(url) {
+  const m = /^https:\/\/linear\.app\/([^?#]+)/i.exec(String(url ?? ""));
+  return m ? `linear://${m[1].replace(/\/+$/, "")}` : null;
+}
+
+/** What right-clicking an issue offers: open it in the Linear app, in the browser, or copy
+ *  its link. An issue without a web link offers nothing. */
+export function issueMenuItems(issue) {
+  const url = issue?.url ? String(issue.url) : "";
+  if (!url) return [];
+  const app = linearAppUrl(url);
+  return [
+    ...(app ? [{ label: "Open in Linear app", action: "open", url: app }] : []),
+    { label: "Open in browser", action: "open", url },
+    { label: "Copy link", action: "copy", url },
+  ];
+}

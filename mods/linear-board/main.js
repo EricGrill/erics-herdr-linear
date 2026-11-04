@@ -7,7 +7,7 @@ import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
 import { tint, icon, stateIcon, MONO } from "./look.js";
-import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext } from "./model.js";
+import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
@@ -69,6 +69,7 @@ export default class LinearWorkspace extends LinearClient {
     this.role = p.role ?? (p.overlay ? "dialog" : "sidebar");
     this.docked = this.role !== "dialog";
     if (this.role === "crew") return void this.crewInit(cx);
+    if (this.role === "issue-menu") return void this.issueMenuInit(cx);
     if (PASSIVE.includes(this.role)) {
       // These copies re-render on shared state and on the live space/agent lists; the
       // strip is the only one that needs a clock, to settle its own height.
@@ -663,6 +664,7 @@ export default class LinearWorkspace extends LinearClient {
     return v_flex().id(id).flex_none().pl(22).pr(6).py(4).gap(3).min_w(0).rounded(6)
       .when(needs, el => el.bg(tint(t.blocked, 0.07)))
       .hover(s => s.bg(t.hover)).cursor_pointer().on_click(() => this.visit(full))
+      .on_mouse_down("right", (_e, cx) => this.issueMenu(full, cx))
       .child(h_flex().gap(7).min_w(0).items_center()
         .child(icon(needs ? "need" : stateIcon(full.state), needs ? t.blocked : t.dim, 12))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(full.title))
@@ -1036,6 +1038,7 @@ export default class LinearWorkspace extends LinearClient {
     }
     const labels = visibleLabels(is);
     return v_flex().id("issue-panel").size_full().min_h(0).p(12).gap(9).bg(t.background)
+      .on_mouse_down("right", (_e, cx) => this.issueMenu(is, cx))
       .child(h_flex().gap(7).items_center().min_w(0)
         .child(icon(stateIcon(is.state), t.muted, 13))
         .child(div().flex_1().min_w(0).truncate().text_size(12).font_family(MONO).text_color(t.foreground).child(is.identifier))
@@ -1393,6 +1396,7 @@ export default class LinearWorkspace extends LinearClient {
       .bg(a.needs ? tint(t.blocked, 0.07) : t.popover).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => this.crewInspect(row, cx))
+      .on_mouse_down("right", (_e, cx) => this.issueMenu(row, cx))
       .child(div().pt(1).child(this.crewCheck(`${id}-pick`, crew.picked.has(row.id), cx => this.crewTogglePick(row.id, cx))))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(h_flex().gap(7).min_w(0).items_center()
@@ -1455,7 +1459,8 @@ export default class LinearWorkspace extends LinearClient {
     const record = live.records[0] ?? null;
     const section = (label, kids) => v_flex().flex_none().gap(3).pt(4)
       .child(div().text_size(10).font_semibold().text_color(t.dim).child(label)).children(kids);
-    return v_flex().flex_1().min_h(0).min_w(0).gap(7)
+    return v_flex().id("crew-inspector").flex_1().min_h(0).min_w(0).gap(7)
+      .when(Boolean(is), el => el.on_mouse_down("right", (_e, cx) => this.issueMenu(is, cx)))
       .child(h_flex().flex_none().gap(6).items_center().flex_wrap()
         .child(this.button("crew-back", `← ${crew.agent?.name ?? "Queue"}`, cx => { crew.issueId = null; cx.notify(); }))
         .child(div().flex_1())
@@ -1496,7 +1501,42 @@ export default class LinearWorkspace extends LinearClient {
           ])))));
   }
 
+  /** The right-click menu on an issue, opened by issueMenu() as its own popup. */
+  issueMenuInit(cx) {
+    this.menuAt = 0;
+    this.menuFocus = cx.focus_handle();
+    this.menuFocus.focus();
+  }
+  issueMenuChoose(i, cx) {
+    const p = props() ?? {}, it = issueMenuItems(p.issue)[i];
+    if (!it) return;
+    // Act before closing: closing drops this popup's view and the context with it.
+    if (it.action === "copy") cx.write_to_clipboard(it.url);
+    else if (!p.demo) cx.open_url(it.url);
+    closeOverlay(p.overlay);
+  }
+  issueMenuView() {
+    const t = theme(), p = props() ?? {}, items = issueMenuItems(p.issue);
+    return v_flex().id("issue-menu").track_focus(this.menuFocus).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
+      .on_key_down((e, cx) => {
+        const n = items.length;
+        if (e.key === "escape") return void closeOverlay(p.overlay);
+        if (!n) return;
+        if (e.key === "down") this.menuAt = (this.menuAt + 1) % n;
+        else if (e.key === "up") this.menuAt = (this.menuAt + n - 1) % n;
+        else if (e.key === "enter") return void this.issueMenuChoose(this.menuAt, cx);
+        else return;
+        cx.notify();
+      })
+      .when(Boolean(p.issue?.identifier), el => el.child(div().px(8).pt(3).pb(4).truncate().text_size(10.5).font_family(MONO).text_color(t.dim).child(p.issue.identifier)))
+      .children(items.map((it, i) => h_flex().id(`issue-menu-${i}`).h(28).px(8).gap(9).rounded(7).items_center()
+        .text_color(t.foreground).when(i === this.menuAt, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).cursor_pointer()
+        .on_click((_e, cx) => this.issueMenuChoose(i, cx))
+        .child(div().flex_1().child(it.label))));
+  }
+
   render(cx) {
+    if (this.role === "issue-menu") return this.issueMenuView();
     if (this.role === "header") return this.header();
     if (this.role === "launcher") return this.launcher();
     if (this.role === "spaces") return this.liveStrip();
