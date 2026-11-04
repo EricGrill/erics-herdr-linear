@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 root = pathlib.Path(__file__).resolve().parents[1]
 required = ["README.md", "RECIPE.md", "preview.png", "LICENSE", "THIRD_PARTY_NOTICES.md",
             "layouts/erics-linear.json", "layouts/erics-linear.svg", "scripts/install.py",
-            "scripts/update.sh", "scripts/sync.sh"]
+            "scripts/update.sh", "scripts/sync.sh", "scripts/auto_update.py"]
 errors = [f"Missing {name}" for name in required if not (root / name).is_file()]
 
 def walk(node):
