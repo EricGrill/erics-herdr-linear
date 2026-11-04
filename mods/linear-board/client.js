@@ -20,7 +20,7 @@ import { hc, agents, panes, machines, spaces, run, exec, theme, appHome, props, 
 import { draftStorage, loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
 import { LinearAPI } from "./api.js";
 import { normalizeConfig } from "./config.js";
-import { createRepository, validateRepository, validateWorktreeRouting } from "./repository.js";
+import { createRepository, validateRepository, validateWorktreeRouting, prepareWorktreeBranch } from "./repository.js";
 import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
 import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
 
@@ -929,6 +929,7 @@ export default class Linear extends View {
     cx.spawn(async (cx) => {
       try {
         let fresh = is;
+        let worktreeBase = "";
         // Each step says what it's doing, and gives up with why if it stalls.
         const step = (label, p, ms = 45000) => {
           this.busy = label;
@@ -939,7 +940,7 @@ export default class Linear extends View {
         if (!this.demo) {
           if (!execution || execution.blocked) throw new Error(execution?.blocked && this.repositoryError || "Choose a computer first.");
           if (execution.folder) execution.folder = await step("Validating the selected repository…", validateRepository(execution));
-          await step("Checking repository routing…", validateWorktreeRouting(execution, workspaceKey));
+          worktreeBase = await step("Checking repository routing…", validateWorktreeRouting(execution, workspaceKey)) ?? "";
           if (is && execution.folder) this.rememberLaunchTarget(is, execution);
         }
         if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
@@ -978,6 +979,7 @@ export default class Linear extends View {
         // Configured team repos precede dirs. The guard excludes empty-team
         // overrides; only Git routing clears the team, never Linear check/start.
         const repositoryTarget = { ...target, teamKey: "" };
+        await step("Preparing its work branch…", prepareWorktreeBranch(execution, target.branch, worktreeBase));
         const res = await step(`Making its worktree on ${machine ?? "this computer"}…`,
           job({ op: "worktree", target: repositoryTarget, dirs: [execution.folder] }, machine), 4 * 60000);
         this.trees[target.branch] = { path: res.path, machine };

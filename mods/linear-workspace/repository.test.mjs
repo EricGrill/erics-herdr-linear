@@ -197,3 +197,88 @@ test("ambiguous repository paths are rejected before the trimming backend can se
     await assert.rejects(h.validateRepository({ machine: null, folder }), /unambiguous path/);
   }
 });
+
+
+async function freshBranchFixture(t) {
+  const home = await fixture(t), folder = join(home, "new repo café ' literal");
+  await run("git", ["-c", "init.defaultBranch=main", "init", folder]);
+  await run("git", ["-C", folder, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Initial commit"]);
+  const h = await harness({ home });
+  return { h, home, target: { machine: "remote", folder } };
+}
+
+for (const base of [undefined, null, "", "release/stable"]) test(`CHA-4248: routing exposes configured base ${JSON.stringify(base)}`, async () => {
+  const h = await harness({ exec: async () => ({ code: 0, stdout: JSON.stringify({ base }), stderr: "" }) });
+  assert.equal(await h.validateWorktreeRouting({ machine: "remote", folder: "/selected" }, "example"), base ?? "");
+  assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
+
+for (const base of [42, false, [], {}]) test(`CHA-4248: malformed configured base ${JSON.stringify(base)} fails closed`, async () => {
+  const h = await harness({ exec: async () => ({ code: 0, stdout: JSON.stringify({ base }), stderr: "" }) });
+  await assert.rejects(h.validateWorktreeRouting({ machine: "remote", folder: "/selected" }, "example"), /base|string|configuration/i);
+  assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
+
+test("CHA-4248: a main-only repository with no origin can open its prepared issue worktree", async t => {
+  const { h, home, target } = await freshBranchFixture(t), branch = "fixture/cha-4248";
+  const initial = (await run("git", ["-C", target.folder, "rev-parse", "HEAD"])).stdout.trim();
+  await h.prepareWorktreeBranch(target, branch);
+  assert.equal((await run("git", ["-C", target.folder, "rev-parse", branch])).stdout.trim(), initial);
+  assert.equal((await run("git", ["-C", target.folder, "branch", "--show-current"])).stdout.trim(), "main");
+  assert.equal((await run("git", ["-C", target.folder, "remote"])).stdout.trim(), "");
+  await assert.rejects(run("git", ["-C", target.folder, "config", "--get", `branch.${branch}.remote`]));
+  const worktree = join(home, "opened worktree");
+  await run("git", ["-C", target.folder, "worktree", "add", worktree, branch]);
+  assert.equal((await run("git", ["-C", worktree, "branch", "--show-current"])).stdout.trim(), branch);
+  assert.ok(h.calls.every(c => c.config.on === "remote"), "all preparation executes on the selected target");
+});
+
+test("CHA-4248: repositories with origin retain upstream base selection", async t => {
+  const { h, home, target } = await freshBranchFixture(t), branch = "fixture/cha-4248";
+  await run("git", ["-C", target.folder, "remote", "add", "origin", join(home, "not-contacted.git")]);
+  await h.prepareWorktreeBranch(target, branch);
+  await assert.rejects(run("git", ["-C", target.folder, "show-ref", "--verify", `refs/heads/${branch}`]));
+  assert.equal((await run("git", ["-C", target.folder, "branch", "--show-current"])).stdout.trim(), "main");
+  assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
+
+test("CHA-4248: explicit configured base is respected without creating a local issue branch", async t => {
+  const { h, target } = await freshBranchFixture(t), branch = "fixture/cha-4248";
+  await h.prepareWorktreeBranch(target, branch, "custom/base");
+  assert.deepEqual(h.calls, [], "configured-base handling needs no fallback command");
+  await assert.rejects(run("git", ["-C", target.folder, "show-ref", "--verify", `refs/heads/${branch}`]));
+});
+
+test("CHA-4248: an existing issue branch is never reset to the newer HEAD", async t => {
+  const { h, target } = await freshBranchFixture(t), branch = "fixture/cha-4248";
+  await run("git", ["-C", target.folder, "branch", branch]);
+  const saved = (await run("git", ["-C", target.folder, "rev-parse", branch])).stdout.trim();
+  await run("git", ["-C", target.folder, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "new main commit"]);
+  assert.notEqual((await run("git", ["-C", target.folder, "rev-parse", "HEAD"])).stdout.trim(), saved);
+  await h.prepareWorktreeBranch(target, branch);
+  assert.equal((await run("git", ["-C", target.folder, "rev-parse", branch])).stdout.trim(), saved);
+  assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
+
+test("CHA-4248: unavailable branch targets never fall back to local execution", async () => {
+  const h = await harness({ machines: [{ name: null, layout: "ready" }, { name: "remote", layout: "unavailable" }] });
+  await assert.rejects(h.prepareWorktreeBranch({ machine: "remote", folder: "/remote/repo" }, "fixture/cha-4248"), /unavailable/);
+  assert.deepEqual(h.calls, []);
+});
+
+for (const branch of ["bad..branch", "--all"]) test(`CHA-4248: invalid issue branch ${branch} cannot mutate refs`, async t => {
+  const { h, target } = await freshBranchFixture(t);
+  const before = (await run("git", ["-C", target.folder, "show-ref"])).stdout;
+  await assert.rejects(h.prepareWorktreeBranch(target, branch), /branch|ref/i);
+  assert.equal((await run("git", ["-C", target.folder, "show-ref"])).stdout, before);
+  assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
+
+test("CHA-4248: a repository without HEAD reports an actionable branch-preparation error", async t => {
+  const home = await fixture(t), folder = join(home, "unborn");
+  await run("git", ["init", folder]);
+  const h = await harness({ home });
+  await assert.rejects(h.prepareWorktreeBranch({ machine: "remote", folder }, "fixture/cha-4248"), /HEAD|commit|branch/i);
+  await assert.rejects(run("git", ["-C", folder, "show-ref", "--verify", "refs/heads/fixture/cha-4248"]));
+  assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
