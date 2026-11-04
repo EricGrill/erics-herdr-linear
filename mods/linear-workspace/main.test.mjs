@@ -385,3 +385,22 @@ test("Create & start reflects status readiness without starting anything", async
   assert.equal(h.view.createStartButton().enabled, false);
 
 });
+
+
+test("CHA-4220: opening a follow-up preserves a recovered raw-only idea", async () => {
+  const idea = "An unrelated captured idea";
+  const sharedStore = new Map([["linear-workspace.idea-drafts:linear.idea-draft.v1:workspace-one", JSON.stringify({
+    version: 1, workspace: "workspace-one", draft: {
+      id: "existing-idea", revision: 1, idea, title: "", description: "", review: false,
+      team: "team", project: null, state: "backlog", priority: 0, assignToMe: true, uncertain: false,
+    },
+  })]]);
+  const h = await harness({ sharedStore, props: { action: "new",
+    parentIssue: { identifier: "DEMO-123", url: "https://linear.app/example/issue/DEMO-123" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  assert.equal(h.view.idea.value(), idea);
+  assert.equal(h.view.captureDescription.value(), idea);
+  assert.equal(h.view.title.value(), idea);
+  assert.doesNotMatch(h.view.captureDescription.value(), /Follow-up/);
+});

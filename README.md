@@ -31,8 +31,8 @@ unlinked work; the issue header identifies spaces that have no ticket.
 
 ## Create a task or capture an idea
 
-Choose **New task** from the issue list, a project, or the launcher. Write the request in
-one multiline field, then **Create task**. The first nonempty request line supplies
+Choose **New issue** from the issue list, a project, or the launcher. Write the request in
+one multiline field, then **Create issue**. The first nonempty request line supplies
 the ticket title; the full request is retained as its description. The current task's project
 and repository, or your previous compatible choices, are prefilled and editable.
 Status, priority and assignment are remembered from the previous successful task and
@@ -57,7 +57,7 @@ local draft and direct creation remain available. Shaped tickets preserve their 
 idea; its **Edit source idea** control also offers the existing local **Shape ticket**
 template.
 
-**Create task** validates and saves the selected repository with the ticket. A task can
+**Create issue** validates and saves the selected repository with the ticket. A task can
 also be created without a repository, then assigned one later. **Create & start** requires
 an existing repository and an installed agent; its validated target and submitted text
 are carried through to that launch. A failed or unconfirmed create retains the draft

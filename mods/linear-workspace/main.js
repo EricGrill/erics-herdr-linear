@@ -322,7 +322,7 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(list?.warning), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child(list.warning)))
         .when(Boolean(list?.loading), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.muted).child("Loading issues…")))
         .when(Boolean(list?.loaded && !list.loading && !list.error && !issues.length && !group.work.length), el => el.child(div().pl(22).py(5).text_size(11).text_color(t.dim).child("No matching issues")))
-        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`new-${p.id}`, "+ New task", () => dialog({ action: "new", project: p.id })))));
+        .child(h_flex().pl(22).py(5).gap(5).flex_wrap().child(this.button(`new-${p.id}`, "+ New issue", () => dialog({ action: "new", project: p.id })))));
   }
 
   sidebar() {
@@ -342,7 +342,7 @@ export default class LinearWorkspace extends LinearClient {
         .child(this.button("refresh", "↻", cx => { this.loadAll(cx); this.resolveSpaces(cx); })))
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
-      .child(h_flex().flex_none().flex_wrap().gap(6).child(this.button("new-task", "+ New task", () => dialog({ action: "new" }), { primary: true })).child(this.button("browse-linear", "Browse", () => dialog())))
+      .child(h_flex().flex_none().flex_wrap().gap(6).child(this.button("new-task", "+ New issue", () => dialog({ action: "new" }), { primary: true })).child(this.button("browse-linear", "Browse", () => dialog())))
       .when(attentionCount > 0, el => el.child(this.section("NEEDS YOU", attentionCount, t.blocked))
         .child(v_flex().id("attention-work").h(Math.min(190, needs.length * 49 + withoutWork.length * 43)).flex_none().overflow_y_scrollbar()
           .children(needs.map(r => this.workRow(r, `attention-${r.space.id}`)))
@@ -379,7 +379,7 @@ export default class LinearWorkspace extends LinearClient {
     const action = fn => { if (props().overlay) closeOverlay(props().overlay); fn(); };
     return v_flex().id("ticket-launcher").w_full().p(10).gap(8).bg(t.popover)
       .child(div().text_size(12).font_semibold().text_color(t.foreground).child("Work in a Linear issue"))
-      .child(this.button("launch-new", "New task…", () => action(() => dialog({ action: "new" })), { primary: true }))
+      .child(this.button("launch-new", "New issue…", () => action(() => dialog({ action: "new" })), { primary: true }))
       .child(this.button("launch-existing", is ? `Continue ${is.identifier}…` : "Choose an existing issue…", () => action(() => dialog(is ? { issue: { key: is.identifier, workspaceKey: data?.workspace?.urlKey } } : {}))))
       .when(Boolean(is), el => el.child(this.button("utility-terminal", "Utility terminal for this issue", () => action(() => run("tab.new", { space: s.id, name: "Shell" })))))
       .when(Boolean(s && !is), el => el.child(this.button("launch-attach", "Attach this workspace…", () => action(() => dialog({ action: "attach", attachSpace: currentSource() })))));

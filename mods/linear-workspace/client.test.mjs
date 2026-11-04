@@ -1481,3 +1481,32 @@ test("unified New task derives its title from a single multiline request", async
   assert.equal(created.description, request);
   assert.deepEqual(h.commands, []);
 });
+
+
+test("CHA-4220: a legacy raw idea reopens and creates directly without waiting on native flush", async () => {
+  const idea = "Save captured ideas\nKeep the original text.";
+  const storage = new Map([["linear.idea-draft.v1:workspace-one", JSON.stringify({
+    version: 1, workspace: "workspace-one", draft: {
+      id: "legacy-idea", revision: 1, idea, title: "", description: "", review: false,
+      team: "team-one", project: null, state: "backlog", priority: 0, assignToMe: true, uncertain: false,
+    },
+  })]]);
+  let flushes = 0;
+  const h = await harness({ ...captureOptions(), storage,
+    flushStorage: () => { flushes++; return new Promise(() => {}); } });
+  h.openCapture();
+  await h.flush();
+  assert.equal(h.client.form.review, true);
+  assert.equal(h.client.title.value(), "Save captured ideas");
+  assert.equal(h.client.captureDescription.value(), idea);
+  h.client.submitCapture(h.cx);
+  h.client.submitCapture(h.cx);
+  await h.flush();
+  const creates = h.requests.filter(x => x.request.op === "create");
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].request.new.title, "Save captured ideas");
+  assert.ok(creates[0].request.new.description.includes("## Source idea\n\n" + idea));
+  assert.equal(flushes, 0);
+  assert.deepEqual(h.commands, []);
+  assert.deepEqual(h.validations, []);
+});
