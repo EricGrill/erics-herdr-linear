@@ -51,6 +51,38 @@ export async function validateRepository(target) {
   return target.folder;
 }
 
+// A folder name for a new repository: lowercase ASCII words joined by dashes.
+export function repositorySlug(text) {
+  const slug = String(text ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/, "");
+  return slug || "new-repository";
+}
+
+// Never reuses an existing path: a taken name gets -2, -3, …. The folder is
+// removed again only when this script made it and could not finish the repo.
+// The empty first commit gives the worktree backend a base to branch from.
+const CREATE = `
+[ -n "$HOME" ] && [ -d "$HOME" ] || { printf '%s' 'Cannot resolve this computer’s home directory.' >&2; exit 1; }
+root="$(cd "$HOME" && pwd -P)/code"
+mkdir -p "$root" || { printf 'Cannot create the repository root: %s' "$root" >&2; exit 1; }
+folder="$root/$1"; n=2
+while [ -e "$folder" ] || [ -L "$folder" ]; do folder="$root/$1-$n"; n=$((n + 1)); done
+mkdir "$folder" || { printf 'Cannot create %s' "$folder" >&2; exit 1; }
+if ! out="$(git -C "$folder" init -q 2>&1 && git -C "$folder" commit -q --allow-empty -m "Initial commit" 2>&1)"; then
+  rm -rf "$folder"
+  printf 'Could not create a new Git repository in %s: %s' "$folder" "$out" >&2; exit 1
+fi
+printf '%s\\0%s' "$root" "$folder"`;
+
+export async function createRepository(target, title) {
+  available(target?.machine);
+  const result = await exec("sh", ["-c", CREATE, "herdr-new-repository", repositorySlug(title)], { on: target.machine ?? null });
+  if (result.code !== 0) throw new Error(result.stderr || `Could not create a new repository on ${target.machine ?? "This computer"}.`);
+  const [root, folder] = result.stdout.split("\0");
+  if (!root?.startsWith("/") || !folder?.startsWith(`${root}/`)) throw new Error("This computer did not return the new repository's path.");
+  return { ...target, folder, name: folder.slice(folder.lastIndexOf("/") + 1), root };
+}
+
 export function matchingRepository(repositories, hints = []) {
   const matches = repositories.filter(r => hints.some(h => h && (r.folder === h || r.name.toLowerCase() === h.toLowerCase())));
   return matches.length === 1 ? matches[0] : null;
@@ -59,7 +91,7 @@ export function matchingRepository(repositories, hints = []) {
 // An explicit repository choice also supersedes pending ticket-target restoration.
 // Completed agent discovery stays valid because the selected computer did not change.
 export function selectRepository(view, repo, cx) {
-  if (view.busy || view.repositoriesLoading) return false;
+  if (view.busy || view.repositoriesLoading || view.launchTarget?.blocked) return false;
   view.targetGeneration = (view.targetGeneration ?? 0) + 1;
   view.targetPicker = null;
   view.launchTarget = { machine: view.launchTarget.machine, folder: repo.folder, name: repo.name, root: view.repoRoot };
@@ -97,8 +129,7 @@ export function loadTarget(view, cx, machine, { retain = null, preferredFolder =
       const folder = retain?.folder || preferredFolder;
       const selected = folder ? view.repositories.find(r => r.folder === folder) : matchingRepository(view.repositories, hints);
       view.launchTarget = { machine: machine ?? null, folder: selected?.folder ?? "", name: selected?.name ?? "", root: view.repoRoot, ...(retain?.computerId ? { computerId: retain.computerId, computerName: retain.computerName } : {}) };
-      if (!view.repositories.length) view.repositoryError = `No existing Git repositories found in ${view.repoRoot}.`;
-      else if (preferredFolder && !selected) view.repositoryError = "The project's saved repository is unavailable on this computer. Choose an existing repository.";
+      if (preferredFolder && !selected) view.repositoryError = "The project's saved repository is unavailable on this computer. Choose a repository, or Start makes a new one.";
     } else view.repositoryError = `Could not discover repositories on ${machine ?? "This computer"}: ${repos.reason?.message ?? repos.reason}`;
     view.agentsChecked = true;
     if (agents.status === "fulfilled") {

@@ -20,7 +20,7 @@ const sourceSpace = { id: "source", active: true, folder: "/repos/sampleWorkspac
 // commands, backend process replies, installed-agent discovery, and UI classes.
 // No process, network connection, timer, or app command leaves this harness.
 async function harness(options = {}) {
-  const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [];
+  const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [], creations = [];
   const sharedStore = options.sharedStore ?? new Map();
   const storage = options.storage ?? new Map();
   const context = vm.createContext({
@@ -92,7 +92,12 @@ async function harness(options = {}) {
     "gpui-base": { ...Object.fromEntries(["v_flex", "h_flex", "Input", "Textarea", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
       InputState: textState, TextareaState: textState },
     "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
-    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, validateRepository: async target => {
+    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, createRepository: async (target, title) => {
+      creations.push({ target: { ...target }, title });
+      if (options.creationError) throw new Error(options.creationError);
+      const root = target.machine ? "/home/build/code" : "/Users/me/code", name = options.createdName ?? "new-work";
+      return { ...target, folder: `${root}/${name}`, name, root };
+    }, validateRepository: async target => {
       validations.push({ ...target });
       if (options.validationError) throw new Error(options.validationError);
       return target.folder;
@@ -191,7 +196,7 @@ async function harness(options = {}) {
     Object.assign(client, { ws: workspace, on: "", workspaces: [{ id: workspace, name: "Workspace", urlKey: "example" }], lists: {} });
     client.create(cx, true);
   };
-  return { client, cx, flush, openCapture, storage, requests, commands, agentChecks, links, modes, validations, routingChecks, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
+  return { client, cx, flush, openCapture, storage, requests, commands, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
@@ -405,10 +410,77 @@ test("missing target never inherits the focused computer or repository", async (
     const h = await harness({ launchTarget: null, spaces: [{ ...sourceSpace, machine: "focused-remote" }] });
     h.client[action](h.cx, true);
     await h.flush();
-    assert.match(h.client.err, /Choose a computer and an existing repository/);
+    assert.match(h.client.err, /Choose a computer/);
     assert.deepEqual(h.requests, []);
     assert.deepEqual(h.commands, []);
   }
+});
+
+test("Start without a chosen repository makes a new one on the chosen computer only after every check", async () => {
+  const h = await harness({ launchTarget: { machine: "build-2", folder: "" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.deepEqual(h.creations.map(c => [c.target.machine, c.title]), [["build-2", ticket.title]]);
+  assert.deepEqual(h.agentChecks, ["build-2"]);
+  const request = h.requests.find(r => r.request.op === "worktree");
+  assert.equal(request.on, "build-2");
+  assert.deepEqual(request.request.dirs, ["/home/build/code/new-work"]);
+  assert.equal(h.client.launchTarget.folder, "/home/build/code/new-work");
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "build-2");
+});
+
+test("a refused launch never makes a new repository", async () => {
+  for (const options of [{ routingError: "Override present" }, { agents: [] }, { agentCheckFails: true }]) {
+    const h = await harness({ launchTarget: { machine: null, folder: "" }, ...options });
+    h.client.worktree(h.cx, true, { issue: ticket });
+    await h.flush();
+    assert.notEqual(h.client.err, "");
+    assert.deepEqual(h.creations, []);
+    assert.equal(h.requests.some(r => r.request.op === "worktree"), false);
+  }
+});
+
+test("an unresolved saved target never becomes a new repository", async () => {
+  for (const action of ["submit", "worktree"]) {
+    const h = await harness({ launchTarget: { machine: "origin-computer", folder: "", blocked: true } });
+    h.client.repositoryError = "Saved computer origin-computer is unavailable here.";
+    h.client[action](h.cx, true);
+    await h.flush();
+    assert.match(h.client.err, /Saved computer origin-computer is unavailable/);
+    assert.deepEqual(h.creations, []);
+    assert.deepEqual(h.requests, []);
+  }
+});
+
+test("a failed new repository stops before the worktree and agent", async () => {
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, creationError: "Could not create a new Git repository" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /Could not create a new Git repository/);
+  assert.equal(h.requests.some(r => r.request.op === "worktree"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+test("Create & start without a chosen repository records the new one on the ticket", async () => {
+  const h = await harness({ launchTarget: { machine: "build-2", folder: "" } });
+  h.client.submit(h.cx, true);
+  await h.flush();
+  assert.equal(h.creations.length, 1);
+  assert.equal(h.creations[0].title, "Reproduce the missing scheduled research.");
+  const create = h.requests.find(r => r.request.op === "create");
+  assert.match(create.request.new.description, /"folder":"\/home\/build\/code\/new-work"/);
+  assert.equal(h.client.createdLaunch?.execution.folder ?? h.validations.at(-1).folder, "/home/build/code/new-work");
+});
+
+test("plain Create without a chosen repository leaves the ticket unplaced and makes no repository", async () => {
+  const h = await harness({ launchTarget: { machine: null, folder: "" } });
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.validations, []);
+  const create = h.requests.find(r => r.request.op === "create");
+  assert.doesNotMatch(create.request.new.description, /ericsHerdrLinearExecutionTarget/);
 });
 
 test("ordinary Create persists its computer and repository for a reopened ticket", async () => {
