@@ -263,8 +263,35 @@ bash scripts/update.sh
 ```
 
 The updater uses a fast-forward Git pull and then installs the checked-out version. A
-dirty or divergent checkout needs to be resolved rather than discarded. There is no
-unattended background updater.
+dirty or divergent checkout needs to be resolved rather than discarded.
+
+### Automatic updates on merge to main
+
+When a push to `main` passes CI (`npm test`, `npm run test:installer`, `npm run check`),
+CI fast-forwards the `deploy` branch to that commit and marks each machine as a pending
+`deploy/<machine>` commit status. Turn on the updater once per machine, from its checkout:
+
+```sh
+python3 scripts/auto_update.py install --machine snoke   # omarchy2, snoke, ventress
+```
+
+This adds a launchd agent on macOS or a systemd user timer on Linux. Every five minutes
+(and after login or wake) it fetches `deploy` and, when that moved, runs
+`scripts/update.sh --to <commit>`: a fast-forward to exactly the verified commit, then
+`install.py --update`, with `--select` only if the Herdr window is open. It then sets the
+commit's `deploy/<machine>` status to the installed sidebar version and commit, using
+the machine's existing `gh` sign-in, and shows a desktop notification.
+
+Nothing is overwritten. A checkout with local changes, not on `main`, or with commits
+that are not on `deploy` is skipped and reported as a failed status and a notification,
+once per commit. A sleeping or offline machine stays pending on GitHub and catches up on
+its next run; if it cannot reach GitHub for a day it says so. Check a machine with
+`python3 scripts/auto_update.py status`; turn it off with `... uninstall`. The log is in
+`~/.local/state/erics-herdr-linear/auto-update.log`. The machine list for pending
+statuses is `MACHINES` in `.github/workflows/verify.yml`.
+
+For a release, bump `version` in `package.json` and the `sidebar-footer` version in
+`layouts/erics-linear.json` together; `npm run check` enforces it.
 
 From a machine with SSH access to your other computers, explicitly sync named targets:
 
@@ -290,7 +317,7 @@ herdr-app check mods/linear-workspace
 herdr-app check mods/linear-workspace-tabs
 herdr-app check mods/erics-linear-agents
 herdr-app check mods/erics-linear-chrome
-python3 -m unittest discover -s tests -p 'test_installer.py' -v
+python3 -m unittest discover -s tests -v
 ```
 
 A native check validates an initial render, not every later state. Also inspect the live

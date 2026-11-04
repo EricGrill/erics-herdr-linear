@@ -1,6 +1,7 @@
 name: Verify layout
 on:
   push:
+    branches-ignore: [deploy]
   pull_request:
 permissions:
   contents: read
@@ -15,3 +16,58 @@ jobs:
       - run: npm test
       - run: npm run test:installer
       - run: npm run check
+
+  # A verified main commit becomes the deploy commit. Each machine's updater
+  # (scripts/auto_update.py, launchd/systemd timer) pulls it and reports back
+  # as a deploy/<machine> commit status; a machine that is offline stays pending.
+  publish:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      statuses: write
+    concurrency:
+      group: deploy-branch
+      cancel-in-progress: false
+    env:
+      MACHINES: omarchy2 snoke ventress
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check whether a newer commit was already published
+        id: move
+        run: |
+          set -euo pipefail
+          if git fetch --quiet origin +refs/heads/deploy:refs/remotes/origin/deploy 2>/dev/null \
+             && git merge-base --is-ancestor "$GITHUB_SHA" origin/deploy; then
+            echo "deploy already includes $GITHUB_SHA; nothing to publish."
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+          fi
+      # Pending first, so a fast machine's report cannot be overwritten by it.
+      - name: Mark each machine pending
+        if: steps.move.outputs.moved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          {
+            echo "### Deploying v$version at ${GITHUB_SHA::7}"
+            echo
+            echo "| Machine | Status |"
+            echo "| -- | -- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for machine in $MACHINES; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state=pending -f context="deploy/$machine" \
+              -f description="Waiting for $machine to install v$version" > /dev/null
+            echo "| $machine | pending: its updater reports the installed commit and sidebar version as \`deploy/$machine\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Move the deploy branch to this commit
+        if: steps.move.outputs.moved == 'true'
+        # No --force: deploy only ever fast-forwards along main.
+        run: git push origin "$GITHUB_SHA:refs/heads/deploy"
