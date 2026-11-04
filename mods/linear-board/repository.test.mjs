@@ -18,7 +18,7 @@ async function harness(options = {}) {
       calls.push({ command, args, config });
       if (options.exec) return options.exec(command, args, config);
       // Do not inherit the runner's XDG/plugin paths into the target-home fixture.
-      const result = await run(command, args, { env: { PATH: process.env.PATH, HOME: options.home } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
+      const result = await run(command, args, { env: { PATH: options.path ?? process.env.PATH, HOME: options.home } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
       return result;
     },
   };
@@ -196,4 +196,49 @@ test("ambiguous repository paths are rejected before the trimming backend can se
     await run("git", ["init", folder]);
     await assert.rejects(h.validateRepository({ machine: null, folder }), /unambiguous path/);
   }
+});
+
+async function identity(home) {
+  await writeFile(join(home, ".gitconfig"), "[user]\n\tname = Test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n");
+}
+
+test("new repository names are lowercase ASCII words and never empty", async () => {
+  const { repositorySlug } = await harness();
+  assert.equal(repositorySlug("Café: Fix the  Login/Logout flow!"), "cafe-fix-the-login-logout-flow");
+  assert.equal(repositorySlug("../../etc"), "etc");
+  assert.equal(repositorySlug("空間"), "new-repository");
+  assert.equal(repositorySlug("a".repeat(60)).length, 48);
+});
+
+test("creates a committed repository in target HOME/code, making the root, and never reuses a path", async t => {
+  const home = await fixture(t);
+  await identity(home);
+  const { createRepository, validateRepository } = await harness({ home });
+  const first = await createRepository({ machine: null, folder: "" }, "Build the thing");
+  assert.equal(first.folder, join(home, "code", "build-the-thing"));
+  assert.equal(first.name, "build-the-thing");
+  assert.equal(first.root, join(home, "code"));
+  assert.equal(await validateRepository(first), first.folder);
+  const log = await run("git", ["-C", first.folder, "log", "--format=%s"]);
+  assert.equal(log.stdout.trim(), "Initial commit");
+  await writeFile(join(home, "code", "build-the-thing-2"), "taken");
+  const second = await createRepository({ machine: null, folder: "" }, "Build the thing");
+  assert.equal(second.folder, join(home, "code", "build-the-thing-3"));
+});
+
+test("a failed new repository removes only the folder it made", async t => {
+  const home = await fixture(t), bin = join(home, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), "#!/bin/sh\necho 'Author identity unknown' >&2\nexit 1\n", { mode: 0o755 });
+  await mkdir(join(home, "code", "keep"), { recursive: true });
+  const { createRepository } = await harness({ home, path: `${bin}:${process.env.PATH}` });
+  await assert.rejects(createRepository({ machine: null, folder: "" }, "keep"), /Could not create a new Git repository in .*keep-2: Author identity unknown/);
+  const { readdir } = await import("node:fs/promises");
+  assert.deepEqual(await readdir(join(home, "code")), ["keep"]);
+});
+
+test("new repositories are never made on an unavailable computer", async () => {
+  const { createRepository, calls } = await harness({ machines: [{ name: null, layout: "ready" }, { name: "remote", layout: "connecting" }] });
+  await assert.rejects(createRepository({ machine: "remote", folder: "" }, "x"), /remote is connecting/);
+  assert.deepEqual(calls, []);
 });

@@ -534,7 +534,7 @@ export default class LinearWorkspace extends LinearClient {
     if (this.createdLaunchFor(what.issue, start) || !this.launchIssueReady(what.issue, start)) return super.worktree(cx, start, what);
     const linked = this.records().find(r => r.issue?.id === what.issue.id);
     if (linked) { this.selectWork(linked); this.dismiss(); return; }
-    if (!this.launchTarget?.folder) return this.say("Choose the repository folder first.", cx, true);
+    if (!this.launchTarget || this.launchTarget.blocked) return this.say(this.launchTarget?.blocked && this.repositoryError || "Choose a computer first.", cx, true);
     if (start && (!this.agentsChecked || !this.agentChoices.length)) return this.say(this.launchError || "No installed agent is available on this machine.", cx, true);
     if (start) setShared(PREFS, { ...shared(PREFS), [this.launchTarget.machine ?? ""]: this.agentKey });
     super.worktree(cx, start, what);
@@ -908,7 +908,7 @@ export default class LinearWorkspace extends LinearClient {
     const t = theme(), machine = this.launchTarget?.machine ?? null;
     const label = machine ?? "This computer", available = computers().find(m => m.name === machine)?.layout ?? "unavailable";
     const computerTrigger = this.button("choose-computer", `${label} · ${available} ▾`, cx => { this.targetPicker = this.targetPicker === "computer" ? null : "computer"; cx.notify(); }, { enabled: !this.busy });
-    const repoTrigger = this.button("choose-repository", `${this.launchTarget?.name || "Select an existing repository"} ▾`, cx => { this.targetPicker = this.targetPicker === "repository" ? null : "repository"; cx.notify(); }, { enabled: !this.busy && !this.repositoriesLoading && this.repositories?.length > 0 });
+    const repoTrigger = this.button("choose-repository", `${this.launchTarget?.folder ? this.launchTarget.name : "New repository"} ▾`, cx => { this.targetPicker = this.targetPicker === "repository" ? null : "repository"; cx.notify(); }, { enabled: !this.busy && !this.repositoriesLoading && !this.launchTarget?.blocked });
     const row = (id, text, action, enabled = true) => this.button(id, text, action, { enabled });
     return v_flex().flex_none().gap(6).py(7)
       .child(h_flex().gap(7).items_center().flex_wrap()
@@ -919,11 +919,12 @@ export default class LinearWorkspace extends LinearClient {
         .child(div().text_size(11).text_color(t.muted).child("Repository"))
         .child(Popup.new("repository-picker", repoTrigger).anchor("bottom_left").when(this.targetPicker === "repository", el => el.content(
           v_flex().id("repository-list").h(180).w(340).overflow_y_scrollbar().p(6).gap(3).bg(t.popover)
+            .child(row("repository-new", "New repository", cx => this.selectRepository({ folder: "", name: "" }, cx), !this.busy && !this.repositoriesLoading))
             .children((this.repositories ?? []).map((r, i) => row(`repository-${i}`, r.name, cx => this.selectRepository(r, cx), !this.busy && !this.repositoriesLoading))))))
         .child(this.button("refresh-repositories", "↻", cx => this.chooseComputer(machine, cx, this.launchTarget?.folder ? this.launchTarget : null), { enabled: !this.busy })))
       .child(div().text_size(11).text_color(t.muted).child(this.repositoriesLoading ? `Reading ~/code on ${label}…` : `Repository root: ${this.repoRoot || "~/code on the selected computer"}`))
       .when(Boolean(this.repositoryError), el => el.child(div().text_size(11).text_color(t.blocked).child(this.repositoryError)))
-      .child(div().text_size(12).font_family(MONO).text_color(t.foreground).child(`${label} · ${this.launchTarget?.folder || "Optional for create; required to start"}`))
+      .child(div().text_size(12).font_family(MONO).text_color(t.foreground).child(`${label} · ${this.launchTarget?.folder || `New repository in ${this.repoRoot || "~/code"}, named for the work, made on start`}`))
       .child(h_flex().gap(7).items_center().flex_wrap().child(div().text_size(11).text_color(t.muted).child("Agent"))
         .children(this.agentChoices.map(a => this.button(`agent-${a.key}`, a.name, cx => { this.agentKey = a.key; if (!this.demo) setShared(PREFS, { ...shared(PREFS), [machine ?? ""]: a.key }); cx.notify(); }, { primary: a.key === this.agentKey, enabled: !this.busy })))
         .when(!this.agentChoices.length, el => el.child(div().text_size(11).text_color(t.muted).child(this.agentsChecked ? this.launchError || "No installed agents found" : "Checking installed agents…"))));
@@ -933,7 +934,7 @@ export default class LinearWorkspace extends LinearClient {
     return this.button("create-start", "Create & start", cx => this.submit(cx, true), {
       primary: true, enabled: !this.busy && !this.form?.saveError && !this.form?.loadingStates && !this.form?.statesError &&
         Boolean(this.form?.capture ? this.captureDescription.value().trim() || this.title.value().trim() : this.desc.value().trim()) &&
-        Boolean(this.form?.team) && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.some(a => a.key === this.agentKey),
+        Boolean(this.form?.team) && Boolean(this.launchTarget && !this.launchTarget.blocked) && this.agentsChecked && this.agentChoices.some(a => a.key === this.agentKey),
     });
   }
 
@@ -944,7 +945,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().flex_none().gap(7).items_center().flex_wrap()
         .when(attaching, el => el.child(this.button("attach-selected", `Attach ${is.identifier}`, () => { this.attach(is); this.dismiss(); }, { primary: true })))
         .when(Boolean(record), el => el.child(this.button("open-linked", "Open workspace", () => { this.selectWork(record); this.dismiss(); }, { primary: true })))
-        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && Boolean(this.launchTarget?.folder) && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
+        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && Boolean(this.launchTarget && !this.launchTarget.blocked) && !this.repositoriesLoading && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
         .when(!attaching && Boolean(record) && Boolean(this.detail) && !this.detail.startWhy && !this.busy, el => el.children(this.agentChoices.map(a => this.button(`continue-${a.key}`, `+ ${a.name}`, cx => {
           this.continueAgent(record, is, a, cx);
         }))))
