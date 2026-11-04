@@ -89,3 +89,20 @@ export function issueMenuItems(issue) {
     { label: "Copy link", action: "copy", url },
   ];
 }
+
+/** The space's own entries, after the issue's when a space with a ticket is right-clicked:
+ *  the same Herdr commands as Herdr's space menu. `git` is "main" (a repository's own
+ *  checkout), "linked" (a worktree) or null (not a repository, or not known yet). */
+export function spaceMenuItems(space, git = null) {
+  const id = space?.id;
+  if (!id) return [];
+  return [
+    { label: "Rename", action: "run", command: "space.rename", args: { id } },
+    ...(git ? [
+      { label: "New worktree", action: "worktree", args: { space: id, action: "new" } },
+      { label: "Open worktree", action: "worktree", args: { space: id, action: "open" } },
+    ] : []),
+    ...(git === "linked" ? [{ label: "Remove worktree", action: "worktree", args: { space: id, action: "remove" } }] : []),
+    { label: "Close", action: "run", command: "space.close", args: { id } },
+  ];
+}
