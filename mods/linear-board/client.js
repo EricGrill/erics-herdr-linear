@@ -806,6 +806,15 @@ export default class Linear extends View {
     cx.open_url(url);
   }
 
+  // Right-click on an issue: a small menu at the pointer to open it in the Linear desktop
+  // app or the browser, or copy its link. Opening it changes nothing in Linear.
+  issueMenu(is, cx) {
+    cx?.stop_propagation?.();
+    if (!is?.url) return null;
+    return openOverlay({ mod: "linear-board", kind: "popup", width: 220, height: 122,
+      props: { role: "issue-menu", issue: { identifier: is.identifier ?? "", title: is.title ?? "", url: is.url }, demo: Boolean(this.demo) } });
+  }
+
   copy(text, cx) {
     if (!text) return;
     cx.write_to_clipboard(text);
@@ -1813,6 +1822,11 @@ export default class Linear extends View {
               if (e.row === this.at) return this.enter(cx);
               this.at = e.row;
               cx.notify();
+            })
+            .on_item_secondary_click((key, _e, cx) => {
+              const e = entries.find((x) => x.key === key);
+              const is = e?.row != null ? this.shown[e.row]?.issue : null;
+              if (is) this.issueMenu(is, cx);
             }))
           .child(Scrollbar.vertical("ln-rows").absolute().inset_0())))
       .when(Boolean(after), (el) => el.child(after));
@@ -1855,7 +1869,8 @@ export default class Linear extends View {
     const ag = this.agentsOf(is);
     const prio = priorityIcon(is.priority);
     const canStart = d && !d.startWhy && is.state?.type !== "started";
-    return v_flex().flex_1().min_h(0).gap(10)
+    return v_flex().id("issue-view").flex_1().min_h(0).gap(10)
+      .on_mouse_down("right", (_e, cx) => this.issueMenu(is, cx))
       .child(
         h_flex().flex_none().gap(10).items_center()
           .child(this.backButton(o, this.fromLabel()))

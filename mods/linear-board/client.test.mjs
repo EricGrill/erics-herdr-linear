@@ -149,7 +149,7 @@ async function harness(options = {}) {
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
       run: (name, args) => { commands.push({ name, args }); return {}; }, exec, hc, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
-      openOverlay: noop, nextCommand: async () => new Promise(() => {}),
+      openOverlay: options.openOverlay ?? noop, nextCommand: async () => new Promise(() => {}),
       knownAgents: async ({ on }) => {
         agentChecks.push(on ?? null);
         if (options.agentCheckFails) throw new Error("Agent machine unavailable");
@@ -179,7 +179,7 @@ async function harness(options = {}) {
   await module.link(link);
   await module.evaluate();
   const mainStubs = {
-    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, name === "taskContext" ? taskContext : noop])),
+    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou", "issueMenuItems"].map(name => [name, name === "taskContext" ? taskContext : noop])),
     "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf"].map(name => [name, noop])),
     "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "fetchQueue", "fetchAgents", "fetchIssueDetail", "reassignIssue"].map(name => [name, noop])),
     "./queue.js": Object.fromEntries(["attentionOf", "sortQueue", "queueCounts", "crewRoster", "herdrActivity", "age", "queueStatus", "reassignBatch", "batchSummary", "crewContext", "reassignChoices", "requestGate"].map(name => [name, noop])),
@@ -1810,4 +1810,20 @@ test("CHA-4248: configured backend base is passed unchanged to branch preparatio
   assert.equal(h.branchPreparations.length, 1);
   assert.equal(h.branchPreparations[0].base, "release/stable");
   assert.ok(h.commands.some(x => x.name === "space.new"));
+});
+
+test("right-clicking an issue opens the issue menu for that issue, and nothing without a link", async () => {
+  const overlays = [];
+  const h = await harness({ openOverlay: spec => { overlays.push(spec); return "menu-overlay"; } });
+  let stopped = 0;
+  const cx = { stop_propagation: () => { stopped += 1; } };
+  assert.equal(h.client.issueMenu(ticket, cx), "menu-overlay");
+  assert.equal(stopped, 1, "the right-click must not also reach the row or window drag");
+  assert.equal(overlays.length, 1);
+  assert.equal(overlays[0].mod, "linear-board");
+  assert.equal(overlays[0].kind, "popup");
+  assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ role: "issue-menu",
+    issue: { identifier: ticket.identifier, title: ticket.title, url: ticket.url }, demo: false }));
+  assert.equal(h.client.issueMenu({ ...ticket, url: "" }, cx), null);
+  assert.equal(overlays.length, 1);
 });

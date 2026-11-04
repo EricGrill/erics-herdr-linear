@@ -17,6 +17,9 @@ in sync when releasing; `npm run check` verifies they match.
 - Shows each space's Linear ticket and machine. Click a space to return to its terminal.
 - Right-click a space for Herdr's space menu: Rename, New/Open worktree, Close. Right-click
   a tab for Rename, New tab, Close. Closing a space does not change its Linear ticket.
+- Right-click an issue (Projects rows, the issue panel, the task dialog's list and issue
+  screen, Crew) for Open in Linear app, Open in browser, Copy link. The app link is the
+  web link under `linear://`; it needs the Linear desktop app on this computer.
 - Keeps the full project tree in a separate popup, with search and task creation.
 - Shows live Herdr agents in a scrollable popup, including remote agents and subagents.
 - Shows each Linear agent's full open issue queue in Crew, with attention reasons, issue
