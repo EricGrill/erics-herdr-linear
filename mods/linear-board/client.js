@@ -130,6 +130,53 @@ function place(s) {
 }
 
 export default class Linear extends View {
+  agentArgv(agent) {
+    let argv = [...agent.run];
+    // Pi, PiG and current Amp run without built-in tool approval prompts.
+    // Unknown/custom agents keep their discovered command unchanged.
+    if (agent.key === "opencode") {
+      return ["env", 'OPENCODE_PERMISSION={"*":"allow"}', ...argv];
+    }
+    const policies = {
+      codex: { flag: "--yolo", aliases: ["--dangerously-bypass-approvals-and-sandbox"] },
+      claude: { flag: "--dangerously-skip-permissions" },
+      cursor: { flag: "--force", aliases: ["-f", "--yolo"], remove: ["--auto-review"] },
+      kimi: { flag: "--auto", remove: ["--yolo", "-y", "--yes", "--auto-approve"] },
+      gemini: { flag: "--approval-mode=yolo", remove: ["--yolo", "-y"], values: ["--approval-mode"] },
+      copilot: { flag: "--allow-all", aliases: ["--yolo"] },
+      grok: { flag: "--always-approve", values: ["--permission-mode"] },
+      antigravity: { flag: "--dangerously-skip-permissions" },
+      hermes: { flag: "--yolo" },
+      qoder: { flag: "--yolo", aliases: ["--dangerously-skip-permissions"] },
+      crush: { flag: "--yolo", aliases: ["-y"] },
+      kiro: { flag: "--trust-all-tools" },
+    };
+    const policy = Object.hasOwn(policies, agent.key) ? policies[agent.key] : null;
+    if (!policy) return argv;
+    // Kimi prompt mode already runs unattended and rejects --auto.
+    if (agent.key === "kimi" && argv.some(a => a === "-p" || a === "--prompt" || a.startsWith("--prompt="))) return argv;
+    // Drop conflicting approval modes before applying the unattended policy.
+    const cleaned = [argv[0]];
+    for (let i = 1; i < argv.length; i++) {
+      const arg = argv[i];
+      if (arg === "--") { cleaned.push(...argv.slice(i)); break; }
+      if (policy.remove?.includes(arg)) continue;
+      if (policy.values?.includes(arg)) { i++; continue; }
+      if (policy.values?.some(option => arg.startsWith(`${option}=`))) continue;
+      cleaned.push(arg);
+    }
+    argv = cleaned;
+    const options = argv.slice(1, argv.includes("--") ? argv.indexOf("--") : argv.length);
+    if ([policy.flag, ...(policy.aliases ?? [])].some(flag => options.includes(flag))) return argv;
+    // Kiro's approval option belongs to its chat subcommand.
+    if (agent.key === "kiro") {
+      const chat = argv.indexOf("chat");
+      return chat >= 0 ? [...argv.slice(0, chat + 1), policy.flag, ...argv.slice(chat + 1)]
+        : [argv[0], "chat", policy.flag, ...argv.slice(1)];
+    }
+    return [argv[0], policy.flag, ...argv.slice(1)];
+  }
+
   init(_props, cx) {
     const p = props() ?? {};
     this.demo = Boolean(p.demo);
@@ -911,7 +958,7 @@ export default class Linear extends View {
         // Empty explicitly means this computer; omission inherits focused space.
         const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
-          spec.argv = selectedAgent.run;
+          spec.argv = this.agentArgv(selectedAgent);
           spec.task = this.taskFor?.(fresh, created?.description) ?? res.prompt;
         }
         this.busy = "Opening its space…";

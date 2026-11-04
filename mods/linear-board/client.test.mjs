@@ -252,7 +252,7 @@ test("reopened worktree starts the selected agent with its ticket context", asyn
   await h.flush();
   const opened = h.commands.find(c => c.name === "space.new");
   assert.ok(opened, h.client.err);
-  assert.deepEqual(JSON.parse(JSON.stringify(opened.args.argv)), ["codex"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(opened.args.argv)), ["codex", "--yolo"]);
   assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
   assert.match(opened.args.task, /Work on Linear issue DEMO-3785/);
   assert.ok(opened.args.task.includes(ticket.url));
@@ -261,6 +261,60 @@ test("reopened worktree starts the selected agent with its ticket context", asyn
   assert.equal(h.links.length, 1);
   assert.equal(h.client.err, "");
 });
+
+for (const machine of [null, "remote-build"]) {
+  for (const agent of [
+    { key: "codex", run: ["/opt/bin/codex", "--model", "chosen"], expected: ["/opt/bin/codex", "--yolo", "--model", "chosen"] },
+    { key: "codex", run: ["codex", "--yolo"], expected: ["codex", "--yolo"] },
+    { key: "codex", run: ["codex", "--dangerously-bypass-approvals-and-sandbox"], expected: ["codex", "--dangerously-bypass-approvals-and-sandbox"] },
+    { key: "claude", run: ["claude", "--model", "chosen"], expected: ["claude", "--dangerously-skip-permissions", "--model", "chosen"] },
+    { key: "claude", run: ["claude", "--dangerously-skip-permissions"], expected: ["claude", "--dangerously-skip-permissions"] },
+    { key: "cursor", run: ["cursor-agent", "--model", "chosen"], expected: ["cursor-agent", "--force", "--model", "chosen"] },
+    { key: "cursor", run: ["cursor-agent", "--yolo"], expected: ["cursor-agent", "--yolo"] },
+    { key: "cursor", run: ["cursor-agent", "--auto-review"], expected: ["cursor-agent", "--force"] },
+    { key: "kimi", run: ["kimi"], expected: ["kimi", "--auto"] },
+    { key: "kimi", run: ["kimi", "--yolo"], expected: ["kimi", "--auto"] },
+    { key: "kimi", run: ["kimi", "--auto"], expected: ["kimi", "--auto"] },
+    { key: "kimi", run: ["kimi", "-p", "work"], expected: ["kimi", "-p", "work"] },
+    { key: "gemini", run: ["gemini"], expected: ["gemini", "--approval-mode=yolo"] },
+    { key: "gemini", run: ["gemini", "--approval-mode", "plan", "--model", "chosen"], expected: ["gemini", "--approval-mode=yolo", "--model", "chosen"] },
+    { key: "gemini", run: ["gemini", "--approval-mode=auto_edit", "--yolo"], expected: ["gemini", "--approval-mode=yolo"] },
+    { key: "copilot", run: ["copilot"], expected: ["copilot", "--allow-all"] },
+    { key: "grok", run: ["grok", "--permission-mode", "default"], expected: ["grok", "--always-approve"] },
+    { key: "antigravity", run: ["agy"], expected: ["agy", "--dangerously-skip-permissions"] },
+    { key: "hermes", run: ["hermes"], expected: ["hermes", "--yolo"] },
+    { key: "qoder", run: ["qodercli"], expected: ["qodercli", "--yolo"] },
+    { key: "crush", run: ["crush"], expected: ["crush", "--yolo"] },
+    { key: "kiro", run: ["kiro-cli"], expected: ["kiro-cli", "chat", "--trust-all-tools"] },
+    { key: "kiro", run: ["kiro-cli", "chat", "--resume"], expected: ["kiro-cli", "chat", "--trust-all-tools", "--resume"] },
+    { key: "opencode", run: ["opencode", "--model", "chosen"], expected: ["env", 'OPENCODE_PERMISSION={"*":"allow"}', "opencode", "--model", "chosen"] },
+    ...["pi", "pig", "amp"].map(key => ({ key, run: [key], expected: [key] })),
+    { key: "other", run: ["other", "--custom"], expected: ["other", "--custom"] },
+  ]) test(`agent permissions on ${machine ?? "local"}: ${agent.run.join(" ")}`, async () => {
+    const original = [...agent.run];
+    const h = await harness({ agents: [{ ...agent, installed: true }],
+      launchTarget: { machine, folder: "/repos/sampleWorkspace" } });
+    h.client.agentKey = agent.key;
+    h.client.worktree(h.cx, true, { issue: ticket });
+    await h.flush();
+    const opened = h.commands.find(c => c.name === "space.new");
+    assert.ok(opened, h.client.err);
+    assert.deepEqual(Array.from(opened.args.argv), agent.expected);
+    assert.deepEqual(agent.run, original, "agent discovery arguments are not mutated");
+    assert.equal(opened.args.machine, machine ?? "");
+    assert.deepEqual(h.agentChecks, [machine]);
+    h.client.agentsChecked = true;
+    h.main.continueAgent.call(h.client, { space: { id: "linked-space", machine } }, ticket, agent, h.cx);
+    await h.flush();
+    const continued = h.commands.find(c => c.name === "tab.new");
+    assert.ok(continued, h.client.err);
+    assert.deepEqual(Array.from(continued.args.argv), agent.expected);
+    assert.equal(continued.args.space, "linked-space");
+    assert.match(continued.args.task, /Work on Linear issue/);
+    assert.deepEqual(h.agentChecks, [machine, machine]);
+    assert.deepEqual(agent.run, original);
+  });
+}
 
 test("existing space is selected without launching or prompting a duplicate agent", async () => {
   const existing = { id: "existing", machine: null, folder: "/repos/worktrees/demo-3785", tabs: [{ id: "existing-tab" }] };
