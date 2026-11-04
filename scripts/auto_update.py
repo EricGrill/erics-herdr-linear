@@ -2,14 +2,14 @@
 # Original update tooling for Eric's Herdr Linear. MIT; see ../LICENSE.
 """Keep this machine on the commit CI verified, without anyone logging in.
 
-CI moves the `deploy` branch to a `main` commit only after its checks pass. A timer
+CI moves the `verified` branch to a `main` commit only after its checks pass. A timer
 (launchd on macOS, a systemd user timer on Linux) runs `auto_update.py run` every few
-minutes. When `origin/deploy` moves, it runs `scripts/update.sh --to <commit>`, which
+minutes. When `origin/verified` moves, it runs `scripts/update.sh --to <commit>`, which
 fast-forwards this checkout and runs `install.py --update`. A machine that was asleep
 or offline catches up on its next run.
 
 Nothing is overwritten: a checkout with local changes, on another branch, or with
-commits that are not on `deploy` is skipped. Each outcome is reported as a GitHub
+commits that are not on `verified` is skipped. Each outcome is reported as a GitHub
 commit status (`deploy/<machine>`, via `gh` when it is signed in) and a desktop
 notification, once per commit and reason. Credentials are never read here.
 
@@ -32,7 +32,8 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
-DEPLOY_BRANCH = "deploy"
+# Not "deploy": the repo has deploy/* branches, and git cannot hold both names.
+DEPLOY_BRANCH = "verified"
 MAIN_BRANCH = "main"
 LABEL = "com.ericgrill.erics-herdr-linear.auto-update"
 UNIT = "erics-herdr-linear-update"

@@ -1,7 +1,7 @@
 name: Verify layout
 on:
   push:
-    branches-ignore: [deploy]
+    branches-ignore: [verified]
   pull_request:
 permissions:
   contents: read
@@ -40,9 +40,9 @@ jobs:
         id: move
         run: |
           set -euo pipefail
-          if git fetch --quiet origin +refs/heads/deploy:refs/remotes/origin/deploy 2>/dev/null \
-             && git merge-base --is-ancestor "$GITHUB_SHA" origin/deploy; then
-            echo "deploy already includes $GITHUB_SHA; nothing to publish."
+          if git fetch --quiet origin +refs/heads/verified:refs/remotes/origin/verified 2>/dev/null \
+             && git merge-base --is-ancestor "$GITHUB_SHA" origin/verified; then
+            echo "verified already includes $GITHUB_SHA; nothing to publish."
             echo "moved=false" >> "$GITHUB_OUTPUT"
           else
             echo "moved=true" >> "$GITHUB_OUTPUT"
@@ -67,7 +67,18 @@ jobs:
               -f description="Waiting for $machine to install v$version" > /dev/null
             echo "| $machine | pending: its updater reports the installed commit and sidebar version as \`deploy/$machine\` |" >> "$GITHUB_STEP_SUMMARY"
           done
-      - name: Move the deploy branch to this commit
+      - name: Move the verified branch to this commit
         if: steps.move.outputs.moved == 'true'
-        # No --force: deploy only ever fast-forwards along main.
-        run: git push origin "$GITHUB_SHA:refs/heads/deploy"
+        # No --force: verified only ever fast-forwards along main.
+        run: git push origin "$GITHUB_SHA:refs/heads/verified"
+      # If the branch did not move, no machine will install this commit; say so.
+      - name: Clear the pending statuses if the branch did not move
+        if: failure() && steps.move.outputs.moved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for machine in $MACHINES; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state=error -f context="deploy/$machine" \
+              -f description="Not deployed: CI could not move the verified branch" > /dev/null || true
+          done
