@@ -7,9 +7,10 @@ spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **
 ![Eric's Herdr Linear](preview.png)
 
 The layout ID is `erics-linear`; its window header reads **Erics Linear**.
-The expanded sidebar shows **Layout v0.1.1** beside Settings, using this repository's
-`package.json` version. Keep the sidebar-footer version in `layouts/erics-linear.json`
-in sync when releasing; `npm run check` verifies they match.
+The expanded sidebar shows **Layout v<version>** beside Settings, using this repository's
+`package.json` version. CI raises it with every deploy (see
+[Automatic updates](#automatic-updates-on-merge-to-main)); `npm run check` verifies that
+the sidebar-footer version in `layouts/erics-linear.json` matches.
 
 ## What it does
 
@@ -268,7 +269,9 @@ dirty or divergent checkout needs to be resolved rather than discarded.
 ### Automatic updates on merge to main
 
 When a push to `main` passes CI (`npm test`, `npm run test:installer`, `npm run check`),
-CI fast-forwards the `verified` branch to that commit and marks each machine as a pending
+CI raises the patch version (0.1.1 → 0.1.2) in `package.json` and the sidebar footer
+together, commits that to `main` as `chore: release v<version>`, fast-forwards the
+`verified` branch to the release commit and marks each machine as a pending
 `deploy/<machine>` commit status. Turn on the updater once per machine, from its checkout:
 
 ```sh
@@ -293,8 +296,10 @@ its next run; if it cannot reach GitHub for a day it says so. Check a machine wi
 `~/.local/state/erics-herdr-linear/auto-update.log`. The machine list for pending
 statuses is `MACHINES` in `.github/workflows/verify.yml`.
 
-For a release, bump `version` in `package.json` and the `sidebar-footer` version in
-`layouts/erics-linear.json` together; `npm run check` enforces it.
+Every deploy gets the next patch version automatically, so don't bump it in a PR. For a
+minor or major release, set `version` in `package.json` and the `sidebar-footer` version
+in `layouts/erics-linear.json` together in the PR (`npm run check` enforces it); CI then
+releases that version as it is. `python3 scripts/bump_version.py` does the patch bump by hand.
 
 From a machine with SSH access to your other computers, explicitly sync named targets:
 
