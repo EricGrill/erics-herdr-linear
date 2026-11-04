@@ -79,6 +79,13 @@ repository in that computer's `~/code`, named from the ticket title (a taken nam
 `-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. Plain
 **Create issue** makes nothing. A ticket whose saved computer cannot be resolved stays
 blocked rather than falling back to a new repository.
+Linear's **Start agent**, **Create & start**, and additional agent tabs use each supported
+agent's unattended permission mode on the selected computer. This includes Cursor's
+`--force` and current Kimi Code's `--auto`, alongside Codex and Claude Code.
+Pi, PiG, and current Amp already execute tools without built-in approval prompts.
+See [agent permission modes](docs/CHA-4235-agent-permissions.md) for the complete mapping,
+version assumptions, and policy limits. Existing sessions retain their launch settings.
+
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
