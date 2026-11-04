@@ -21,15 +21,20 @@ const sourceSpace = { id: "source", active: true, folder: "/repos/sampleWorkspac
 // No process, network connection, timer, or app command leaves this harness.
 async function harness(options = {}) {
   const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [], creations = [];
+  const hcCalls = [], managedJobs = new Set();
   const sharedStore = options.sharedStore ?? new Map();
   const storage = options.storage ?? new Map();
+  let fakeTime = 1700000000000;
   const context = vm.createContext({
+    ...(options.clockStepMs ? { Date: class extends Date {
+      static now() { fakeTime += options.clockStepMs; return fakeTime; }
+    } } : {}),
     console,
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
       removeItem: key => storage.delete(key), flush: options.flushStorage ?? (async () => {}) },
   });
   const allSpaces = options.spaces ?? [sourceSpace];
-  let createCalls = 0;
+  let createCalls = 0, missingJobPolls = options.jobMissingPolls ?? 0;
   const exec = async (command, args, config) => {
     if (command === "sleep") return { code: 0, stdout: "", stderr: "" };
     if (command === "sh" && args[2] === "herdr-execution-target") {
@@ -69,14 +74,37 @@ async function harness(options = {}) {
       if (options.loseCreateResponse) throw new Error("Connection closed after create");
       result = options.failCreateAt === createCalls ? { error: "Linear create failed" } : { issue: ticket, note: "Created ticket" };
     } else if (request.op === "worktree") result = { job: "job-one" };
-    else if (request.op === "job") result = { done: true, result: {
-      path: options.worktreePath ?? "/repos/worktrees/demo-3785", created: options.created ?? false,
-      prompt: "Backend prompt", note: "Worktree ready",
-    } };
+    else if (request.op === "job") {
+      if (missingJobPolls > 0) {
+        missingJobPolls -= 1;
+        return { code: 0, stdout: JSON.stringify({ error: "that job is gone" }), stderr: "" };
+      }
+      const failure = options.backendJobError ?? (options.requireManagedWorker && !managedJobs.has(request.job) ? "it didn't start" : null);
+      result = { done: true, result: failure ? { error: failure } : {
+        path: options.worktreePath ?? "/repos/worktrees/demo-3785", created: options.created ?? false,
+        prompt: "Backend prompt", note: "Worktree ready",
+      } };
+    }
     else if (request.op === "detail") result = options.detailReply ? await options.detailReply(request) : options.detailError ? { error: options.detailError } : { issue: ticket, description: options.description ?? "" };
     else if (request.op === "start") result = options.failStart ? { error: "Issue could not be started" } : { note: "Issue started" };
     else throw new Error(`Unexpected backend operation ${request.op}`);
     return { code: result.error ? 1 : 0, stdout: JSON.stringify(result), stderr: "" };
+  };
+  // A native exec can return before its detached backend child ever starts.
+  // Only the managed hc worker establishes the job marker in this failure mode.
+  const hc = async args => {
+    hcCalls.push([...args]);
+    if (args[0] === "wait") return { code: 0, stdout: "{}", stderr: "" };
+    assert.equal(args[0], "run", "only managed launch and owned-worker cleanup leave this harness");
+    const separator = args.indexOf("--"), onAt = args.indexOf("--on");
+    assert.ok(separator >= 0, "the worker program follows the hc argument separator");
+    const machine = onAt >= 0 && onAt < separator ? args[onAt + 1] : null;
+    const request = JSON.parse(args.at(-1));
+    assert.equal(request.op, "worktree");
+    requests.push({ request, on: machine });
+    managedJobs.add(request.job);
+    return options.hcRunResult ?? { code: 0,
+      stdout: JSON.stringify({ address: machine ? `${machine}/managed-worker` : "managed-worker" }), stderr: "" };
   };
   const noop = () => {};
   const dummy = new Proxy(function () {}, { get: () => dummy, apply: () => dummy, construct: () => dummy });
@@ -111,7 +139,7 @@ async function harness(options = {}) {
         sharedStore.set(key, value);
       }, setAgentOrder: noop,
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
-      run: (name, args) => { commands.push({ name, args }); return {}; }, exec, theme: () => ({}),
+      run: (name, args) => { commands.push({ name, args }); return {}; }, exec, hc, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
       openOverlay: noop, nextCommand: async () => new Promise(() => {}),
       knownAgents: async ({ on }) => {
@@ -196,7 +224,7 @@ async function harness(options = {}) {
     Object.assign(client, { ws: workspace, on: "", workspaces: [{ id: workspace, name: "Workspace", urlKey: "example" }], lists: {} });
     client.create(cx, true);
   };
-  return { client, cx, flush, openCapture, storage, requests, commands, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
+  return { client, cx, flush, openCapture, storage, requests, commands, hcCalls, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
@@ -1636,4 +1664,102 @@ test("CHA-4220: a legacy raw idea reopens and creates directly without waiting o
   assert.equal(flushes, 0);
   assert.deepEqual(h.commands, []);
   assert.deepEqual(h.validations, []);
+});
+
+
+for (const machine of ["remote", null]) test(`CHA-4248: managed worktree reaches space.new on ${machine ?? "explicit local"} when detached exec workers never start`, async () => {
+  const folder = "/repos/selected repository";
+  const h = await harness({ requireManagedWorker: true, launchTarget: { machine, folder },
+    spaces: [{ ...sourceSpace, machine: "other-focused-computer" }] });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "", "a connected target must launch even if exec-owned detached workers cannot start");
+  const runs = h.hcCalls.filter(args => args[0] === "run");
+  assert.equal(runs.length, 1);
+  const args = runs[0];
+  for (const flag of ["--bg", "--json", "--rm", "--no-parent", "--no-notify", "--outlive-parent"])
+    assert.ok(args.includes(flag), `managed work must use ${flag}`);
+  if (machine) assert.equal(args[args.indexOf("--on") + 1], machine);
+  else assert.equal(args.includes("--on"), false, "explicit local never inherits the focused remote computer");
+  assert.equal(args[args.indexOf("--cwd") + 1], folder);
+  const request = h.requests.find(x => x.request.op === "worktree");
+  assert.equal(request.on, machine);
+  assert.match(request.request.job, /^[0-9a-f]{16}$/);
+  assert.equal(request.request.bg, true);
+  assert.ok(h.requests.some(x => x.request.op === "job"));
+  assert.ok(h.requests.filter(x => x.request.op === "job").every(x => x.on === machine), "poll the same target that owns the worker");
+  assert.deepEqual(request.request.dirs, [folder]);
+  assert.equal(args[args.indexOf("--label") + 1], `linear.job=${request.request.job}`);
+  assert.deepEqual(args.slice(args.indexOf("--") + 1, args.indexOf("--") + 3), ["sh", "-c"]);
+  assert.match(args[args.indexOf("--") + 3], /app-jobs/);
+  assert.match(args[args.indexOf("--") + 3], /mkdir/);
+  assert.equal(args.at(-3), "herdr-linear-job");
+  assert.equal(args.at(-2), "/fake/herdr-linear");
+  const opened = h.commands.find(x => x.name === "space.new");
+  assert.ok(opened, "the prepared worktree is handed to the selected computer");
+  assert.equal(opened.args.machine, machine ?? "");
+  assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
+  const address = machine ? `${machine}/managed-worker` : "managed-worker";
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", address]]);
+});
+
+for (const [label, machine, reply] of [
+  ["missing address", "remote", { code: 0, stdout: "{}", stderr: "" }],
+  ["malformed response", "remote", { code: 0, stdout: "not JSON", stderr: "" }],
+  ["wrong remote host", "remote", { code: 0, stdout: '{"address":"other/managed-worker"}', stderr: "" }],
+  ["remote reply without host", "remote", { code: 0, stdout: '{"address":"managed-worker"}', stderr: "" }],
+  ["remote reply for explicit local", null, { code: 0, stdout: '{"address":"remote/managed-worker"}', stderr: "" }],
+  ["nonzero start result", "remote", { code: 1, stdout: "", stderr: "managed launch failed" }],
+]) test(`CHA-4248: ${label} blocks launch without starting on another computer`, async () => {
+  const h = await harness({ requireManagedWorker: true, launchTarget: { machine, folder: "/repos/selected" }, hcRunResult: reply });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1);
+  assert.ok(h.client.err, "an unconfirmed or misrouted worker must produce an actionable launch error");
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.requests.some(x => x.request.op === "start"), false, "failed placement must not transition the issue");
+  assert.equal(h.hcCalls.some(args => args[0] === "wait"), false, "never address an unconfirmed or wrong-host terminal");
+});
+
+test("CHA-4248: failed managed backend work cleans up its owned worker without launching", async () => {
+  const h = await harness({ requireManagedWorker: true, launchTarget: { machine: "remote", folder: "/repos/selected" },
+    backendJobError: "worktree fixture failed" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /worktree fixture failed/);
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.requests.some(x => x.request.op === "start"), false);
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
+});
+
+
+test("CHA-4248: a managed worker can acknowledge before its backend job marker is ready", async () => {
+  const h = await harness({ requireManagedWorker: true, jobMissingPolls: 2,
+    launchTarget: { machine: "remote", folder: "/repos/selected" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "", "initially missing marker is retried without abandoning or respawning the worker");
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1);
+  assert.equal(h.requests.filter(x => x.request.op === "job").length, 3);
+  const opened = h.commands.find(x => x.name === "space.new");
+  assert.ok(opened);
+  assert.equal(opened.args.machine, "remote");
+  assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
+});
+
+
+test("CHA-4248: an acknowledged worker that never reports startup fails within the readiness grace", async () => {
+  const h = await harness({ requireManagedWorker: true, jobMissingPolls: 1000, clockStepMs: 4000,
+    launchTarget: { machine: "remote", folder: "/repos/selected" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /worktree worker on remote did not report startup/);
+  const polls = h.requests.filter(x => x.request.op === "job");
+  assert.ok(polls.length > 0 && polls.length < 5, "startup must fail after its short grace, not poll until the five-minute worktree limit");
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1, "readiness timeout never respawns work");
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.requests.some(x => x.request.op === "start"), false);
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
+  assert.equal(h.client.busy, "");
 });
