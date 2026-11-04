@@ -7,7 +7,7 @@ spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **
 ![Eric's Herdr Linear](preview.png)
 
 The layout ID is `erics-linear`; its window header reads **Erics Linear**.
-The expanded sidebar shows **Layout v0.1.0** beside Settings, using this repository's
+The expanded sidebar shows **Layout v0.1.1** beside Settings, using this repository's
 `package.json` version. Keep the sidebar-footer version in `layouts/erics-linear.json`
 in sync when releasing; `npm run check` verifies they match.
 
