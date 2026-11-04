@@ -79,6 +79,26 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(bindings, keys[section])
         self.assertEqual(installer.MAC_KEYS, keys[installer.SCOPE])
 
+    def test_legacy_linear_shortcut_moves_to_api_key_browser_with_backup(self):
+        self.before_keys["global"]["cmd-l"] = "mod.open:EricsLinear"
+        original = json.dumps(self.before_keys)
+        (self.home / "keys.json").write_text(original)
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual("mod.open:linear-board", keys["global"]["cmd-l"])
+        self.assertEqual("app.quit", keys["global"]["ctrl-q"])
+        receipt = json.loads((self.home / installer.RECEIPT_NAME).read_text())
+        self.assertEqual(original, (Path(receipt["backup"]) / "keys.json").read_text())
+        self.run_install("--update")
+        self.assertEqual(keys, json.loads((self.home / "keys.json").read_text()))
+
+    def test_custom_linear_shortcut_is_preserved(self):
+        self.before_keys["global"]["cmd-l"] = "my.custom-action"
+        (self.home / "keys.json").write_text(json.dumps(self.before_keys))
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual(self.before_keys["global"], keys["global"])
+
     def test_only_runtime_files_and_license_notices_are_installed(self):
         self.run_install()
         for name in installer.MODS:
