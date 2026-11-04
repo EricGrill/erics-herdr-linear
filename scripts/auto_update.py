@@ -14,7 +14,7 @@ commit status (`deploy/<machine>`, via `gh` when it is signed in) and a desktop
 notification, once per commit and reason. Credentials are never read here.
 
   python3 scripts/auto_update.py install [--machine NAME] [--interval SECONDS] [--dry-run]
-  python3 scripts/auto_update.py run
+  python3 scripts/auto_update.py run [--now]
   python3 scripts/auto_update.py status
   python3 scripts/auto_update.py uninstall
 """
@@ -38,6 +38,11 @@ LABEL = "com.ericgrill.erics-herdr-linear.auto-update"
 UNIT = "erics-herdr-linear-update"
 RECEIPT_NAME = ".erics-linear-install.json"
 OFFLINE_ALERT_HOURS = 24
+# A failed install of the same commit is retried after these waits; the last one repeats.
+# Each try makes a backup and may switch layouts, so a failure that persists must not
+# rerun every timer tick. `run --now` retries at once.
+RETRY_DELAYS = [datetime.timedelta(minutes=15), datetime.timedelta(hours=1),
+                datetime.timedelta(hours=4), datetime.timedelta(hours=24)]
 PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
              "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
@@ -197,7 +202,7 @@ def finish(state, target, outcome, message, notify_title):
     log(f"{outcome}: {message}")
 
 
-def run():
+def run(retry_now=False):
     directory = state_dir()
     directory.mkdir(parents=True, exist_ok=True)
     with open(directory / "lock", "w") as lock:
@@ -209,12 +214,12 @@ def run():
         state_path = directory / "state.json"
         state = load_json(state_path, {})
         try:
-            return run_locked(state)
+            return run_locked(state, retry_now)
         finally:
             save_json(state_path, state)
 
 
-def run_locked(state):
+def run_locked(state, retry_now=False):
     machine = machine_name()
     def fetch(branch):
         return subprocess.run(["git", "-C", str(REPO), "fetch", "--quiet", "origin",
@@ -222,10 +227,11 @@ def run_locked(state):
                               capture_output=True, text=True, timeout=120)
     fetched = fetch(MAIN_BRANCH)
     if fetched.returncode != 0:
-        # Offline (asleep, no network): try again next run. Say so if it lasts.
-        last_ok = state.get("last_fetch_ok")
+        # Offline (asleep, no network): try again next run. Say so if it lasts, counting from
+        # the last good fetch, or from the first failed one if GitHub was never reached.
+        last_ok = state.get("last_fetch_ok") or state.setdefault("offline_since", now().isoformat())
         log(f"fetch failed: {fetched.stderr.strip()[:300]}")
-        if last_ok and not state.get("offline_alerted"):
+        if not state.get("offline_alerted"):
             hours = (now() - datetime.datetime.fromisoformat(last_ok)).total_seconds() / 3600
             if hours >= OFFLINE_ALERT_HOURS:
                 notify("Herdr Linear is not updating",
@@ -234,6 +240,7 @@ def run_locked(state):
         return 1
     state["last_fetch_ok"] = now().isoformat()
     state.pop("offline_alerted", None)
+    state.pop("offline_since", None)
     deploy_fetch = fetch(DEPLOY_BRANCH)
     if deploy_fetch.returncode != 0:
         log(f"fetch {DEPLOY_BRANCH}: {deploy_fetch.stderr.strip()[:300]}")
@@ -245,10 +252,19 @@ def run_locked(state):
     current = installed()
     # install.py records the commit before its mod checks and --select run, so a matching
     # receipt alone does not mean the install worked. A failed one is retried every run.
-    install_failed = state.get("failed_target") == target or current["checks"] == "failed"
+    failed_before = state.get("failed_target") == target
+    install_failed = failed_before or current["checks"] == "failed"
     if git("rev-parse", "HEAD") == target and current["commit"] == target and not install_failed:
         finish(state, target, "success", describe(current), None)
         return 0
+    retry_after = state.get("retry_after") if failed_before else None
+    if retry_after and not retry_now and now() < datetime.datetime.fromisoformat(retry_after):
+        # Keep the failure visible (a status gh rejected is retried) but do not reinstall yet.
+        finish(state, target, "failed", state.get("failed_message") or f"Install of {short(target)} failed",
+               "Herdr Linear update failed")
+        log(f"next try of {short(target)} after {retry_after} (attempt {state.get('failed_attempts', 1) + 1};"
+            " `auto_update.py run --now` retries at once)")
+        return 1
     head = git("rev-parse", "HEAD")
     if head != target and is_ancestor(target, head) and is_ancestor(head, f"origin/{MAIN_BRANCH}"):
         # Someone pulled main by hand before CI finished; deploy will catch up to it.
@@ -262,9 +278,15 @@ def run_locked(state):
                "Herdr Linear update skipped")
         return 1
 
-    select = herdr_running()
+    # After a failed try that selected the layout, retries of that commit leave selection alone,
+    # so a layout Herdr reports errors for is not switched back on again and again.
+    select_failed = failed_before and state.get("failed_with_select")
+    select = not select_failed and herdr_running()
     command = ["bash", str(REPO / "scripts/update.sh"), "--to", target] + (["--select"] if select else [])
-    log(f"installing {short(target)}{' and selecting the layout' if select else ' (Herdr not running; not selecting)'}")
+    why = ("and selecting the layout" if select else
+           "(not selecting: it failed with selection before)" if select_failed else
+           "(Herdr not running; not selecting)")
+    log(f"installing {short(target)} {why}")
     env = {**os.environ, "PATH": os.pathsep.join(PATH_DIRS + [os.environ.get("PATH", "")])}
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=900, env=env)
@@ -274,12 +296,17 @@ def run_locked(state):
     print(output, flush=True)
     current = installed()
     if code != 0 or current["commit"] != target or current["checks"] == "failed":
-        state["failed_target"] = target
+        attempts = state.get("failed_attempts", 0) + 1 if failed_before else 1
+        delay = RETRY_DELAYS[min(attempts, len(RETRY_DELAYS)) - 1]
         last_line = output.splitlines()[-1] if output else f"exit {code}"
-        finish(state, target, "failed", f"Install of {short(target)} failed on {machine}: {last_line}",
-               "Herdr Linear update failed")
+        message = f"Install of {short(target)} failed on {machine}: {last_line}"
+        state.update(failed_target=target, failed_attempts=attempts, failed_message=message,
+                     failed_with_select=bool(select or select_failed),
+                     retry_after=(now() + delay).isoformat())
+        finish(state, target, "failed", message, "Herdr Linear update failed")
         return 1
-    state.pop("failed_target", None)
+    for key in ("failed_target", "failed_attempts", "failed_message", "failed_with_select", "retry_after"):
+        state.pop(key, None)
     finish(state, target, "success", describe(current), "Herdr Linear updated")
     return 0
 
@@ -302,6 +329,7 @@ def status():
                       "sidebar_version": current["version"], "selected": current["selected"],
                       "last_outcome": state.get("last_outcome"), "last_message": state.get("last_message"),
                       "last_run": state.get("last_run"), "last_fetch_ok": state.get("last_fetch_ok"),
+                      "retry_after": state.get("retry_after"), "failed_attempts": state.get("failed_attempts"),
                       "log": str(state_dir() / "auto-update.log")}, indent=2))
     return 0
 
@@ -401,7 +429,8 @@ def uninstall_service():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("run", help="Install the deploy commit if this machine is behind")
+    run_parser = commands.add_parser("run", help="Install the deploy commit if this machine is behind")
+    run_parser.add_argument("--now", action="store_true", help="Retry a failed install without waiting")
     commands.add_parser("status", help="Show the deploy commit, installed commit and sidebar version")
     setup = commands.add_parser("install", help="Run automatically (launchd or systemd user timer)")
     setup.add_argument("--machine", help="Name used in the GitHub status (default: short host name)")
@@ -410,7 +439,7 @@ def main(argv=None):
     commands.add_parser("uninstall", help="Stop running automatically")
     args = parser.parse_args(argv)
     if args.command == "run":
-        return run()
+        return run(args.now)
     if args.command == "status":
         return status()
     if args.command == "install":

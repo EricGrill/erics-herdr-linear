@@ -284,7 +284,10 @@ the machine's existing `gh` sign-in, and shows a desktop notification.
 
 Nothing is overwritten. A checkout with local changes, not on `main`, or with commits
 that are not on `deploy` is skipped and reported as a failed status and a notification,
-once per commit. A sleeping or offline machine stays pending on GitHub and catches up on
+once per commit. A failed install is reported once and retried after 15 minutes, 1 hour,
+4 hours, then daily, without `--select` if it failed while selecting; a new `deploy`
+commit is tried at once, and `python3 scripts/auto_update.py run --now` retries
+immediately. A sleeping or offline machine stays pending on GitHub and catches up on
 its next run; if it cannot reach GitHub for a day it says so. Check a machine with
 `python3 scripts/auto_update.py status`; turn it off with `... uninstall`. The log is in
 `~/.local/state/erics-herdr-linear/auto-update.log`. The machine list for pending
