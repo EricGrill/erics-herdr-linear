@@ -59,8 +59,8 @@ template.
 
 **Create issue** validates and saves the selected repository with the ticket. A task can
 also be created without a repository, then assigned one later. **Create & start** requires
-an existing repository and an installed agent; its validated target and submitted text
-are carried through to that launch. A failed or unconfirmed create retains the draft
+an installed agent. Without a chosen repository it first makes a new one (see below); its
+validated target and submitted text are carried through to that launch. A failed or unconfirmed create retains the draft
 and asks you to check recent issues before retrying, since a lost response can follow a
 successful write. Finishing a task creation or agent run does not mark an issue Done.
 
@@ -73,7 +73,12 @@ Team and project remain editable. These choices are remembered per Linear worksp
 a removed or completed status falls back to an available open status.
 
 Select **Computer**, then **Repository**. The repository list comes from
-the selected computer's own `~/code`; it does not create or clone a missing repository.
+the selected computer's own `~/code`; it never clones. **New repository** is the default:
+when no repository is chosen, **Start agent** and **Create & start** make a new Git
+repository in that computer's `~/code`, named from the ticket title (a taken name gets
+`-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. Plain
+**Create issue** makes nothing. A ticket whose saved computer cannot be resolved stays
+blocked rather than falling back to a new repository.
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
@@ -82,7 +87,7 @@ Choosing a repository saves that project's computer and repository for future ta
 with separate repository choices for each computer. Agent selections are also remembered
 for each computer. These preferences persist in this
 Herdr app and are shared by both Linear layouts. A missing saved repository stays
-unselected until you choose an existing one.
+unselected; choose one, or Start makes a new one.
 The pinned worktree backend trims path output, so paths containing newlines or ending
 in whitespace are rejected before any ticket or worktree mutation.
 
