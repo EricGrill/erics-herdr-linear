@@ -197,6 +197,56 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertIn("boom", self.reports[-1][2])
         self.assertEqual(1, len(self.notes))
 
+    def test_failed_checks_after_receipt_are_retried_until_they_pass(self):
+        # install.py writes the receipt (with the target commit) before its mod checks run.
+        (self.seed / "scripts/install.py").write_text(STUB_INSTALL + '''
+if (home / "fail-checks").exists():
+    receipt = json.loads((home / ".erics-linear-install.json").read_text())
+    receipt["checks"] = "failed"
+    (home / ".erics-linear-install.json").write_text(json.dumps(receipt))
+    sys.exit("Install did not complete: mod check failed")
+''')
+        (self.home / "fail-checks").write_text("")
+        target = self.publish("0.1.1")
+        self.assertEqual(1, self.run_update())
+        self.assertEqual(target, self.receipt()["git_commit"], "the receipt already names the target")
+        self.assertEqual((target, "error"), self.reports[-1][:2])
+        self.assertEqual(1, self.run_update(), "a failed install is not reported as success later")
+        self.assertEqual(1, self.run_update())
+        self.assertEqual(1, len(self.reports), "the same failure is reported once")
+        self.assertEqual(1, len(self.notes))
+        self.assertTrue(all(r[1] != "success" for r in self.reports))
+        (self.home / "fail-checks").unlink()
+        self.assertEqual(0, self.run_update(), "the next run retries and succeeds")
+        self.assertEqual((target, "success"), self.reports[-1][:2])
+        self.assertEqual("passed", self.receipt()["checks"])
+        self.assertEqual(0, self.run_update())
+        self.assertEqual(2, len(self.reports))
+
+    def test_failed_select_with_passed_checks_is_retried(self):
+        (self.seed / "scripts/install.py").write_text(STUB_INSTALL + '''
+if (home / "fail-select").exists():
+    sys.exit("Herdr did not confirm erics-linear as the selected layout")
+''')
+        (self.home / "fail-select").write_text("")
+        target = self.publish("0.1.1")
+        self.assertEqual(1, self.run_update())
+        self.assertEqual("passed", self.receipt()["checks"])
+        self.assertEqual(1, self.run_update(), "checks passed but the install still failed")
+        (self.home / "fail-select").unlink()
+        self.assertEqual(0, self.run_update())
+        self.assertEqual((target, "success"), self.reports[-1][:2])
+
+    def test_status_text_does_not_claim_layout_unselected_when_herdr_was_closed(self):
+        self.publish("0.1.1")
+        self.run_update()
+        self.assertIn("selection unchanged", self.reports[-1][2])
+        self.assertNotIn("not selected", self.reports[-1][2])
+        self.running.return_value = True
+        self.publish("0.1.2")
+        self.run_update()
+        self.assertIn("(selected,", self.reports[-1][2])
+
     def test_offline_machine_retries_and_alerts_after_a_day(self):
         self.publish("0.1.1")
         self.assertEqual(0, self.run_update())

@@ -243,7 +243,10 @@ def run_locked(state):
         log(f"origin has no {DEPLOY_BRANCH} branch yet; nothing to install")
         return 0
     current = installed()
-    if git("rev-parse", "HEAD") == target and current["commit"] == target:
+    # install.py records the commit before its mod checks and --select run, so a matching
+    # receipt alone does not mean the install worked. A failed one is retried every run.
+    install_failed = state.get("failed_target") == target or current["checks"] == "failed"
+    if git("rev-parse", "HEAD") == target and current["commit"] == target and not install_failed:
         finish(state, target, "success", describe(current), None)
         return 0
     head = git("rev-parse", "HEAD")
@@ -270,17 +273,21 @@ def run_locked(state):
         output, code = "update.sh timed out", 1
     print(output, flush=True)
     current = installed()
-    if code != 0 or current["commit"] != target:
+    if code != 0 or current["commit"] != target or current["checks"] == "failed":
+        state["failed_target"] = target
         last_line = output.splitlines()[-1] if output else f"exit {code}"
         finish(state, target, "failed", f"Install of {short(target)} failed on {machine}: {last_line}",
                "Herdr Linear update failed")
         return 1
+    state.pop("failed_target", None)
     finish(state, target, "success", describe(current), "Herdr Linear updated")
     return 0
 
 
 def describe(current):
-    selected = "selected" if current["selected"] else "not selected"
+    # Without --select (Herdr was closed) install.py leaves the chosen layout alone, so a
+    # receipt with selected=false says nothing about whether erics-linear is selected.
+    selected = "selected" if current["selected"] else "selection unchanged"
     return (f"{machine_name()} runs v{current['version'] or '?'} at {short(current['commit'])}"
             f" ({selected}, checks {current['checks'] or '?'})")
 
