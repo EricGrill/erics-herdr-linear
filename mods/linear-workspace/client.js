@@ -205,6 +205,24 @@ export default class Linear extends View {
     return [argv[0], policy.flag, ...argv.slice(1)];
   }
 
+  // What space.new and tab.new get to start an agent with its first message.
+  // Herdr hands the message to the agent as one more argument. Kimi Code takes
+  // no positional prompt ("unknown command"), so Kimi runs the message in its
+  // unattended prompt mode, then continues that session interactively.
+  agentLaunch(agent, task) {
+    const argv = this.agentArgv(agent);
+    const promptMode = argv.some(a => a === "-p" || a === "--prompt" || a.startsWith("--prompt="));
+    if (agent.key !== "kimi" || !task || promptMode) return { argv, task };
+    const quote = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    // Prompt mode rejects --auto, --yolo and --plan; it runs unattended already.
+    const once = argv.filter((a, i) => i === 0 || !["--auto", "--plan"].includes(a));
+    const resumes = argv.some(a => ["-c", "--continue", "-S", "--session", "-r", "--resume"].includes(a) || a.startsWith("--session="));
+    const resume = resumes ? argv : [...argv, "--continue"];
+    // sh, not the person's shell: a shell function may add a conflicting --yolo.
+    const script = `${once.map(quote).join(" ")} -p "$1"; exec ${resume.map(quote).join(" ")}`;
+    return { argv: ["sh", "-c", script, "kimi", task] };
+  }
+
   init(_props, cx) {
     const p = props() ?? {};
     this.demo = Boolean(p.demo);
@@ -988,8 +1006,7 @@ export default class Linear extends View {
         // Empty explicitly means this computer; omission inherits focused space.
         const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
-          spec.argv = this.agentArgv(selectedAgent);
-          spec.task = this.taskFor?.(fresh, created?.description) ?? res.prompt;
+          Object.assign(spec, this.agentLaunch(selectedAgent, this.taskFor?.(fresh, created?.description) ?? res.prompt));
         }
         this.busy = "Opening its space…";
         cx.notify();

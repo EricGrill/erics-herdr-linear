@@ -995,7 +995,7 @@ export default class LinearWorkspace extends LinearClient {
         const installed = await knownAgents({ on: record.space.machine });
         const selected = installed.find(a => a.installed && a.key === agent.key);
         if (!selected) throw new Error("This agent is not installed on the workspace's machine.");
-        run("tab.new", { space: record.space.id, name: selected.name, argv: this.agentArgv(selected), task: taskContext(checked.issue, this.detail?.description ?? "") });
+        run("tab.new", { space: record.space.id, name: selected.name, ...this.agentLaunch(selected, taskContext(checked.issue, this.detail?.description ?? "")) });
         this.dismiss();
       } catch (e) { this.say(String(e?.message ?? e), cx, true); }
       this.busy = "";

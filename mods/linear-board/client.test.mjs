@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { taskContext } from "./model.js";
 
 const source = await readFile(new URL("./client.js", import.meta.url), "utf8");
@@ -313,10 +316,6 @@ for (const machine of [null, "remote-build"]) {
     { key: "cursor", run: ["cursor-agent", "--model", "chosen"], expected: ["cursor-agent", "--force", "--model", "chosen"] },
     { key: "cursor", run: ["cursor-agent", "--yolo"], expected: ["cursor-agent", "--yolo"] },
     { key: "cursor", run: ["cursor-agent", "--auto-review"], expected: ["cursor-agent", "--force"] },
-    { key: "kimi", run: ["kimi"], expected: ["kimi", "--auto"] },
-    { key: "kimi", run: ["kimi", "--yolo"], expected: ["kimi", "--auto"] },
-    { key: "kimi", run: ["kimi", "--auto"], expected: ["kimi", "--auto"] },
-    { key: "kimi", run: ["kimi", "-p", "work"], expected: ["kimi", "-p", "work"] },
     { key: "gemini", run: ["gemini"], expected: ["gemini", "--approval-mode=yolo"] },
     { key: "gemini", run: ["gemini", "--approval-mode", "plan", "--model", "chosen"], expected: ["gemini", "--approval-mode=yolo", "--model", "chosen"] },
     { key: "gemini", run: ["gemini", "--approval-mode=auto_edit", "--yolo"], expected: ["gemini", "--approval-mode=yolo"] },
@@ -356,6 +355,76 @@ for (const machine of [null, "remote-build"]) {
     assert.deepEqual(agent.run, original);
   });
 }
+
+// Run a Kimi launch's real shell command against a fake kimi that records its
+// arguments. No agent starts: the fake only writes what it was given.
+async function runKimiLaunch(argv, runKimi) {
+  const dir = await mkdtemp(join(tmpdir(), "kimi-launch-"));
+  try {
+    const log = join(dir, "calls");
+    await writeFile(join(dir, "kimi"), "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"$KIMI_LOG\"\nprintf '\\036' >> \"$KIMI_LOG\"\n");
+    await chmod(join(dir, "kimi"), 0o755);
+    const script = argv[2].replaceAll("'/fake-bin/kimi'", `'${dir}/kimi'`);
+    execFileSync(argv[0], [argv[1], script, ...argv.slice(3)], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, KIMI_LOG: log } });
+    const calls = (await readFile(log, "utf8")).split("\x1e").filter(Boolean).map(call => call.split("\0").slice(0, -1));
+    return calls;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+for (const machine of [null, "remote-build"]) {
+  for (const agent of [
+    { run: ["kimi"], once: [], resume: ["--auto", "--continue"] },
+    { run: ["kimi", "--yolo"], once: [], resume: ["--auto", "--continue"] },
+    { run: ["kimi", "--auto"], once: [], resume: ["--auto", "--continue"] },
+    { run: ["/fake-bin/kimi", "--model", "k2", "--plan"], once: ["--model", "k2"], resume: ["--auto", "--model", "k2", "--plan", "--continue"] },
+  ]) test(`kimi on ${machine ?? "local"} gets its first message without a positional prompt: ${agent.run.join(" ")}`, async () => {
+    const original = [...agent.run];
+    const h = await harness({ agents: [{ key: "kimi", name: "Kimi", installed: true, run: agent.run }],
+      launchTarget: { machine, folder: "/repos/sampleWorkspace" } });
+    h.client.agentKey = "kimi";
+    h.client.worktree(h.cx, true, { issue: ticket });
+    await h.flush();
+    const opened = h.commands.find(c => c.name === "space.new");
+    assert.ok(opened, h.client.err);
+    assert.equal(opened.args.machine, machine ?? "");
+    h.client.agentsChecked = true;
+    h.main.continueAgent.call(h.client, { space: { id: "linked-space", machine } }, ticket, { key: "kimi" }, h.cx);
+    await h.flush();
+    const continued = h.commands.find(c => c.name === "tab.new");
+    assert.ok(continued, h.client.err);
+    assert.equal(continued.args.space, "linked-space");
+    for (const launch of [opened.args, continued.args]) {
+      const argv = Array.from(launch.argv);
+      assert.equal(launch.task, undefined, "Herdr must not append the message as a Kimi argument");
+      assert.deepEqual([argv[0], argv[1], argv[3]], ["sh", "-c", "kimi"]);
+      const message = argv[4];
+      assert.match(message, /Work on Linear issue DEMO-3785/);
+      const calls = await runKimiLaunch(argv);
+      assert.deepEqual(calls, [[...agent.once, "-p", message], agent.resume]);
+    }
+    assert.deepEqual(agent.run, original, "agent discovery arguments are not mutated");
+  });
+}
+
+test("kimi messages with quotes, backticks and newlines reach prompt mode unchanged", async () => {
+  const h = await harness({ agents: [{ key: "kimi", name: "Kimi", installed: true, run: ["kimi"] }] });
+  const message = "Work on it: `ls` $HOME \"q\" 'single' $(id)\n```json\n{\"a\":1}\n```";
+  const { argv, task } = h.client.agentLaunch({ key: "kimi", run: ["kimi"] }, message);
+  assert.equal(task, undefined);
+  assert.deepEqual(await runKimiLaunch(argv), [["-p", message], ["--auto", "--continue"]]);
+});
+
+test("kimi already in prompt mode and other agents keep Herdr's message argument", async () => {
+  const h = await harness();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.client.agentLaunch({ key: "kimi", run: ["kimi", "-p", "work"] }, "msg"))),
+    { argv: ["kimi", "-p", "work"], task: "msg" });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.client.agentLaunch({ key: "codex", run: ["codex"] }, "msg"))),
+    { argv: ["codex", "--yolo"], task: "msg" });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.client.agentLaunch({ key: "kimi", run: ["kimi"] }, ""))),
+    { argv: ["kimi", "--auto"], task: "" });
+});
 
 test("existing space is selected without launching or prompting a duplicate agent", async () => {
   const existing = { id: "existing", machine: null, folder: "/repos/worktrees/demo-3785", tabs: [{ id: "existing-tab" }] };

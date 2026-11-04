@@ -10,7 +10,7 @@ writing global agent settings. Other/custom agent keys keep their original argum
 | Codex | `--yolo`, preserving its long bypass alias | Installed `codex --yolo --help` |
 | Claude Code | `--dangerously-skip-permissions` | Installed `claude --help` |
 | Cursor | `--force`, preserving `-f` or `--yolo`; remove conflicting `--auto-review` | [Cursor parameters](https://cursor.com/docs/cli/reference/parameters), installed bundled option definitions |
-| Kimi | `--auto`; replace older yolo aliases; prompt mode is already unattended | [Kimi command reference](https://moonshotai.github.io/kimi-code/en/reference/kimi-command.html), installed `kimi --help` |
+| Kimi | `--auto`; replace older yolo aliases; prompt mode is already unattended. Kimi takes no positional prompt, so a first message runs as `kimi -p` through `sh`, then the session resumes with `--auto --continue` (CHA-4284) | [Kimi command reference](https://moonshotai.github.io/kimi-code/en/reference/kimi-command.html), installed `kimi --help` |
 | Gemini | `--approval-mode=yolo`; replace conflicting approval modes and yolo aliases | [Gemini configuration](https://geminicli.com/docs/reference/configuration/), installed `gemini --help` |
 | Copilot | `--allow-all`, preserving `--yolo` | [Copilot tool permissions](https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools) |
 | Grok | `--always-approve`; replace conflicting permission modes | [Grok permissions](https://docs.x.ai/build/features/permissions), installed `grok --help` |
