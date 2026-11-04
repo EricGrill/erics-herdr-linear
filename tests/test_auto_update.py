@@ -93,7 +93,7 @@ class AutoUpdateTests(unittest.TestCase):
         commit = self.commit(version)
         self.git(self.seed, "push", "-q", "origin", "main")
         if deploy:
-            self.git(self.seed, "push", "-q", "origin", f"{commit}:refs/heads/deploy")
+            self.git(self.seed, "push", "-q", "origin", f"{commit}:refs/heads/verified")
         return commit
 
     def run_update(self, now=False):
@@ -175,7 +175,7 @@ class AutoUpdateTests(unittest.TestCase):
         self.git(self.checkout, "add", ".")
         self.git(self.checkout, "commit", "-qm", "local")
         self.assertEqual(1, self.run_update())
-        self.assertIn("not on deploy", self.reports[0][2])
+        self.assertIn("not on verified", self.reports[0][2])
 
     def test_checkout_ahead_of_deploy_waits_quietly(self):
         verified = self.publish("0.1.1")
@@ -183,7 +183,7 @@ class AutoUpdateTests(unittest.TestCase):
         self.git(self.checkout, "pull", "-q", "--ff-only")
         self.assertEqual(0, self.run_update())
         self.assertEqual([], self.reports)
-        self.git(self.seed, "push", "-q", "origin", f"{newer}:refs/heads/deploy")
+        self.git(self.seed, "push", "-q", "origin", f"{newer}:refs/heads/verified")
         self.assertEqual(0, self.run_update())
         self.assertEqual(newer, self.receipt()["git_commit"])
         self.assertNotEqual(verified, newer)

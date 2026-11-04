@@ -268,7 +268,7 @@ dirty or divergent checkout needs to be resolved rather than discarded.
 ### Automatic updates on merge to main
 
 When a push to `main` passes CI (`npm test`, `npm run test:installer`, `npm run check`),
-CI fast-forwards the `deploy` branch to that commit and marks each machine as a pending
+CI fast-forwards the `verified` branch to that commit and marks each machine as a pending
 `deploy/<machine>` commit status. Turn on the updater once per machine, from its checkout:
 
 ```sh
@@ -276,16 +276,16 @@ python3 scripts/auto_update.py install --machine snoke   # omarchy2, snoke, vent
 ```
 
 This adds a launchd agent on macOS or a systemd user timer on Linux. Every five minutes
-(and after login or wake) it fetches `deploy` and, when that moved, runs
+(and after login or wake) it fetches `verified` and, when that moved, runs
 `scripts/update.sh --to <commit>`: a fast-forward to exactly the verified commit, then
 `install.py --update`, with `--select` only if the Herdr window is open. It then sets the
 commit's `deploy/<machine>` status to the installed sidebar version and commit, using
 the machine's existing `gh` sign-in, and shows a desktop notification.
 
 Nothing is overwritten. A checkout with local changes, not on `main`, or with commits
-that are not on `deploy` is skipped and reported as a failed status and a notification,
+that are not on `verified` is skipped and reported as a failed status and a notification,
 once per commit. A failed install is reported once and retried after 15 minutes, 1 hour,
-4 hours, then daily, without `--select` if it failed while selecting; a new `deploy`
+4 hours, then daily, without `--select` if it failed while selecting; a new `verified`
 commit is tried at once, and `python3 scripts/auto_update.py run --now` retries
 immediately. A sleeping or offline machine stays pending on GitHub and catches up on
 its next run; if it cannot reach GitHub for a day it says so. Check a machine with
