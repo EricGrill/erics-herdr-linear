@@ -19,6 +19,7 @@ function native(type, asset) {
 
 const context = vm.createContext({ console });
 const noop = () => {};
+const overlays = [];
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
   "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {}, TextView: {} },
@@ -27,7 +28,7 @@ const boundaries = {
   "herdr": {
     spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: () => null,
     theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
-    setShared: noop, setAgentOrder: noop, run: noop, props: () => ({}), openOverlay: noop,
+    setShared: noop, setAgentOrder: noop, run: noop, props: () => ({}), openOverlay: options => { overlays.push(options); return "overlay"; },
     closeOverlay: noop, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
   },
 };
@@ -53,7 +54,7 @@ const Board = module.namespace.default;
 const board = new Board();
 const issue = { id: "one", identifier: "DEMO-42", title: "Fix a bug", project: { name: "Sample project" } };
 const program = { key: "codex", name: "Codex", icon: "icons/codex.svg", tint: true };
-const record = { issue, programs: [program], space: { name: "Example", machine: null }, status: "idle" };
+const record = { issue, programs: [program], space: { id: "space-7", name: "Example", machine: null }, status: "idle" };
 board.records = () => [record];
 const nodes = node => typeof node === "object" && node !== null ? [node, ...node.nodes.flatMap(nodes)] : [];
 const text = node => typeof node === "string" ? node : (node?.nodes ?? []).map(text).join("|");
@@ -89,4 +90,19 @@ test("picture icons, missing icons, duplicate harnesses and unlinked spaces rend
   const unlinked = { ...record, issue: null, programs: [] };
   assert.match(text(board.workRow(unlinked, "unlinked")), /Example.*no ticket/);
   assert.doesNotMatch(text(board.spaceRow(unlinked, "unlinked-strip")), /undefined|null|\(\)/);
+});
+
+test("right-clicking a space row opens Herdr's space menu for that space", () => {
+  for (const row of [board.workRow(record, "home"), board.spaceRow(record, "strip")]) {
+    overlays.length = 0;
+    const [button, handler] = row.attributes.on_mouse_down;
+    assert.equal(button, "right");
+    let stopped = false;
+    handler({}, { stop_propagation: () => { stopped = true; } });
+    assert.ok(stopped, "the right-click must not also reach the row or window drag");
+    assert.equal(overlays.length, 1);
+    assert.equal(overlays[0].mod, "menu");
+    assert.equal(overlays[0].kind, "popup");
+    assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ tab: "space", target: { id: "space-7" } }));
+  }
 });
