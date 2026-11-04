@@ -130,6 +130,15 @@ function place(s) {
 }
 
 export default class Linear extends View {
+  agentArgv(agent) {
+    const flag = agent.key === "codex" ? "--yolo"
+      : agent.key === "claude" ? "--dangerously-skip-permissions" : null;
+    const argv = agent.run;
+    const alreadyBypassed = argv.includes(flag) ||
+      (agent.key === "codex" && argv.includes("--dangerously-bypass-approvals-and-sandbox"));
+    return flag && !alreadyBypassed ? [argv[0], flag, ...argv.slice(1)] : [...argv];
+  }
+
   init(_props, cx) {
     const p = props() ?? {};
     this.demo = Boolean(p.demo);
@@ -911,7 +920,7 @@ export default class Linear extends View {
         // Empty explicitly means this computer; omission inherits focused space.
         const spec = { folder: res.path, machine: machine ?? "" };
         if (start) {
-          spec.argv = selectedAgent.run;
+          spec.argv = this.agentArgv(selectedAgent);
           spec.task = this.taskFor?.(fresh, created?.description) ?? res.prompt;
         }
         this.busy = "Opening its space…";
