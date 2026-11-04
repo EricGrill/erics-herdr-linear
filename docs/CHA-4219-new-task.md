@@ -1,7 +1,8 @@
 # CHA-4219: One New task flow
 
 Replace the separate New task and Capture idea controls with New task. Open directly
-on editable title and multiline description, with team, project and repository filled
+on one multiline request, deriving a short title while retaining the full text.
+Keep the single-request behavior merged in CHA-4217, with team, project and repository filled
 from the current task or remembered choices. Keep status, priority and assignment
 editable. Shaping stays optional; it must never be required to create a task.
 

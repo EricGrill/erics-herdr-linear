@@ -1,0 +1,505 @@
+diff --git a/README.md b/README.md
+index d930740..28ff7d0 100644
+--- a/README.md
++++ b/README.md
+@@ -66,8 +66,8 @@ Choosing a repository saves that project's computer and repository for future ta
+ with separate repository choices for each computer. These preferences persist in this
+ Herdr app and are shared by both Linear layouts. A missing saved repository stays
+ unselected until you choose an existing one.
+-The pinned worktree backend trims path output, so paths containing newlines or ending
+-in whitespace are rejected before any ticket or worktree mutation.
++Worktree requests carry the selected repository as an explicit JSON path, preserving
++trailing whitespace and newlines. Team repository mappings do not override this choice.
+ 
+ Both **Create issue** and **Create & start** validate the existing repository. Queued
+ issues retain their selected execution target. Starting work may create the issue's
+diff --git a/mods/linear-board/client.js b/mods/linear-board/client.js
+index 5ccb3db..a6fb2fa 100644
+--- a/mods/linear-board/client.js
++++ b/mods/linear-board/client.js
+@@ -19,7 +19,7 @@ import { agents, panes, machines, spaces, run, exec, theme, appHome, props, clos
+ import { loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
+ import { LinearAPI } from "./api.js";
+ import { normalizeConfig } from "./config.js";
+-import { validateRepository, validateWorktreeRouting } from "./repository.js";
++import { validateRepository } from "./repository.js";
+ import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
+ import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
+ 
+@@ -853,7 +853,6 @@ export default class Linear extends View {
+         if (!this.demo) {
+           if (!execution?.folder) throw new Error("Choose a computer and an existing repository first.");
+           execution.folder = await step("Validating the selected repository…", validateRepository(execution));
+-          await step("Checking repository routing…", validateWorktreeRouting(execution, workspaceKey));
+           if (is) this.rememberLaunchTarget(is, execution);
+         }
+         if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
+@@ -883,12 +882,9 @@ export default class Linear extends View {
+           return this.say(note, cx);
+         }
+         const machine = execution.machine;
+-        // https://github.com/mrolafsson/herdr-linear/blob/v0.14.2/app.go#L468
+-        // Configured team repos precede dirs. The guard excludes empty-team
+-        // overrides; only Git routing clears the team, never Linear check/start.
+-        const repositoryTarget = { ...target, teamKey: "" };
++        // Execution routing is explicit; Linear team and workspace identity stay intact.
+         const res = await step(`Making its worktree on ${machine ?? "this computer"}…`,
+-          job({ op: "worktree", target: repositoryTarget, dirs: [execution.folder] }, machine), 4 * 60000);
++          job({ op: "worktree", target, repo: execution.folder }, machine), 4 * 60000);
+         this.trees[target.branch] = { path: res.path, machine };
+         localStorage.setItem("trees", JSON.stringify(this.trees));
+         let note = "";
+@@ -1321,7 +1317,6 @@ export default class Linear extends View {
+       try {
+         if (!this.demo && !attaching) {
+           execution.folder = await validateRepository(execution);
+-          if (startAfterCreate) await validateWorktreeRouting(execution, this.workspace()?.urlKey ?? "");
+         }
+         let savedDescription = description;
+         if (!this.demo && !attaching) {
+diff --git a/mods/linear-board/client.test.mjs b/mods/linear-board/client.test.mjs
+index 38c63e6..ef0128c 100644
+--- a/mods/linear-board/client.test.mjs
++++ b/mods/linear-board/client.test.mjs
+@@ -309,7 +309,7 @@ test("explicit local target checks local agents even when current space is remot
+   assert.deepEqual(h.agentChecks, [null]);
+   const request = h.requests.find(r => r.request.op === "worktree");
+   assert.equal(request.on, null);
+-  assert.deepEqual(request.request.dirs, ["/repos/local"]);
++  assert.equal(request.request.repo, "/repos/local");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "");
+   assert.equal(h.validations[0].machine, null);
+ });
+@@ -327,7 +327,7 @@ test("remote target validates, discovers agents, prepares and launches on that c
+   assert.equal(h.validations[0].machine, "build-2");
+   assert.deepEqual(h.agentChecks, ["build-2"]);
+   assert.equal(h.requests.find(r => r.request.op === "worktree").on, "build-2");
+-  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, ["/home/build/code/Repos with 空間"]);
++  assert.equal(h.requests.find(r => r.request.op === "worktree").request.repo, "/home/build/code/Repos with 空間");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "build-2");
+ });
+ 
+@@ -418,31 +418,43 @@ test("worktree repository routing does not reuse the Linear team's configured ch
+   await h.flush();
+   const worktree = h.requests.find(r => r.request.op === "worktree").request;
+   const start = h.requests.find(r => r.request.op === "start").request;
+-  assert.equal(worktree.target.teamKey, "");
++  assert.equal(worktree.target.teamKey, ticket.teamKey);
+   assert.equal(worktree.target.workspaceKey, "example");
+-  assert.deepEqual(worktree.dirs, ["/home/build/code/selected"]);
++  assert.equal(worktree.repo, "/home/build/code/selected");
+   assert.equal(start.teamKey, ticket.teamKey);
+   assert.equal(start.issue, ticket.id);
+   assert.match(h.commands.find(c => c.name === "space.new").args.task, /Work on Linear issue DEMO-3785/);
+ });
+ 
+ 
+-test("unsafe backend repository overrides stop before issue creation, worktrees, or launch", async () => {
+-  for (const action of ["submit", "worktree"]) {
+-    const h = await harness({
+-      launchTarget: { machine: "build-2", folder: "/home/build/code/selected" },
+-      routingError: "Remove the empty-team repository override before starting work",
+-    });
+-    h.client[action](h.cx, true);
++for (const folder of ["/home/build/code/notes ", "/home/build/code/notes\n", "/home/build/code/line\nbreak"]) {
++  test(`worktree JSON preserves the explicit repository ${JSON.stringify(folder)}`, async () => {
++    const h = await harness({ launchTarget: { machine: "build-2", folder },
++      routingError: "Legacy configuration must not override the explicit repo" });
++    h.client.worktree(h.cx, true, { issue: ticket });
+     await h.flush();
+-    assert.match(h.client.err, /empty-team repository override/);
+-    assert.equal(h.routingChecks[0].target.machine, "build-2");
+-    assert.equal(h.routingChecks[0].workspaceKey, "example");
+-    assert.deepEqual(h.requests, []);
+-    assert.deepEqual(h.agentChecks, []);
+-    assert.deepEqual(h.commands, []);
+-  }
+-});
++    const worktree = h.requests.find(r => r.request.op === "worktree");
++    assert.equal(worktree.on, "build-2");
++    assert.equal(worktree.request.repo, folder);
++    assert.equal(worktree.request.target.teamKey, ticket.teamKey);
++    assert.equal(worktree.request.target.workspaceKey, "example");
++    assert.deepEqual(h.routingChecks, []);
++    assert.equal(h.requests.find(r => r.request.op === "start").request.teamKey, ticket.teamKey);
++    assert.ok(h.commands.some(c => c.name === "space.new"));
++  });
++  test(`Create & start preserves team, project and repository ${JSON.stringify(folder)}`, async () => {
++    const h = await harness({ launchTarget: { machine: "build-2", folder },
++      routingError: "Legacy configuration must not block creation" });
++    h.client.submit(h.cx, true);
++    await h.flush();
++    const create = h.requests.find(r => r.request.op === "create").request.new;
++    assert.equal(create.team, "team-one");
++    assert.equal(create.project, "project-one");
++    assert.equal(h.client.savedLaunchTarget(ticket).folder, folder);
++    assert.deepEqual(h.modes, [true]);
++    assert.deepEqual(h.routingChecks, []);
++  });
++}
+ 
+ test("ordinary Create persists a target without invoking worktree-specific routing", async () => {
+   const h = await harness({ routingError: "Empty-team override blocks worktrees" });
+@@ -599,7 +611,7 @@ test("Create & start crosses the real subclass bridge using its validated reques
+   const worktree = h.requests.find(r => r.request.op === "worktree");
+   assert.ok(worktree);
+   assert.equal(worktree.on, "remote");
+-  assert.deepEqual(worktree.request.dirs, ["/remote/code/selected"]);
++  assert.equal(worktree.request.repo, "/remote/code/selected");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "remote");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.argv[0], "codex");
+   assert.equal(h.client.createdLaunch, null);
+diff --git a/mods/linear-board/repository.js b/mods/linear-board/repository.js
+index f64cb80..fe3cc49 100644
+--- a/mods/linear-board/repository.js
++++ b/mods/linear-board/repository.js
+@@ -37,17 +37,13 @@ const VALIDATE = `
+ [ -d "$1" ] || { printf 'Repository does not exist: %s' "$1" >&2; exit 1; }
+ { [ -d "$1/.git" ] || [ -f "$1/.git" ]; } || { printf 'Not a Git repository: %s' "$1" >&2; exit 1; }
+ git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'Invalid Git repository: %s' "$1" >&2; exit 1; }
+-git -C "$1" rev-parse --show-toplevel`;
++git -C "$1" rev-parse --show-toplevel >/dev/null`;
+ 
+ export async function validateRepository(target) {
+   if (!target?.folder?.startsWith("/")) throw new Error("Choose an existing repository on the selected computer first.");
+   available(target.machine);
+   const result = await exec("sh", ["-c", VALIDATE, "herdr-repository", target.folder], { on: target.machine ?? null });
+   if (result.code !== 0) throw new Error(result.stderr || `Invalid repository: ${target.folder}`);
+-  // The pinned worktree backend trims Git output. Reject an ambiguous path
+-  // rather than let it open a different sibling repository after trimming.
+-  const top = result.stdout.replace(/\n$/, "");
+-  if (top.trim() !== top || /[\r\n]/.test(top)) throw new Error("The worktree backend cannot safely handle a repository path ending in whitespace or containing a newline. Choose a repository with an unambiguous path.");
+   return target.folder;
+ }
+ 
+@@ -108,27 +104,3 @@ export function loadTarget(view, cx, machine, { retain = null, preferredFolder =
+     cx.notify();
+   });
+ }
+-
+-// herdr-linear v0.14.2 resolves config repos before request dirs (app.go:468).
+-// Worktree requests use an empty team key; reject even an empty-team override
+-// so this compatibility path cannot substitute a different base repository.
+-const WORKTREE_CONFIG = `
+-config="\u0024{HERDR_PLUGIN_CONFIG_DIR:-\u0024{XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/\u0024{HERDR_PLUGIN_ID:-herdr-linear}}/config.json"
+-if [ -e "$config" ]; then cat "$config"; else printf '{}'; fi`;
+-
+-export async function validateWorktreeRouting(target, workspaceKey) {
+-  available(target.machine);
+-  const result = await exec("sh", ["-c", WORKTREE_CONFIG], { on: target.machine ?? null });
+-  if (result.code !== 0) throw new Error("Cannot read this computer’s herdr-linear repository configuration.");
+-  let config;
+-  try { config = JSON.parse(result.stdout || "{}"); }
+-  catch { throw new Error("This computer’s herdr-linear config.json is invalid JSON."); }
+-  const repos = config?.repos ?? {};
+-  if (typeof repos !== "object" || Array.isArray(repos) || Object.values(repos).some(v => v !== null && typeof v !== "string")) throw new Error("This computer’s herdr-linear repository configuration is invalid.");
+-  let override = repos[""];
+-  for (const [key, value] of Object.entries(repos)) {
+-    const slash = key.indexOf("/");
+-    if (slash >= 0 && key.slice(0, slash).toLowerCase() === (workspaceKey ?? "").toLowerCase() && key.slice(slash + 1) === "") override = value;
+-  }
+-  if (override) throw new Error("Cannot honor the selected repository: this computer’s herdr-linear config.json contains an empty-team repository override. Remove that override before starting this task.");
+-}
+diff --git a/mods/linear-board/repository.test.mjs b/mods/linear-board/repository.test.mjs
+index 141bf08..ef22802 100644
+--- a/mods/linear-board/repository.test.mjs
++++ b/mods/linear-board/repository.test.mjs
+@@ -146,31 +146,6 @@ test("changing projects discards an earlier discovery on the same computer", asy
+   assert.equal(view.launchTarget.folder, "/local/code/two");
+ });
+ 
+-for (const [repos, workspace, blocked] of [
+-  [{ CHA: "/other/repo" }, "example", false],
+-  [{ "": "/other/repo" }, "example", true],
+-  [{ "EXAMPLE/": "/other/repo" }, "example", true],
+-  [{ "different/": "/other/repo" }, "example", false],
+-  [{ "": "/other/repo", "example/": "" }, "example", false],
+-]) test(`worktree routing guard checks effective empty-team mapping ${JSON.stringify(repos)}`, async () => {
+-  const h = await harness({ exec: async () => ({ code: 0, stdout: JSON.stringify({ repos }), stderr: "" }) });
+-  const result = h.validateWorktreeRouting({ machine: "remote", folder: "/selected/repo" }, workspace);
+-  if (blocked) await assert.rejects(result, /Cannot honor the selected repository/);
+-  else await result;
+-  assert.equal(h.calls[0].config.on, "remote");
+-});
+-
+-test("worktree configuration is read from target environment and malformed config fails closed", async t => {
+-  const home = await fixture(t), config = join(home, ".config/herdr/plugins/config/herdr-linear");
+-  await mkdir(config, { recursive: true });
+-  await writeFile(join(config, "config.json"), JSON.stringify({ repos: { "": "/unexpected" } }));
+-  const h = await harness({ home });
+-  await assert.rejects(h.validateWorktreeRouting({ machine: null, folder: "/selected" }, "example"), /Cannot honor/);
+-  await writeFile(join(config, "config.json"), "{");
+-  await assert.rejects(h.validateWorktreeRouting({ machine: null, folder: "/selected" }, "example"), /invalid JSON/);
+-});
+-
+-
+ test("explicit repository choice cancels pending ticket restoration without dropping same-computer agents", async () => {
+   const h = await harness();
+   const view = { targetGeneration: 7, launchTarget: { machine: "remote", folder: "/remote/code/old" },
+@@ -187,13 +162,17 @@ test("explicit repository choice cancels pending ticket restoration without drop
+ });
+ 
+ 
+-test("ambiguous repository paths are rejected before the trimming backend can select a sibling", async t => {
++test("exact repository paths survive discovery and validation beside a trimmed sibling", async t => {
+   const home = await fixture(t), root = join(home, "code");
+   await mkdir(root);
++  const names = ["notes", "notes ", "notes\t", "notes\n", "notes\r", "line\nbreak"];
++  for (const name of names) await run("git", ["init", join(root, name)]);
+   const h = await harness({ home });
+-  for (const name of ["trailing ", "line\nbreak"]) {
++  const { repositories } = await h.discoverRepositories("remote");
++  assert.deepEqual(Array.from(repositories, r => r.folder).sort(), names.map(name => join(root, name)).sort());
++  for (const name of names) {
+     const folder = join(root, name);
+-    await run("git", ["init", folder]);
+-    await assert.rejects(h.validateRepository({ machine: null, folder }), /unambiguous path/);
++    assert.equal(await h.validateRepository({ machine: "remote", folder }), folder);
+   }
++  assert.ok(h.calls.every(c => c.config.on === "remote"));
+ });
+diff --git a/mods/linear-workspace/client.js b/mods/linear-workspace/client.js
+index 647e656..acd68af 100644
+--- a/mods/linear-workspace/client.js
++++ b/mods/linear-workspace/client.js
+@@ -19,7 +19,7 @@ import { agents, panes, machines, spaces, run, exec, theme, appHome, props, clos
+ import { loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
+ import { LinearAPI } from "./api.js";
+ import { normalizeConfig } from "./config.js";
+-import { validateRepository, validateWorktreeRouting } from "./repository.js";
++import { validateRepository } from "./repository.js";
+ import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
+ import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
+ 
+@@ -853,7 +853,6 @@ export default class Linear extends View {
+         if (!this.demo) {
+           if (!execution?.folder) throw new Error("Choose a computer and an existing repository first.");
+           execution.folder = await step("Validating the selected repository…", validateRepository(execution));
+-          await step("Checking repository routing…", validateWorktreeRouting(execution, workspaceKey));
+           if (is) this.rememberLaunchTarget(is, execution);
+         }
+         if (start && is) fresh = (await step(`Checking ${is.identifier} in Linear…`, this.linear({ op: "check-start", issue: is.id }))).issue;
+@@ -883,12 +882,9 @@ export default class Linear extends View {
+           return this.say(note, cx);
+         }
+         const machine = execution.machine;
+-        // https://github.com/mrolafsson/herdr-linear/blob/v0.14.2/app.go#L468
+-        // Configured team repos precede dirs. The guard excludes empty-team
+-        // overrides; only Git routing clears the team, never Linear check/start.
+-        const repositoryTarget = { ...target, teamKey: "" };
++        // Execution routing is explicit; Linear team and workspace identity stay intact.
+         const res = await step(`Making its worktree on ${machine ?? "this computer"}…`,
+-          job({ op: "worktree", target: repositoryTarget, dirs: [execution.folder] }, machine), 4 * 60000);
++          job({ op: "worktree", target, repo: execution.folder }, machine), 4 * 60000);
+         this.trees[target.branch] = { path: res.path, machine };
+         localStorage.setItem("trees", JSON.stringify(this.trees));
+         let note = "";
+@@ -1321,7 +1317,6 @@ export default class Linear extends View {
+       try {
+         if (!this.demo && !attaching) {
+           execution.folder = await validateRepository(execution);
+-          if (startAfterCreate) await validateWorktreeRouting(execution, this.workspace()?.urlKey ?? "");
+         }
+         let savedDescription = description;
+         if (!this.demo && !attaching) {
+diff --git a/mods/linear-workspace/client.test.mjs b/mods/linear-workspace/client.test.mjs
+index d3f5bad..fe8fe25 100644
+--- a/mods/linear-workspace/client.test.mjs
++++ b/mods/linear-workspace/client.test.mjs
+@@ -308,7 +308,7 @@ test("explicit local target checks local agents even when current space is remot
+   assert.deepEqual(h.agentChecks, [null]);
+   const request = h.requests.find(r => r.request.op === "worktree");
+   assert.equal(request.on, null);
+-  assert.deepEqual(request.request.dirs, ["/repos/local"]);
++  assert.equal(request.request.repo, "/repos/local");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "");
+   assert.equal(h.validations[0].machine, null);
+ });
+@@ -326,7 +326,7 @@ test("remote target validates, discovers agents, prepares and launches on that c
+   assert.equal(h.validations[0].machine, "build-2");
+   assert.deepEqual(h.agentChecks, ["build-2"]);
+   assert.equal(h.requests.find(r => r.request.op === "worktree").on, "build-2");
+-  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, ["/home/build/code/Repos with 空間"]);
++  assert.equal(h.requests.find(r => r.request.op === "worktree").request.repo, "/home/build/code/Repos with 空間");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "build-2");
+ });
+ 
+@@ -417,31 +417,43 @@ test("worktree repository routing does not reuse the Linear team's configured ch
+   await h.flush();
+   const worktree = h.requests.find(r => r.request.op === "worktree").request;
+   const start = h.requests.find(r => r.request.op === "start").request;
+-  assert.equal(worktree.target.teamKey, "");
++  assert.equal(worktree.target.teamKey, ticket.teamKey);
+   assert.equal(worktree.target.workspaceKey, "example");
+-  assert.deepEqual(worktree.dirs, ["/home/build/code/selected"]);
++  assert.equal(worktree.repo, "/home/build/code/selected");
+   assert.equal(start.teamKey, ticket.teamKey);
+   assert.equal(start.issue, ticket.id);
+   assert.match(h.commands.find(c => c.name === "space.new").args.task, /Work on Linear issue DEMO-3785/);
+ });
+ 
+ 
+-test("unsafe backend repository overrides stop before issue creation, worktrees, or launch", async () => {
+-  for (const action of ["submit", "worktree"]) {
+-    const h = await harness({
+-      launchTarget: { machine: "build-2", folder: "/home/build/code/selected" },
+-      routingError: "Remove the empty-team repository override before starting work",
+-    });
+-    h.client[action](h.cx, true);
++for (const folder of ["/home/build/code/notes ", "/home/build/code/notes\n", "/home/build/code/line\nbreak"]) {
++  test(`worktree JSON preserves the explicit repository ${JSON.stringify(folder)}`, async () => {
++    const h = await harness({ launchTarget: { machine: "build-2", folder },
++      routingError: "Legacy configuration must not override the explicit repo" });
++    h.client.worktree(h.cx, true, { issue: ticket });
+     await h.flush();
+-    assert.match(h.client.err, /empty-team repository override/);
+-    assert.equal(h.routingChecks[0].target.machine, "build-2");
+-    assert.equal(h.routingChecks[0].workspaceKey, "example");
+-    assert.deepEqual(h.requests, []);
+-    assert.deepEqual(h.agentChecks, []);
+-    assert.deepEqual(h.commands, []);
+-  }
+-});
++    const worktree = h.requests.find(r => r.request.op === "worktree");
++    assert.equal(worktree.on, "build-2");
++    assert.equal(worktree.request.repo, folder);
++    assert.equal(worktree.request.target.teamKey, ticket.teamKey);
++    assert.equal(worktree.request.target.workspaceKey, "example");
++    assert.deepEqual(h.routingChecks, []);
++    assert.equal(h.requests.find(r => r.request.op === "start").request.teamKey, ticket.teamKey);
++    assert.ok(h.commands.some(c => c.name === "space.new"));
++  });
++  test(`Create & start preserves team, project and repository ${JSON.stringify(folder)}`, async () => {
++    const h = await harness({ launchTarget: { machine: "build-2", folder },
++      routingError: "Legacy configuration must not block creation" });
++    h.client.submit(h.cx, true);
++    await h.flush();
++    const create = h.requests.find(r => r.request.op === "create").request.new;
++    assert.equal(create.team, "team-one");
++    assert.equal(create.project, "project-one");
++    assert.equal(h.client.savedLaunchTarget(ticket).folder, folder);
++    assert.deepEqual(h.modes, [true]);
++    assert.deepEqual(h.routingChecks, []);
++  });
++}
+ 
+ test("ordinary Create persists a target without invoking worktree-specific routing", async () => {
+   const h = await harness({ routingError: "Empty-team override blocks worktrees" });
+@@ -598,7 +610,7 @@ test("Create & start crosses the real subclass bridge using its validated reques
+   const worktree = h.requests.find(r => r.request.op === "worktree");
+   assert.ok(worktree);
+   assert.equal(worktree.on, "remote");
+-  assert.deepEqual(worktree.request.dirs, ["/remote/code/selected"]);
++  assert.equal(worktree.request.repo, "/remote/code/selected");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "remote");
+   assert.equal(h.commands.find(c => c.name === "space.new").args.argv[0], "codex");
+   assert.equal(h.client.createdLaunch, null);
+diff --git a/mods/linear-workspace/repository.js b/mods/linear-workspace/repository.js
+index f64cb80..fe3cc49 100644
+--- a/mods/linear-workspace/repository.js
++++ b/mods/linear-workspace/repository.js
+@@ -37,17 +37,13 @@ const VALIDATE = `
+ [ -d "$1" ] || { printf 'Repository does not exist: %s' "$1" >&2; exit 1; }
+ { [ -d "$1/.git" ] || [ -f "$1/.git" ]; } || { printf 'Not a Git repository: %s' "$1" >&2; exit 1; }
+ git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'Invalid Git repository: %s' "$1" >&2; exit 1; }
+-git -C "$1" rev-parse --show-toplevel`;
++git -C "$1" rev-parse --show-toplevel >/dev/null`;
+ 
+ export async function validateRepository(target) {
+   if (!target?.folder?.startsWith("/")) throw new Error("Choose an existing repository on the selected computer first.");
+   available(target.machine);
+   const result = await exec("sh", ["-c", VALIDATE, "herdr-repository", target.folder], { on: target.machine ?? null });
+   if (result.code !== 0) throw new Error(result.stderr || `Invalid repository: ${target.folder}`);
+-  // The pinned worktree backend trims Git output. Reject an ambiguous path
+-  // rather than let it open a different sibling repository after trimming.
+-  const top = result.stdout.replace(/\n$/, "");
+-  if (top.trim() !== top || /[\r\n]/.test(top)) throw new Error("The worktree backend cannot safely handle a repository path ending in whitespace or containing a newline. Choose a repository with an unambiguous path.");
+   return target.folder;
+ }
+ 
+@@ -108,27 +104,3 @@ export function loadTarget(view, cx, machine, { retain = null, preferredFolder =
+     cx.notify();
+   });
+ }
+-
+-// herdr-linear v0.14.2 resolves config repos before request dirs (app.go:468).
+-// Worktree requests use an empty team key; reject even an empty-team override
+-// so this compatibility path cannot substitute a different base repository.
+-const WORKTREE_CONFIG = `
+-config="\u0024{HERDR_PLUGIN_CONFIG_DIR:-\u0024{XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/\u0024{HERDR_PLUGIN_ID:-herdr-linear}}/config.json"
+-if [ -e "$config" ]; then cat "$config"; else printf '{}'; fi`;
+-
+-export async function validateWorktreeRouting(target, workspaceKey) {
+-  available(target.machine);
+-  const result = await exec("sh", ["-c", WORKTREE_CONFIG], { on: target.machine ?? null });
+-  if (result.code !== 0) throw new Error("Cannot read this computer’s herdr-linear repository configuration.");
+-  let config;
+-  try { config = JSON.parse(result.stdout || "{}"); }
+-  catch { throw new Error("This computer’s herdr-linear config.json is invalid JSON."); }
+-  const repos = config?.repos ?? {};
+-  if (typeof repos !== "object" || Array.isArray(repos) || Object.values(repos).some(v => v !== null && typeof v !== "string")) throw new Error("This computer’s herdr-linear repository configuration is invalid.");
+-  let override = repos[""];
+-  for (const [key, value] of Object.entries(repos)) {
+-    const slash = key.indexOf("/");
+-    if (slash >= 0 && key.slice(0, slash).toLowerCase() === (workspaceKey ?? "").toLowerCase() && key.slice(slash + 1) === "") override = value;
+-  }
+-  if (override) throw new Error("Cannot honor the selected repository: this computer’s herdr-linear config.json contains an empty-team repository override. Remove that override before starting this task.");
+-}
+diff --git a/mods/linear-workspace/repository.test.mjs b/mods/linear-workspace/repository.test.mjs
+index 141bf08..ef22802 100644
+--- a/mods/linear-workspace/repository.test.mjs
++++ b/mods/linear-workspace/repository.test.mjs
+@@ -146,31 +146,6 @@ test("changing projects discards an earlier discovery on the same computer", asy
+   assert.equal(view.launchTarget.folder, "/local/code/two");
+ });
+ 
+-for (const [repos, workspace, blocked] of [
+-  [{ CHA: "/other/repo" }, "example", false],
+-  [{ "": "/other/repo" }, "example", true],
+-  [{ "EXAMPLE/": "/other/repo" }, "example", true],
+-  [{ "different/": "/other/repo" }, "example", false],
+-  [{ "": "/other/repo", "example/": "" }, "example", false],
+-]) test(`worktree routing guard checks effective empty-team mapping ${JSON.stringify(repos)}`, async () => {
+-  const h = await harness({ exec: async () => ({ code: 0, stdout: JSON.stringify({ repos }), stderr: "" }) });
+-  const result = h.validateWorktreeRouting({ machine: "remote", folder: "/selected/repo" }, workspace);
+-  if (blocked) await assert.rejects(result, /Cannot honor the selected repository/);
+-  else await result;
+-  assert.equal(h.calls[0].config.on, "remote");
+-});
+-
+-test("worktree configuration is read from target environment and malformed config fails closed", async t => {
+-  const home = await fixture(t), config = join(home, ".config/herdr/plugins/config/herdr-linear");
+-  await mkdir(config, { recursive: true });
+-  await writeFile(join(config, "config.json"), JSON.stringify({ repos: { "": "/unexpected" } }));
+-  const h = await harness({ home });
+-  await assert.rejects(h.validateWorktreeRouting({ machine: null, folder: "/selected" }, "example"), /Cannot honor/);
+-  await writeFile(join(config, "config.json"), "{");
+-  await assert.rejects(h.validateWorktreeRouting({ machine: null, folder: "/selected" }, "example"), /invalid JSON/);
+-});
+-
+-
+ test("explicit repository choice cancels pending ticket restoration without dropping same-computer agents", async () => {
+   const h = await harness();
+   const view = { targetGeneration: 7, launchTarget: { machine: "remote", folder: "/remote/code/old" },
+@@ -187,13 +162,17 @@ test("explicit repository choice cancels pending ticket restoration without drop
+ });
+ 
+ 
+-test("ambiguous repository paths are rejected before the trimming backend can select a sibling", async t => {
++test("exact repository paths survive discovery and validation beside a trimmed sibling", async t => {
+   const home = await fixture(t), root = join(home, "code");
+   await mkdir(root);
++  const names = ["notes", "notes ", "notes\t", "notes\n", "notes\r", "line\nbreak"];
++  for (const name of names) await run("git", ["init", join(root, name)]);
+   const h = await harness({ home });
+-  for (const name of ["trailing ", "line\nbreak"]) {
++  const { repositories } = await h.discoverRepositories("remote");
++  assert.deepEqual(Array.from(repositories, r => r.folder).sort(), names.map(name => join(root, name)).sort());
++  for (const name of names) {
+     const folder = join(root, name);
+-    await run("git", ["init", folder]);
+-    await assert.rejects(h.validateRepository({ machine: null, folder }), /unambiguous path/);
++    assert.equal(await h.validateRepository({ machine: "remote", folder }), folder);
+   }
++  assert.ok(h.calls.every(c => c.config.on === "remote"));
+ });

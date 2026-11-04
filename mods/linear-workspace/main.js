@@ -405,13 +405,15 @@ export default class LinearWorkspace extends LinearClient {
       .when(Boolean(this.repositoryError), el => el.child(div().text_size(11).text_color(t.blocked).child(this.repositoryError)))
       .child(div().text_size(12).font_family(MONO).text_color(t.foreground).child(`${label} · ${this.launchTarget?.folder || "Optional for create; required to start"}`))
       .child(h_flex().gap(7).items_center().flex_wrap().child(div().text_size(11).text_color(t.muted).child("Agent"))
-        .children(this.agentChoices.map(a => this.button(`agent-${a.key}`, a.name, cx => { this.agentKey = a.key; cx.notify(); }, { primary: a.key === this.agentKey, enabled: !this.busy })))
+        .children(this.agentChoices.map(a => this.button(`agent-${a.key}`, a.name, cx => { this.agentKey = a.key; if (!this.demo) setShared(PREFS, { ...shared(PREFS), [machine ?? ""]: a.key }); cx.notify(); }, { primary: a.key === this.agentKey, enabled: !this.busy })))
         .when(!this.agentChoices.length, el => el.child(div().text_size(11).text_color(t.muted).child(this.agentsChecked ? this.launchError || "No installed agents found" : "Checking installed agents…"))));
   }
 
   createStartButton() {
     return this.button("create-start", "Create & start", cx => this.submit(cx, true), {
-      primary: true, enabled: !this.busy && !this.form?.saveError && Boolean(this.title.value().trim()) && Boolean(this.form?.team) && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.some(a => a.key === this.agentKey),
+      primary: true, enabled: !this.busy && !this.form?.saveError && !this.form?.loadingStates && !this.form?.statesError &&
+        Boolean(this.form?.capture ? this.captureDescription.value().trim() || this.title.value().trim() : this.desc.value().trim()) &&
+        Boolean(this.form?.team) && Boolean(this.launchTarget?.folder) && this.agentsChecked && this.agentChoices.some(a => a.key === this.agentKey),
     });
   }
 

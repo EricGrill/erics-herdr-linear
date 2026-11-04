@@ -7,6 +7,9 @@ spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **
 ![Eric's Herdr Linear](preview.png)
 
 The layout ID is `erics-linear`; its window header reads **Erics Linear**.
+The expanded sidebar shows **Layout v0.1.0** beside Settings, using this repository's
+`package.json` version. Keep the sidebar-footer version in `layouts/erics-linear.json`
+in sync when releasing; `npm run check` verifies they match.
 
 ## What it does
 
@@ -28,8 +31,9 @@ unlinked work; the issue header identifies spaces that have no ticket.
 
 ## Create a task or capture an idea
 
-Choose **New task** from the issue list, a project, or the launcher. Enter a title
-and optional multiline description, then **Create task**. The current task's project
+Choose **New task** from the issue list, a project, or the launcher. Write the request in
+one multiline field, then **Create task**. The first nonempty request line supplies
+the ticket title; the full request is retained as its description. The current task's project
 and repository, or your previous compatible choices, are prefilled and editable.
 Status, priority and assignment are remembered from the previous successful task and
 remain available under **Ticket details**. Repository choices stay scoped to the
@@ -43,8 +47,7 @@ revisions are shown instead of silently replacing another window's draft. Drafts
 local to this app and are not synced between computers or the two mods. Existing idea
 drafts open in this form with their original source preserved.
 
-**Improve with AI** is optional. It sends the source idea, or the entered title and
-description, to OpenAI for editable suggestions. It uses the existing `gpt-6-luna`
+**Improve with AI** is optional. It sends the source idea, or the entered request, to OpenAI for editable suggestions. It uses the existing `gpt-6-luna`
 Responses integration with tools disabled and `store: false`; this does not disable all
 provider retention. It requires `OPENAI_API_KEY` in the Herdr process environment and
 uses the account's API billing. Keys are not placed in preferences or command arguments.
@@ -62,13 +65,21 @@ successful write. Finishing a task creation or agent run does not mark an issue 
 
 ## Choose where a task runs
 
-In New task, select **Computer**, then **Repository**. The repository list comes from
+In New task, write the request in **What needs doing?**. The title uses the first
+line, shortened to 100 characters; the full text is saved as the description.
+**Ticket details** lets you change the remembered status, priority and assignee.
+Team and project remain editable. These choices are remembered per Linear workspace;
+a removed or completed status falls back to an available open status.
+
+Select **Computer**, then **Repository**. The repository list comes from
 the selected computer's own `~/code`; it does not create or clone a missing repository.
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
-Choosing a repository saves that project's computer and repository for future tasks,
-with separate repository choices for each computer. These preferences persist in this
+Choosing a repository saves that project's computer and repository for future tasks
+(or the workspace's choice when no project is selected),
+with separate repository choices for each computer. Agent selections are also remembered
+for each computer. These preferences persist in this
 Herdr app and are shared by both Linear layouts. A missing saved repository stays
 unselected until you choose an existing one.
 The pinned worktree backend trims path output, so paths containing newlines or ending
