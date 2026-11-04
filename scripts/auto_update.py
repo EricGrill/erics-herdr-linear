@@ -178,14 +178,20 @@ def preflight(target):
 
 
 def finish(state, target, outcome, message, notify_title):
-    """Record and report one outcome; repeat reports only when the commit or reason changes."""
+    """Record and report one outcome; repeat reports only when the commit or reason changes.
+
+    The GitHub status is marked reported only once `gh` accepts it, so a failed report is retried
+    on the next run instead of leaving deploy/<machine> pending. The desktop alert is sent once.
+    """
     key = f"{target}:{outcome}:{message}"
-    if state.get("reported") != key:
-        github_state = {"success": "success", "skipped": "failure", "failed": "error"}[outcome]
-        report_status(target, github_state, message)
+    if state.get("notified") != key:
         if notify_title:
             notify(notify_title, message)
-        state["reported"] = key
+        state["notified"] = key
+    if state.get("reported") != key:
+        github_state = {"success": "success", "skipped": "failure", "failed": "error"}[outcome]
+        if report_status(target, github_state, message):
+            state["reported"] = key
     state.update(last_target=target, last_outcome=outcome, last_message=message,
                  last_run=now().isoformat())
     log(f"{outcome}: {message}")

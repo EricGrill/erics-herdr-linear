@@ -61,7 +61,9 @@ class AutoUpdateTests(unittest.TestCase):
         self.git(base, "clone", "-q", str(self.origin), str(self.checkout))
         mock.patch.object(auto, "REPO", self.checkout).start()
         self.reports = []
-        mock.patch.object(auto, "report_status", side_effect=lambda *a: self.reports.append(a)).start()
+        self.report_ok = True
+        mock.patch.object(auto, "report_status",
+                          side_effect=lambda *a: self.reports.append(a) or self.report_ok).start()
         self.notes = []
         mock.patch.object(auto, "notify", side_effect=lambda *a: self.notes.append(a)).start()
         self.running = mock.patch.object(auto, "herdr_running", return_value=False).start()
@@ -109,6 +111,22 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertIn(target[:7], description)
         self.assertEqual(0, self.run_update())
         self.assertEqual(1, len(self.reports), "an unchanged deploy is not reported again")
+
+    def test_failed_status_report_is_retried_but_alert_is_sent_once(self):
+        target = self.publish("0.1.1")
+        (self.checkout / "layouts/erics-linear.json").write_text("local edit")
+        self.report_ok = False
+        self.assertEqual(1, self.run_update())
+        self.assertEqual(1, self.run_update())
+        self.assertEqual(2, len(self.reports), "a status gh rejected is retried on the next run")
+        self.assertEqual(1, len(self.notes), "the alert is not repeated while the report is retried")
+        self.report_ok = True
+        self.assertEqual(1, self.run_update())
+        self.assertEqual(3, len(self.reports))
+        self.assertEqual(1, self.run_update())
+        self.assertEqual(3, len(self.reports), "once accepted, the same outcome is not reported again")
+        self.assertTrue(all(r[:2] == (target, "failure") for r in self.reports))
+        self.assertEqual(1, len(self.notes))
 
     def test_unverified_main_commit_is_not_installed(self):
         verified = self.publish("0.1.1")
