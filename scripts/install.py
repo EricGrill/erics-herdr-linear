@@ -26,6 +26,7 @@ MAC_KEYS = {
     "cmd-shift-a": "linear-board.agent", "cmd-shift-f": "linear-board.files",
     "cmd-shift-e": "linear-board.panel", "cmd-shift-x": "linear-board.clear",
     "cmd-alt-a": "mod.open:erics-linear-agents",
+    "cmd-w": "linear-workspace-tabs.close",
 }
 LINUX_KEYS = {
     "alt-shift-c": "linear-board.crew", "alt-shift-i": "linear-board.issue",
