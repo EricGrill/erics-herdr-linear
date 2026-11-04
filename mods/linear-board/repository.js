@@ -80,7 +80,58 @@ export async function createRepository(target, title) {
   if (result.code !== 0) throw new Error(result.stderr || `Could not create a new repository on ${target.machine ?? "This computer"}.`);
   const [root, folder] = result.stdout.split("\0");
   if (!root?.startsWith("/") || !folder?.startsWith(`${root}/`)) throw new Error("This computer did not return the new repository's path.");
-  return { ...target, folder, name: folder.slice(folder.lastIndexOf("/") + 1), root };
+  const claudeTrust = await trustForClaude(target.machine, folder);
+  return { ...target, folder, name: folder.slice(folder.lastIndexOf("/") + 1), root, claudeTrust };
+}
+
+// Claude Code's folder trust stops at a Git repository's root, so a new repo
+// under a trusted ~/code still asks on its first session. Start made this repo,
+// so it marks only this path trusted (its worktrees inherit it). The target's
+// own config is edited (same lookup as Claude: $CLAUDE_CONFIG_DIR or HOME),
+// through a symlink, keeping every other field and the file mode, by atomic
+// replace. Exit 3 means "skipped" (no Claude config, unreadable or invalid).
+const TRUST = String.raw`
+import json, os, sys, tempfile
+folder = sys.argv[1]
+path = os.path.realpath(os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~"), ".claude.json"))
+try:
+    with open(path, encoding="utf-8") as f: config = json.load(f)
+except FileNotFoundError: print("no Claude Code config at " + path, file=sys.stderr); sys.exit(3)
+except (OSError, ValueError) as e: print("cannot read " + path + ": " + str(e), file=sys.stderr); sys.exit(3)
+if not isinstance(config, dict): print(path + " is not a JSON object", file=sys.stderr); sys.exit(3)
+projects = config.get("projects")
+if projects is None: projects = config["projects"] = {}
+if not isinstance(projects, dict): print(path + " has an invalid projects entry", file=sys.stderr); sys.exit(3)
+entry = projects.get(folder)
+if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True: sys.exit(0)
+if not isinstance(entry, dict):
+    entry = {"allowedTools": [], "mcpContextUris": [], "mcpServers": {}, "enabledMcpjsonServers": [], "disabledMcpjsonServers": [], "hasTrustDialogAccepted": False}
+entry["hasTrustDialogAccepted"] = True
+projects[folder] = entry
+mode = os.stat(path).st_mode & 0o7777
+fd, tmp = tempfile.mkstemp(prefix=".claude.json.", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp, mode); os.replace(tmp, path)
+except BaseException:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
+`;
+
+// Never fails Start: an untrusted repo only means Claude asks once.
+export async function trustForClaude(machine, folder) {
+  try {
+    const result = await exec("python3", ["-c", TRUST, folder], { on: machine ?? null });
+    if (result.code === 0) return "trusted";
+    const reason = String(result.stderr || `python3 exited ${result.code}`).trim().split("\n").pop();
+    console.log(`Skipped marking ${folder} trusted for Claude Code on ${machine ?? "this computer"}: ${reason}`);
+    return "skipped";
+  } catch (e) {
+    console.log(`Skipped marking ${folder} trusted for Claude Code on ${machine ?? "this computer"}: ${e?.message ?? e}`);
+    return "skipped";
+  }
 }
 
 export function matchingRepository(repositories, hints = []) {

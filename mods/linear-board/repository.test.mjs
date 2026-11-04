@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { readFile, mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { readFile, mkdtemp, mkdir, writeFile, rm, realpath, stat, symlink, lstat, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -10,7 +10,7 @@ const run = promisify(execFile);
 const source = await readFile(new URL("./repository.js", import.meta.url), "utf8");
 async function harness(options = {}) {
   const calls = [];
-  const context = vm.createContext({ console });
+  const context = vm.createContext({ console: options.console ?? console });
   const api = {
     machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }],
     knownAgents: options.agents ?? (async () => [{ key: "codex", installed: true }]),
@@ -18,7 +18,7 @@ async function harness(options = {}) {
       calls.push({ command, args, config });
       if (options.exec) return options.exec(command, args, config);
       // Do not inherit the runner's XDG/plugin paths into the target-home fixture.
-      const result = await run(command, args, { env: { PATH: options.path ?? process.env.PATH, HOME: options.home } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
+      const result = await run(command, args, { env: { PATH: options.path ?? process.env.PATH, HOME: options.home, ...options.env } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
       return result;
     },
   };
@@ -326,4 +326,92 @@ test("CHA-4248: a repository without HEAD reports an actionable branch-preparati
   await assert.rejects(h.prepareWorktreeBranch({ machine: "remote", folder }, "fixture/cha-4248"), /HEAD|commit|branch/i);
   await assert.rejects(run("git", ["-C", folder, "show-ref", "--verify", "refs/heads/fixture/cha-4248"]));
   assert.ok(h.calls.every(c => c.config.on === "remote"));
+});
+
+// Claude Code trust for repositories Start makes (CHA-4293).
+function logs() { const lines = []; return { lines, console: { log: (...a) => lines.push(a.join(" ")) } }; }
+const CLAUDE_DEFAULT_KEYS = ["allowedTools", "mcpContextUris", "mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "hasTrustDialogAccepted"];
+
+test("a new repository is marked trusted in the target's Claude Code config, keeping everything else", async t => {
+  const home = await fixture(t);
+  await identity(home);
+  const config = join(home, ".claude.json");
+  const before = { numStartups: 7, oauthAccount: { emailAddress: "fixture@example.invalid" }, projects: { "/elsewhere": { hasTrustDialogAccepted: false, allowedTools: ["Bash"] } } };
+  await writeFile(config, JSON.stringify(before), { mode: 0o600 });
+  const log = logs();
+  const { createRepository, calls } = await harness({ home, console: log.console });
+  const repo = await createRepository({ machine: "remote", folder: "" }, "Trust me");
+  assert.equal(repo.claudeTrust, "trusted");
+  assert.ok(calls.every(c => c.config.on === "remote"));
+  const after = JSON.parse(await readFile(config, "utf8"));
+  assert.deepEqual(after.projects[repo.folder], { allowedTools: [], mcpContextUris: [], mcpServers: {}, enabledMcpjsonServers: [], disabledMcpjsonServers: [], hasTrustDialogAccepted: true });
+  assert.deepEqual(Object.keys(after.projects[repo.folder]), CLAUDE_DEFAULT_KEYS);
+  assert.deepEqual({ ...after, projects: { "/elsewhere": after.projects["/elsewhere"] } }, before);
+  assert.equal((await stat(config)).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(home)).filter(n => n.startsWith(".claude.json.")), []);
+  assert.deepEqual(log.lines, []);
+});
+
+test("trusting keeps an existing project entry's fields and is a no-op when already trusted", async t => {
+  const home = await fixture(t), folder = join(home, "code", "x");
+  const config = join(home, ".claude.json");
+  await writeFile(config, JSON.stringify({ projects: { [folder]: { allowedTools: ["Read"], hasTrustDialogAccepted: false, lastCost: 1.5 } } }));
+  const { trustForClaude } = await harness({ home });
+  assert.equal(await trustForClaude(null, folder), "trusted");
+  assert.deepEqual(JSON.parse(await readFile(config, "utf8")).projects[folder], { allowedTools: ["Read"], hasTrustDialogAccepted: true, lastCost: 1.5 });
+  const { mtimeMs } = await stat(config);
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(await trustForClaude(null, folder), "trusted");
+  assert.equal((await stat(config)).mtimeMs, mtimeMs);
+});
+
+test("trusting follows a symlinked config and honors CLAUDE_CONFIG_DIR like Claude Code", async t => {
+  const home = await fixture(t), folder = join(home, "code", "x");
+  await mkdir(join(home, "dotfiles"));
+  await writeFile(join(home, "dotfiles", "claude.json"), "{}");
+  await symlink(join(home, "dotfiles", "claude.json"), join(home, ".claude.json"));
+  const { trustForClaude } = await harness({ home });
+  assert.equal(await trustForClaude(null, folder), "trusted");
+  assert.ok((await lstat(join(home, ".claude.json"))).isSymbolicLink());
+  assert.equal(JSON.parse(await readFile(join(home, "dotfiles", "claude.json"), "utf8")).projects[folder].hasTrustDialogAccepted, true);
+
+  const dir = join(home, "custom-claude");
+  await mkdir(dir);
+  await writeFile(join(dir, ".claude.json"), "{}");
+  const custom = await harness({ home, env: { CLAUDE_CONFIG_DIR: dir } });
+  assert.equal(await custom.trustForClaude(null, folder + "2"), "trusted");
+  assert.equal(JSON.parse(await readFile(join(dir, ".claude.json"), "utf8")).projects[folder + "2"].hasTrustDialogAccepted, true);
+  assert.equal(JSON.parse(await readFile(join(home, "dotfiles", "claude.json"), "utf8")).projects[folder + "2"], undefined);
+});
+
+test("a missing, invalid or odd Claude config is left alone and never fails the new repository", async t => {
+  const home = await fixture(t);
+  await identity(home);
+  const log = logs();
+  const { createRepository } = await harness({ home, console: log.console });
+  const repo = await createRepository({ machine: null, folder: "" }, "No claude");
+  assert.equal(repo.claudeTrust, "skipped");
+  assert.equal(repo.folder, join(home, "code", "no-claude"));
+  await assert.rejects(stat(join(home, ".claude.json")));
+  assert.match(log.lines.join("\n"), /Skipped marking .*no-claude trusted for Claude Code on this computer: no Claude Code config/);
+
+  const { trustForClaude } = await harness({ home, console: log.console });
+  for (const text of ["{ not json", "[]", JSON.stringify({ projects: [] })]) {
+    await writeFile(join(home, ".claude.json"), text);
+    assert.equal(await trustForClaude(null, repo.folder), "skipped");
+    assert.equal(await readFile(join(home, ".claude.json"), "utf8"), text);
+  }
+});
+
+test("a computer without python3 still gets its new repository", async t => {
+  const home = await fixture(t);
+  await identity(home);
+  const log = logs();
+  const { createRepository } = await harness({ home, console: log.console, exec: async (command, args) => {
+    if (command === "python3") throw new Error("spawn python3 ENOENT");
+    return run(command, args, { env: { PATH: process.env.PATH, HOME: home } }).then(r => ({ ...r, code: 0 }), e => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
+  } });
+  const repo = await createRepository({ machine: null, folder: "" }, "No python");
+  assert.equal(repo.claudeTrust, "skipped");
+  assert.match(log.lines.join("\n"), /ENOENT/);
 });
