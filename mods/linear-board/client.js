@@ -13,9 +13,10 @@
 // each machine it asks, the first time.
 
 import { View, div } from "gpui-kit";
+import { randomUUID } from "crypto";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Scrollbar, v_virtual_list, VirtualListScrollHandle, Popup } from "gpui-base";
-import { agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
+import { hc, agents, panes, machines, spaces, run, exec, theme, appHome, props, closeOverlay, openOverlay, nextCommand, knownAgents, shared, setShared } from "herdr";
 import { draftStorage, loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
 import { LinearAPI } from "./api.js";
 import { normalizeConfig } from "./config.js";
@@ -87,15 +88,42 @@ async function ask(req, machine) {
   return res;
 }
 
-// A request that can outlast a command (a worktree's fetch): run as a job
-// there, and asked after until it's done.
+// The pinned backend's detached child can be lost when remote exec returns.
+// Give the worker to the selected core, retaining the backend's job/result protocol.
+const JOB_WORKER = 'set -eu\numask 077\nstate="${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/${HERDR_PLUGIN_ID:-herdr-linear}}"\nmkdir -p "$state/app-jobs"\nexec "$1" app "$2"';
 async function job(req, machine, limitMs = 5 * 60000) {
-  const { job: id } = await ask({ ...req, bg: true }, machine);
+  const id = randomUUID().replace(/-/g, "").slice(0, 16);
+  const bin = await binary(machine);
+  const args = ["run", "--bg", "--json", "--rm", "--no-parent", "--no-notify", "--outlive-parent", "--label", `linear.job=${id}`];
+  if (machine != null) args.push("--on", machine);
+  args.push("--cwd", req.dirs[0], "--", "sh", "-c", JOB_WORKER, "herdr-linear-job", bin, JSON.stringify({ ...req, bg: true, job: id }));
+  const launched = await hc(args);
+  if (launched.code !== 0) throw new Error(launched.stderr.trim().split("\n").pop() || "Could not start the worktree worker on the selected computer.");
+  let address;
+  try { address = JSON.parse(launched.stdout).address; } catch { /* Fail closed on an unconfirmed launch. */ }
+  const valid = typeof address === "string" && address && address.trim() === address &&
+    (machine == null ? !address.includes("/") : address.startsWith(machine + "/") && address.split("/").length === 2 && address.split("/")[1]);
+  if (!valid) throw new Error("Herdr did not confirm a worktree worker on the selected computer.");
   const until = Date.now() + limitMs;
+  const startingUntil = Math.min(until, Date.now() + 15000);
+  let observed = false;
   while (Date.now() < until) {
     await exec("sleep", ["1"]).catch(() => {});
-    const res = await ask({ op: "job", job: id }, machine);
+    let res;
+    try { res = await ask({ op: "job", job: id }, machine); }
+    catch (error) {
+      // A core acknowledgment can precede the backend's first state-file write.
+      if (!observed && error.message === "that job is gone") {
+        if (Date.now() < startingUntil) continue;
+        await hc(["wait", "--json", "--timeout", "5", address]).catch(() => {});
+        throw new Error(`The worktree worker on ${machine ?? "this computer"} did not report startup.`);
+      }
+      throw error;
+    }
+    observed = true;
     if (res.done) {
+      // --rm removes only this worker; a timed-out job still carries on as before.
+      await hc(["wait", "--json", "--timeout", "5", address]).catch(() => {});
       if (res.result?.error) throw new AppError(res.result);
       return res.result;
     }
