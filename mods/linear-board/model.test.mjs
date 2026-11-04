@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { issueKey, issueLabel, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems } from "./model.js";
+import { issueKey, issueLabel, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems, spaceMenuItems } from "./model.js";
 
 const issue = (id = "one", identifier = "DEMO-3785", extra = {}) => ({
   id, identifier, title: "Research new stars", url: `https://linear.app/example/issue/${identifier}`,
@@ -276,4 +276,15 @@ test("the issue menu offers the Linear app first, then the browser and the link"
   assert.deepEqual(issueMenuItems(issue("x", "DEMO-1", { url: "https://example.com/x" })).map(i => i.label), ["Open in browser", "Copy link"]);
   assert.deepEqual(issueMenuItems(issue("y", "DEMO-2", { url: null })), []);
   assert.deepEqual(issueMenuItems(null), []);
+});
+
+test("a space's own menu entries match Herdr's space menu, worktree entries only in a repository", () => {
+  const labels = git => spaceMenuItems({ id: "s1" }, git).map(i => i.label);
+  assert.deepEqual(labels(null), ["Rename", "Close"]);
+  assert.deepEqual(labels("main"), ["Rename", "New worktree", "Open worktree", "Close"]);
+  assert.deepEqual(labels("linked"), ["Rename", "New worktree", "Open worktree", "Remove worktree", "Close"]);
+  assert.deepEqual(spaceMenuItems(null), []);
+  const close = spaceMenuItems({ id: "s1" }).at(-1);
+  assert.equal(close.command, "space.close");
+  assert.deepEqual(close.args, { id: "s1" });
 });

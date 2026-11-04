@@ -2,12 +2,12 @@
 // Modified for Eric's Herdr Linear: spaces-first layout, configurable enrichment and attention rules.
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, Popup, TextView } from "gpui-base";
-import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome } from "herdr";
+import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
 import { tint, icon, stateIcon, MONO } from "./look.js";
-import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems } from "./model.js";
+import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
@@ -61,6 +61,22 @@ function dialog(extra = {}) {
   const taskIssue = source ? matchIssue(source, shared(DATA)?.[workspace]?.issues ?? [], shared(LINKS) ?? [], workspace, panes()) : null;
   return openOverlay({ mod: "linear-board", kind: "dialog", width: 0.85, height: 0.85,
     props: { role: "dialog", source, taskIssue, workspaceId: workspace, ...extra } });
+}
+
+/** An issue's web link; built from the workspace's URL key when a stored link lacks one. */
+function issueWithUrl(is) {
+  if (!is || is.url) return is;
+  const key = shared(DATA)?.[activeWorkspace()]?.workspace?.urlKey;
+  return key && is.identifier ? { ...is, url: `https://linear.app/${key}/issue/${is.identifier}` } : is;
+}
+
+/** Whether a folder is a repository's own checkout ("main"), a worktree ("linked") or
+ *  neither (null), as Herdr's space menu decides which worktree entries to offer. */
+async function checkoutKind(folder, on) {
+  const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder, on });
+  const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: folder, on });
+  if (top?.code !== 0 || common?.code !== 0) return null;
+  return common.stdout.trim() === `${top.stdout.trim()}/.git` ? "main" : "linked";
 }
 
 export default class LinearWorkspace extends LinearClient {
@@ -485,11 +501,17 @@ export default class LinearWorkspace extends LinearClient {
     run("space.select", { id: record.space.id });
     if (a) run("agent.focus", { terminal: a.address });
   }
-  // Right-click: Herdr's own space menu (Rename, worktrees, Close) for the space clicked,
-  // not the focused one. Closing a space is Herdr's confirmed close; its ticket is untouched.
-  spaceMenu(space, cx) {
+  // Right-click on a space, for the space clicked, not the focused one. With a ticket: the
+  // issue entries (Open in Linear app, browser, Copy link) above the space's own (Rename,
+  // worktrees, Close). Without one: Herdr's own space menu. Closing a space is Herdr's
+  // confirmed close; its ticket is untouched.
+  spaceMenu(space, cx, issue = null, folder = null) {
     cx.stop_propagation();
-    return openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space.id } } });
+    const is = issueWithUrl(issue);
+    if (!is?.url) return openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space.id } } });
+    return openOverlay({ mod: "linear-board", kind: "popup", width: 220, height: 268, props: { role: "issue-menu",
+      issue: { identifier: is.identifier ?? "", title: is.title ?? "", url: is.url },
+      space: { id: space.id, folder: folder ?? space.folder ?? null, machine: space.machine ?? null } } });
   }
   visit(is) {
     const record = this.records().find(r => r.issue?.id === is.id);
@@ -601,7 +623,7 @@ export default class LinearWorkspace extends LinearClient {
     return h_flex().id(id).min_w(0).h(49).flex_none().px(8).gap(8).items_center().rounded(6)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
-      .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx))
+      .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx, record.issue, record.folder))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
@@ -895,6 +917,7 @@ export default class LinearWorkspace extends LinearClient {
     const t = theme(), ws = shared(ACTIVE), data = shared(DATA)?.[ws], s = spaces().find(s => s.active);
     const is = s && matchIssue(s, data?.issues ?? [], shared(LINKS) ?? [], ws, panes());
     return h_flex().id("issue-context").size_full().min_w(0).px(12).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+      .when(Boolean(s), el => el.on_mouse_down("right", (_e, cx) => this.spaceMenu(s, cx, is, folderOf(s, panes()))))
       .child(icon(is ? stateIcon(is.state) : "need", is ? t.muted : t.blocked, 13))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).child(is ? `${is.identifier} · ${is.title}` : "This workspace has no Linear ticket"))
@@ -987,7 +1010,7 @@ export default class LinearWorkspace extends LinearClient {
     return h_flex().id(id).min_w(0).h(26).flex_none().px(6).gap(6).items_center().rounded(5)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
-      .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx))
+      .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx, record.issue, record.folder))
       .child(icon(record.needs ? "need" : record.status === "working" ? "work" : "idle", color, 11)
         .when(record.status === "working", el => el.spin(1100)))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
@@ -1504,19 +1527,32 @@ export default class LinearWorkspace extends LinearClient {
   /** The right-click menu on an issue, opened by issueMenu() as its own popup. */
   issueMenuInit(cx) {
     this.menuAt = 0;
+    this.menuGit = null;
     this.menuFocus = cx.focus_handle();
     this.menuFocus.focus();
+    const space = props()?.space;
+    if (space?.folder) cx.spawn(async cx => {
+      this.menuGit = await checkoutKind(space.folder, space.machine ?? null).catch(() => null);
+      cx.notify();
+    });
+  }
+  issueMenuItems() {
+    const p = props() ?? {};
+    return [...issueMenuItems(p.issue), ...spaceMenuItems(p.space, this.menuGit)];
   }
   issueMenuChoose(i, cx) {
-    const p = props() ?? {}, it = issueMenuItems(p.issue)[i];
+    const p = props() ?? {}, it = this.issueMenuItems()[i];
     if (!it) return;
     // Act before closing: closing drops this popup's view and the context with it.
     if (it.action === "copy") cx.write_to_clipboard(it.url);
-    else if (!p.demo) cx.open_url(it.url);
+    else if (it.action === "open") { if (!p.demo) cx.open_url(it.url); }
+    else if (it.action === "run") run(it.command, it.args);
+    else if (it.action === "worktree") openOverlay({ mod: "worktree", kind: "dialog",
+      ...(it.args.action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it.args });
     closeOverlay(p.overlay);
   }
   issueMenuView() {
-    const t = theme(), p = props() ?? {}, items = issueMenuItems(p.issue);
+    const t = theme(), p = props() ?? {}, items = this.issueMenuItems();
     return v_flex().id("issue-menu").track_focus(this.menuFocus).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
       .on_key_down((e, cx) => {
         const n = items.length;
@@ -1529,10 +1565,13 @@ export default class LinearWorkspace extends LinearClient {
         cx.notify();
       })
       .when(Boolean(p.issue?.identifier), el => el.child(div().px(8).pt(3).pb(4).truncate().text_size(10.5).font_family(MONO).text_color(t.dim).child(p.issue.identifier)))
-      .children(items.map((it, i) => h_flex().id(`issue-menu-${i}`).h(28).px(8).gap(9).rounded(7).items_center()
+      .children(items.map((it, i) => v_flex()
+        .when(i > 0 && it.action !== "copy" && it.action !== "open" && ["copy", "open"].includes(items[i - 1].action),
+          el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+        .child(h_flex().id(`issue-menu-${i}`).h(28).px(8).gap(9).rounded(7).items_center()
         .text_color(t.foreground).when(i === this.menuAt, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).cursor_pointer()
         .on_click((_e, cx) => this.issueMenuChoose(i, cx))
-        .child(div().flex_1().child(it.label))));
+        .child(div().flex_1().child(it.label)))));
   }
 
   render(cx) {

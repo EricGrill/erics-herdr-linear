@@ -19,7 +19,7 @@ function native(type, asset) {
 
 const context = vm.createContext({ console });
 const noop = () => {};
-const overlays = [], closed = [];
+const overlays = [], closed = [], commands = [];
 let currentProps = {};
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
@@ -29,7 +29,7 @@ const boundaries = {
   "herdr": {
     spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: () => null,
     theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
-    setShared: noop, setAgentOrder: noop, run: noop, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
+    setShared: noop, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
     closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
   },
 };
@@ -162,5 +162,43 @@ test("the issue menu opens the Linear app link, the web link, or copies it, and 
     menu.issueMenuChoose(0, cx);
     menu.issueMenuChoose(2, cx);
     assert.deepEqual(effects, [["copy", url]]);
+  } finally { currentProps = {}; }
+});
+
+test("right-clicking a space with a ticket puts Open in Linear app in that space's menu", () => {
+  const url = "https://linear.app/example/issue/DEMO-42";
+  const ticketed = { ...record, issue: { ...issue, url }, folder: "/work/demo-42" };
+  for (const row of [board.workRow(ticketed, "home-t"), board.spaceRow(ticketed, "strip-t")]) {
+    overlays.length = 0;
+    const [button, handler] = row.attributes.on_mouse_down;
+    assert.equal(button, "right");
+    handler({}, { stop_propagation: noop });
+    assert.equal(overlays.length, 1);
+    assert.equal(overlays[0].mod, "linear-board");
+    assert.equal(overlays[0].kind, "popup");
+    assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ role: "issue-menu",
+      issue: { identifier: "DEMO-42", title: "Fix a bug", url }, space: { id: "space-7", folder: "/work/demo-42", machine: null } }));
+  }
+
+  currentProps = { role: "issue-menu", overlay: "menu-9", ...overlays[0].props };
+  try {
+    const menu = new Board();
+    menu.init({}, { focus_handle: () => ({ focus: noop }), spawn: noop });
+    menu.menuGit = "linked";
+    const view = menu.render({});
+    assert.match(text(view), /Open in Linear app.*Open in browser.*Copy link.*Rename.*New worktree.*Open worktree.*Remove worktree.*Close/);
+    const effects = [];
+    const cx = { open_url: u => effects.push(["open", u]), write_to_clipboard: noop };
+    commands.length = 0; overlays.length = 0; closed.length = 0;
+    menu.issueMenuChoose(0, cx);
+    menu.issueMenuChoose(3, cx);
+    menu.issueMenuChoose(4, cx);
+    menu.issueMenuChoose(7, cx);
+    assert.deepEqual(effects, [["open", "linear://example/issue/DEMO-42"]]);
+    assert.equal(JSON.stringify(commands), JSON.stringify([["space.rename", { id: "space-7" }], ["space.close", { id: "space-7" }]]));
+    assert.equal(overlays.length, 1);
+    assert.equal(overlays[0].mod, "worktree");
+    assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ space: "space-7", action: "new" }));
+    assert.deepEqual(closed, ["menu-9", "menu-9", "menu-9", "menu-9"]);
   } finally { currentProps = {}; }
 });
