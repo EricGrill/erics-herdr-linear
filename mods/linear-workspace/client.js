@@ -1869,7 +1869,7 @@ export default class Linear extends View {
     return v_flex().id("create-form").flex_1().min_h(0).overflow_y_scrollbar().gap(12)
       .child(h_flex().flex_none().gap(10).items_center()
         .child(this.backButton(o, this.fromLabel()))
-        .child(div().text_size(14).font_semibold().text_color(o.fg).child(f.capture ? "New task" : `New issue in ${this.workspace()?.name ?? "Linear"}`)))
+        .child(div().text_size(14).font_semibold().text_color(o.fg).child(f.capture ? "New issue" : `New issue in ${this.workspace()?.name ?? "Linear"}`)))
       .when(f.capture && !f.review, el => el
         .child(div().text_size(13).text_color(o.fg).child("What would you like to improve?"))
         .child(textarea(this.idea)))
@@ -1912,7 +1912,7 @@ export default class Linear extends View {
       .when(f.draft.revision && !f.saveError, el => el.child(div().text_size(11).text_color(o.muted).child("Draft saved on this computer")))
       .child(h_flex().gap(7).flex_wrap().items_center()
         .when(!f.review, el => el.child(this.button("capture-review", "Shape ticket", cx => this.reviewCapture(cx), { primary: true, enabled: !!this.idea.value().trim() })))
-        .when(f.review, el => el.child(this.button("capture-create", "Create task", cx => this.submitCapture(cx), { primary: true, enabled: ready && !f.saveError }))
+        .when(f.review, el => el.child(this.button("capture-create", "Create issue", cx => this.submitCapture(cx), { primary: true, enabled: ready && !f.saveError }))
           .when(!props()?.attachSpace && Boolean(this.createStartButton), el => el.child(this.createStartButton())))
         .when(!f.teams || (f.team && !f.states[f.team.id]), el => el.child(this.button("capture-reload", "Reload ticket details", cx => this.loadFormTeams(cx))))
         .child(this.button("capture-close", "Save and close", cx => this.back(cx)))
