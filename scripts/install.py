@@ -191,6 +191,10 @@ def install(argv=None):
     if shadowed:
         raise ValueError("Terminal bindings take priority over layout shortcuts: " + ", ".join(shadowed))
     keys[SCOPE] = {**old, **desired}
+    # Retire the personal OAuth popup only when its exact legacy binding exists.
+    # The board uses the configured API key; unrelated global shortcuts stay intact.
+    if keys.get("global", {}).get("cmd-l") == "mod.open:EricsLinear":
+        keys["global"]["cmd-l"] = "mod.open:linear-board"
     keys_bytes = (json.dumps(keys, indent=2) + "\n").encode()
     config_bytes = args.config.expanduser().read_bytes() if args.config else None
     if config_bytes is not None:
