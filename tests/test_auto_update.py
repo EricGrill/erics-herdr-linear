@@ -342,6 +342,7 @@ sys.exit("Install did not complete: native mod check failed")
             text = "\n".join(files.values())
             self.assertIn(str(self.checkout / "scripts/auto_update.py"), text)
             self.assertIn("/opt/homebrew/bin", text)
+            self.assertIn(".local/share/mise/shims", text)
             self.assertTrue(any("300" in t for t in files.values()))
 
 

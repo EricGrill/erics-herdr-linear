@@ -43,8 +43,10 @@ OFFLINE_ALERT_HOURS = 24
 # rerun every timer tick. `run --now` retries at once.
 RETRY_DELAYS = [datetime.timedelta(minutes=15), datetime.timedelta(hours=1),
                 datetime.timedelta(hours=4), datetime.timedelta(hours=24)]
+# Timers start with a bare PATH. Include where Homebrew, ~/.local and mise (omarchy2's gh)
+# put tools, so gh, herdr-app and python3 resolve the same way as in a login shell.
 PATH_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
-             "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+             str(Path.home() / ".local/share/mise/shims"), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
 
 def now():
