@@ -74,6 +74,13 @@ a removed or completed status falls back to an available open status.
 
 Select **Computer**, then **Repository**. The repository list comes from
 the selected computer's own `~/code`; it does not create or clone a missing repository.
+Linear's **Start agent**, **Create & start**, and additional agent tabs use each supported
+agent's unattended permission mode on the selected computer. This includes Cursor's
+`--force` and current Kimi Code's `--auto`, alongside Codex and Claude Code.
+Pi, PiG, and current Amp already execute tools without built-in approval prompts.
+See [agent permission modes](docs/CHA-4235-agent-permissions.md) for the complete mapping,
+version assumptions, and policy limits. Existing sessions retain their launch settings.
+
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
