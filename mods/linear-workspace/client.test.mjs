@@ -138,7 +138,7 @@ async function harness(options = {}) {
   await module.link(link);
   await module.evaluate();
   const mainStubs = {
-    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, noop])),
+    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, name === "taskContext" ? taskContext : noop])),
     "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf"].map(name => [name, noop])),
     "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "delegateCounts"].map(name => [name, noop])),
     "./config.js": { normalizeConfig: noop },
@@ -1186,6 +1186,172 @@ test("a stale unreadable draft dialog cannot discard another window's replacemen
 });
 
 
+test("New task creates directly from title and description without shaping or source text", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  assert.equal(h.client.form.review, true);
+  h.client.title.set_value("A simple task");
+  h.client.captureDescription.set_value("Keep this description exactly.");
+  h.client.submit(h.cx);
+  h.client.submit(h.cx);
+  await h.flush();
+  const creates = h.requests.filter(x => x.request.op === "create");
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].request.new.description, "Keep this description exactly.");
+  assert.deepEqual(h.commands, []);
+});
+
+test("New task saves title-only drafts and restores their selected repository", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo", name: "repo" };
+  h.client.title.set_value("Title only");
+  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  reopened.openCapture();
+  await reopened.flush();
+  assert.equal(reopened.client.title.value(), "Title only");
+  assert.equal(reopened.client.form.draft.execution.folder, "/remote/repo");
+});
+
+test("New task validates and persists a selected target while ordinary create never launches", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo", name: "repo" };
+  h.client.title.set_value("Use this framework again");
+  h.client.form.priority = 3;
+  h.client.form.assignToMe = false;
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.validations[0].machine, "remote");
+  const create = h.requests.find(x => x.request.op === "create").request.new;
+  assert.match(create.description, /"computerId":"core-remote"/);
+  assert.deepEqual(h.routingChecks, []);
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.client.taskDefaults().context.priority, 3);
+  assert.equal(h.client.taskDefaults().context.assignToMe, false);
+  assert.equal(h.client.taskDefaults().lastRepository.folder, "/remote/repo");
+});
+
+test("New task validation failure keeps an editable draft and sends no create request", async () => {
+  const h = await harness({ ...captureOptions(), validationError: "Repository is offline" });
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo" };
+  h.client.title.set_value("Recover this task");
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.match(h.client.err, /Repository is offline/);
+  assert.equal(h.requests.some(x => x.request.op === "create"), false);
+  assert.equal(h.client.form.draft.uncertain, false);
+  assert.equal(h.client.title.value(), "Recover this task");
+});
+
+test("New task Create & start uses the validated snapshot through the subclass bridge", async () => {
+  const h = await harness({ ...captureOptions(), agents: [selectedAgent] });
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo" };
+  h.client.agentChoices = [selectedAgent];
+  h.client.agentKey = "codex";
+  h.client.agentsChecked = true;
+  h.client.title.set_value("Start explicitly");
+  h.client.afterCreate = function (issue, cx, start) {
+    h.modes.push(start);
+    if (start) h.main.worktree.call(this, cx, true, { issue });
+  };
+  h.client.submit(h.cx, true);
+  h.client.launchTarget = { machine: null, folder: "/wrong/repo" };
+  await h.flush();
+  assert.deepEqual(h.modes, [true]);
+  assert.equal(h.routingChecks[0].target.folder, "/remote/repo");
+  assert.equal(h.requests.find(x => x.request.op === "worktree").on, "remote");
+  assert.equal(h.requests.filter(x => x.request.op === "create").length, 1);
+});
+
+
+test("next New task restores compatible options from the previous successful task", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  h.client.title.set_value("First task");
+  h.client.form.state = "started";
+  h.client.form.priority = 2;
+  h.client.form.assignToMe = false;
+  h.client.submit(h.cx);
+  await h.flush();
+  const next = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
+  next.openCapture();
+  await next.flush();
+  assert.equal(next.client.title.value(), "");
+  assert.equal(next.client.form.team.id, "team-one");
+  assert.equal(next.client.form.state, "started");
+  assert.equal(next.client.form.priority, 2);
+  assert.equal(next.client.form.assignToMe, false);
+});
+
+test("late previous-task placement cannot overwrite a new explicit choice", async () => {
+  const response = delay();
+  const h = await harness({ ...captureOptions(), detailReply: () => response.promise });
+  h.openCapture();
+  await h.flush();
+  h.client.targetGeneration = 1;
+  const issue = { ...ticket, project: { id: "project-one" } };
+  h.client.form.project = "project-one";
+  const choices = [];
+  h.client.chooseComputer = (...args) => choices.push(args);
+  h.client.restoreTaskRepository(issue, h.client.form, h.cx);
+  const pending = h.flush();
+  await new Promise(setImmediate);
+  h.client.targetGeneration += 1;
+  response.resolve({ issue, description: '```json\n{"ericsHerdrLinearExecutionTarget":{"version":1,"computerId":"core-local","computerName":"origin","folder":"/repos/previous"}}\n```' });
+  await pending;
+  assert.equal(choices.length, 0);
+});
+
+test("previous-task canonical placement prefills the same project without a create or launch", async () => {
+  const h = await harness({ ...captureOptions(), description: '```json\n{"ericsHerdrLinearExecutionTarget":{"version":1,"computerId":"core-local","computerName":"origin","folder":"/repos/previous"}}\n```' });
+  h.openCapture();
+  await h.flush();
+  const issue = { ...ticket, project: { id: "project-one" } };
+  h.client.form.project = "project-one";
+  const choices = [];
+  h.client.chooseComputer = (machine, cx, target) => choices.push({ machine, target });
+  h.client.restoreTaskRepository(issue, h.client.form, h.cx);
+  await h.flush();
+  assert.equal(choices[0].machine, null);
+  assert.equal(choices[0].target.folder, "/repos/previous");
+  assert.equal(h.requests.some(x => x.request.op === "create"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+
+test("Create & start sends the submitted body before the new ticket detail arrives", async () => {
+  const detail = delay();
+  const h = await harness({ ...captureOptions(), agents: [selectedAgent], detailReply: () => detail.promise });
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo" };
+  h.client.agentChoices = [selectedAgent]; h.client.agentKey = "codex"; h.client.agentsChecked = true;
+  h.client.title.set_value("Start with full context");
+  h.client.captureDescription.set_value("The agent must receive these acceptance checks.");
+  h.client.taskFor = h.main.taskFor;
+  h.client.worktree = h.main.worktree;
+  h.client.afterCreate = h.main.afterCreate;
+  h.client.openIssue = (issue, cx) => h.main.openIssue.call(h.client, issue, cx);
+  h.client.submit(h.cx, true);
+  const pending = h.flush();
+  await new Promise(setImmediate);
+  const launch = h.commands.find(x => x.name === "space.new");
+  assert.ok(launch);
+  assert.match(launch.args.task, /The agent must receive these acceptance checks/);
+  assert.match(launch.args.task, /DEMO-3785/);
+  detail.resolve({ issue: ticket, description: "Loaded later" });
+  await pending;
+});
+
 test("ordinary creation derives a short title and preserves the full multiline request", async () => {
   const request = "  Fix   the new task flow\n\nKeep all of these details.  ";
   const h = await harness({ request });
@@ -1243,14 +1409,16 @@ test("explicit project overrides an incompatible saved team and stale status", a
   }
 });
 
-test("demo and capture do not replace ordinary issue defaults", async () => {
+test("unified task defaults are shared while demo choices stay isolated", async () => {
   const h = await harness();
   h.client.rememberTaskOptions();
-  const before = JSON.stringify([...h.sharedStore]);
   h.client.form.capture = true;
   h.client.form.priority = 4;
   h.client.rememberTaskOptions();
+  assert.equal(h.client.taskDefaults().issue.priority, 4);
+  const before = JSON.stringify([...h.sharedStore]);
   h.client.form.capture = false;
+  h.client.form.priority = 1;
   h.client.demo = true;
   h.client.rememberTaskOptions();
   assert.equal(JSON.stringify([...h.sharedStore]), before);
@@ -1297,4 +1465,19 @@ test("no-project tasks retain their own last computer and repository", async () 
   h.client.form.project = "project-one";
   assert.equal(h.client.defaultTaskMachine(), null);
   assert.equal(h.client.mappedRepository(null), "/local/one");
+});
+
+
+test("unified New task derives its title from a single multiline request", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  const request = "  Fix   task defaults\n\nPreserve this whole request.  ";
+  h.client.captureDescription.set_value(request);
+  h.client.submit(h.cx);
+  await h.flush();
+  const created = h.requests.find(x => x.request.op === "create").request.new;
+  assert.equal(created.title, "Fix task defaults");
+  assert.equal(created.description, request);
+  assert.deepEqual(h.commands, []);
 });

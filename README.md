@@ -29,35 +29,40 @@ The grouping is a view of work, not a workflow automation. Finishing an agent ru
 not mark a Linear ticket Done. Commands typed directly into a terminal can still start
 unlinked work; the issue header identifies spaces that have no ticket.
 
-## Capture an idea first
+## Create a task or capture an idea
 
-Choose **Capture idea** from the issue list or a project's view. Write the thought in
-one field. Team and project remain visible and editable; computer, repository and agent
-selection wait until you choose to start work. The existing **New task** flow retains
-its execution checks.
+Choose **New task** from the issue list, a project, or the launcher. Write the request in
+one multiline field, then **Create task**. The first nonempty request line supplies
+the ticket title; the full request is retained as its description. The current task's project
+and repository, or your previous compatible choices, are prefilled and editable.
+Status, priority and assignment are remembered from the previous successful task and
+remain available under **Ticket details**. Repository choices stay scoped to the
+Linear workspace, project and computer. Existing capture commands and shortcuts open
+the same form.
 
-Capture saves a local draft as you type, scoped to the selected Linear workspace in
-that mod, using a stable persisted app key shared across its dialog instances.
-Closing the dialog or restarting Herdr restores it. **Discard draft** removes
-it explicitly. Storage failures and conflicting revisions are shown instead of silently
-replacing another window's draft. Drafts remain local to this app and are not synced
-between computers or the two mods.
+New task saves a local draft as you type, scoped to the selected Linear workspace in
+that mod, using a stable persisted app key across dialog instances.
+Closing the dialog or restarting Herdr restores it, including the selected
+repository. **Discard draft** removes it explicitly. Storage failures and conflicting
+revisions are shown instead of silently replacing another window's draft. Drafts remain
+local to this app and are not synced between computers or the two mods. Existing idea
+drafts open in this form with their original source preserved.
 
-**Shape ticket** makes an immediate local template you can edit. **Improve with AI** is
-an explicit optional action that sends the idea text to OpenAI and returns a proposed
-title, problem, outcome, acceptance checks and open questions. It uses `gpt-6-luna` via
-the Responses API with tools disabled and `store: false`; this does not disable all
+**Improve with AI** is optional. It sends the source idea, or the entered request, to OpenAI for editable suggestions. It uses the existing `gpt-6-luna`
+Responses integration with tools disabled and `store: false`; this does not disable all
 provider retention. It requires `OPENAI_API_KEY` in the Herdr process environment and
 uses the account's API billing. Keys are not placed in preferences or command arguments.
 No agent session or worktree is started for shaping. Without a key or on failure, the
-local draft and basic ticket path remain available.
+local draft and direct creation remain available. Shaped tickets preserve their source
+idea; its **Edit source idea** control also offers the existing local **Shape ticket**
+template.
 
-Review the title and description, then choose **Create ticket**. The original idea is
-preserved in the ticket description. Capture-only tickets do not contain a fabricated
-execution target. After creation, choose **Start agent** and select a validated computer
-and existing repository. A failed or unconfirmed create retains the draft and asks you
-to check recent issues before retrying, since a lost response can follow a successful
-write. Finishing a capture or agent run does not mark an issue Done.
+**Create task** validates and saves the selected repository with the ticket. A task can
+also be created without a repository, then assigned one later. **Create & start** requires
+an existing repository and an installed agent; its validated target and submitted text
+are carried through to that launch. A failed or unconfirmed create retains the draft
+and asks you to check recent issues before retrying, since a lost response can follow a
+successful write. Finishing a task creation or agent run does not mark an issue Done.
 
 ## Choose where a task runs
 

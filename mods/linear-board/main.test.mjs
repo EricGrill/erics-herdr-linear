@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("./main.js", import.meta.url), "utf8");
 const repositorySource = await readFile(new URL("./repository.js", import.meta.url), "utf8");
+const captureSource = await readFile(new URL("./capture.js", import.meta.url), "utf8");
 const clientSource = await readFile(new URL("./client.js", import.meta.url), "utf8");
 const project = { id: "project-one", name: "one", teams: ["TEAM"] };
 
@@ -18,6 +19,7 @@ async function harness(options = {}) {
   const storage = new Map();
   const context = vm.createContext({ localStorage: {
     getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
+    removeItem: key => storage.delete(key), flush: async () => {},
   } });
   const dummy = new Proxy(function () {}, { get: () => dummy, apply: () => dummy });
   const api = {
@@ -41,11 +43,13 @@ async function harness(options = {}) {
   async function link(specifier) {
     if (modules.has(specifier)) return modules.get(specifier);
     let module;
-    if (specifier === "./repository.js") module = new vm.SourceTextModule(repositorySource, { context });
+    if (specifier === "./capture.js") module = new vm.SourceTextModule(captureSource, { context });
+    else if (specifier === "./repository.js") module = new vm.SourceTextModule(repositorySource, { context });
     else if (specifier === "./client.js") module = new vm.SourceTextModule(clientSource, { context });
     else {
       let exports;
-      if (specifier === "gpui-kit") exports = { View: class {}, div: dummy, svg: dummy, image: dummy };
+      if (specifier === "crypto") exports = { randomUUID: () => "sample-draft" };
+      else if (specifier === "gpui-kit") exports = { View: class {}, div: dummy, svg: dummy, image: dummy };
       else if (specifier === "herdr") {
         const names = [...(source + clientSource).matchAll(/import \{([^}]+)\} from "herdr"/g)].flatMap(m => m[1].split(",").map(n => n.trim()));
         exports = Object.fromEntries([...new Set([...names, "exec"])].map(name => [name, api[name] ?? dummy]));
@@ -59,7 +63,7 @@ async function harness(options = {}) {
       }, { context });
     }
     modules.set(specifier, module);
-    if (["./repository.js", "./client.js"].includes(specifier)) await module.link(link);
+    if (["./repository.js", "./client.js", "./capture.js"].includes(specifier)) await module.link(link);
     return module;
   }
   const main = new vm.SourceTextModule(source, { context });
@@ -68,21 +72,23 @@ async function harness(options = {}) {
   const base = modules.get("./client.js").namespace.default.prototype;
   base.init = function (p) {
     initializations.push(p);
-    this.lists = { projects: { items: options.projects ?? [project, { id: "project-two", name: "two", teams: ["TEAM"] }] } };
+    this.lists = { projects: { loaded: true, items: options.projects ?? [project, { id: "project-two", name: "two", teams: ["TEAM"] }] } };
     this.ws = "workspace-one";
+    this.workspaces = [{ id: "workspace-one", name: "Sample", urlKey: "sample" }];
     this.screen = "list";
-    this.title = this.desc = this.projSearch = { set_value() {}, focus() {} };
+    const field = () => { let value = ""; return { set_value(v) { value = v; }, value: () => value, focus() {} }; };
+    this.title = field(); this.desc = field(); this.projSearch = field(); this.idea = field(); this.captureDescription = field();
   };
   base.linear = async request => {
     if (request.op === "teams") return { teams: [{ id: "team", key: "TEAM" }] };
-    if (request.op === "states") return { states: [] };
+    if (request.op === "states") return { states: [{ id: "backlog", type: "backlog", name: "Backlog" }] };
     if (request.op === "project") return {};
     throw new Error(`Unexpected Linear request: ${request.op}`);
   };
   const view = new main.namespace.default();
   const cx = { notify() {}, spawn(fn) { jobs.push(fn(cx)); }, timer: { every() {}, after() {} } };
   async function settle() { while (jobs.length) await Promise.all(jobs.splice(0)); }
-  return { view, cx, settle, calls, initializations, sharedStore };
+  return { view, cx, settle, calls, initializations, sharedStore, storage };
 }
 
 test("explicit-local source discovers and preselects locally while a remote space is focused", async () => {
@@ -557,6 +563,90 @@ test("filter enrichment preserves an explicitly removed project", async () => {
 }
 
 
+test("New task and legacy capture both open directly with repository options", async () => {
+  for (const action of ["new", "capture"]) {
+    const h = await harness({ props: { action, project: project.id,
+      source: { machine: null, folder: "/local/code/one" } } });
+    h.view.init({}, h.cx);
+    await h.settle();
+    assert.equal(h.view.screen, "create");
+    assert.equal(h.view.form.capture, true);
+    assert.equal(h.view.form.review, true);
+    assert.equal(h.view.form.project, project.id);
+    assert.equal(h.view.launchTarget.folder, "/local/code/one");
+  }
+});
+
+test("a restored explicitly local draft never follows a remembered remote computer", async () => {
+  const h = await harness({ props: { source: { machine: "remote", folder: "/remote/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.create(h.cx, true, project.id);
+  await h.settle();
+  h.view.title.set_value("Local draft");
+  h.view.launchTarget = { machine: null, folder: "/local/code/one", name: "one" };
+  h.view.saveCapture(h.cx);
+  h.view.rememberRepository({ machine: "remote", folder: "/remote/code/two" });
+  h.view.create(h.cx, true);
+  await h.settle();
+  assert.equal(h.view.title.value(), "Local draft");
+  assert.equal(h.view.launchTarget.machine, null);
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+
+test("an offline restored draft keeps its repository without enabling an unvalidated target", async () => {
+  const repositories = { local: ["one"], remote: ["one"] };
+  const h = await harness({ repositories, props: { source: { machine: null, folder: "/local/code/one" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.create(h.cx);
+  await h.settle();
+  h.view.title.set_value("Keep my target");
+  h.view.saveCapture(h.cx);
+  repositories.local = undefined;
+  h.view.create(h.cx);
+  await h.settle();
+  assert.equal(h.view.form.draft.execution.folder, "/local/code/one");
+  assert.equal(h.view.launchTarget.folder, "");
+  assert.match(h.view.repositoryError, /Could not discover/);
+  h.view.chooseComputer("remote", h.cx);
+  await h.settle();
+  assert.equal(h.view.form.draft.execution, null, "an explicit computer change clears the old target");
+});
+
+test("late project metadata completes repository defaults without replacing an explicit choice", async () => {
+  for (const explicit of [false, true]) {
+    const h = await harness({ projects: [], props: { source: { machine: null, folder: "/worktrees/task" } } });
+    h.view.init({}, h.cx);
+    await h.settle();
+    h.view.lists.projects.loaded = false;
+    h.view.create(h.cx, true, project.id);
+    await h.settle();
+    assert.equal(h.view.form.waitingProjects, true);
+    if (explicit) {
+      h.view.chooseComputer("remote", h.cx);
+      await h.settle();
+      h.view.selectRepository({ name: "two", folder: "/remote/code/two" }, h.cx);
+    }
+    h.view.lists.projects = { loaded: true, items: [project] };
+    h.view.didLoad("projects", h.cx);
+    await h.settle();
+    assert.equal(h.view.launchTarget.folder, explicit ? "/remote/code/two" : "/local/code/one");
+  }
+});
+
+
+test("a generic task with no project opens even when other issues have saved targets", async () => {
+  const h = await harness({ projects: [], sharedStore: new Map([["linear-workspace.launch-targets", {}]]) });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.create(h.cx);
+  await h.settle();
+  assert.equal(h.view.form.project, null);
+  assert.equal(h.view.form.review, true);
+});
+
 test("agent selection persists ordinary preferences but demo selection stays isolated", async () => {
   for (const demo of [false, true]) {
     const h = await harness();
@@ -575,15 +665,20 @@ test("agent selection persists ordinary preferences but demo selection stays iso
 
 test("Create & start reflects status readiness without starting anything", async () => {
   const h = await harness();
+  h.view.init({}, h.cx);
+  await h.settle();
   h.view.launchTarget = { machine: null, folder: "/local/code/one" };
   h.view.agentsChecked = true;
   h.view.agentChoices = [{ key: "local-agent" }];
+  h.view.agentKey = "local-agent";
+  h.view.desc.set_value("Start this request");
   h.view.button = (_id, _label, _action, options) => options;
-  h.view.form = {};
+  h.view.form = { team: { id: "team" } };
   assert.equal(h.view.createStartButton().enabled, true);
   h.view.form.loadingStates = "team";
   assert.equal(h.view.createStartButton().enabled, false);
   h.view.form.loadingStates = null;
   h.view.form.statesError = "Offline";
   assert.equal(h.view.createStartButton().enabled, false);
+
 });

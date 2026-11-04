@@ -105,6 +105,7 @@ export function loadTarget(view, cx, machine, { retain = null, preferredFolder =
       view.agentChoices = agents.value;
       view.agentKey = agents.value.find(a => a.key === preferredAgent)?.key ?? agents.value[0]?.key ?? "";
     } else view.launchError = `Could not check agents: ${agents.reason?.message ?? agents.reason}`;
+    if (view.screen === "create" && view.form?.capture && !view.form.draft?.uncertain) view.saveCapture?.(cx);
     cx.notify();
   });
 }
