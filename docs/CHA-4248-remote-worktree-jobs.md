@@ -25,3 +25,16 @@ not create a Linear issue, change a live issue's state or launch an actual agent
 Upstream contract: [worker startup and polling](https://github.com/mrolafsson/herdr-linear/blob/v0.14.2/app.go#L627-L761),
 [Darwin background implementation](https://github.com/mrolafsson/herdr-linear/blob/v0.14.2/platform_darwin.go#L112-L113).
 Keep this protocol aligned with the pinned backend when upgrading it.
+
+## Fresh repositories without an origin
+
+The exact newly created repository also exposed a separate pinned-backend assumption:
+`baseRef` defaults to `origin/main`, which does not exist in a local-only repository.
+This produces Git exit 128 after the worker-lifetime problem is fixed.
+
+When no explicit backend `base` is configured and the repository has no origin,
+prepare the issue branch from local `HEAD` before calling the backend. Its existing-
+branch path then creates the worktree without fabricating a remote-tracking ref.
+Leave remote-backed repositories and explicit base settings on the backend's normal
+path, and never reset an existing issue branch. A missing HEAD or invalid branch
+fails before worker creation or the issue's start transition.

@@ -21,7 +21,7 @@ const sourceSpace = { id: "source", active: true, folder: "/repos/sampleWorkspac
 // No process, network connection, timer, or app command leaves this harness.
 async function harness(options = {}) {
   const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [], creations = [];
-  const hcCalls = [], managedJobs = new Set();
+  const hcCalls = [], managedJobs = new Set(), branchPreparations = [];
   const sharedStore = options.sharedStore ?? new Map();
   const storage = options.storage ?? new Map();
   let fakeTime = 1700000000000;
@@ -79,7 +79,11 @@ async function harness(options = {}) {
         missingJobPolls -= 1;
         return { code: 0, stdout: JSON.stringify({ error: "that job is gone" }), stderr: "" };
       }
-      const failure = options.backendJobError ?? (options.requireManagedWorker && !managedJobs.has(request.job) ? "it didn't start" : null);
+      const work = requests.find(x => x.request.op === "worktree" && x.request.job === request.job);
+      const prepared = branchPreparations.some(p => p.branch === work?.request.target.branch &&
+        (p.target.machine ?? null) === work?.on && p.target.folder === work?.request.dirs[0]);
+      const failure = options.backendJobError ?? (options.requireLocalBranch && !prepared ? "exit status 128" :
+        options.requireManagedWorker && !managedJobs.has(request.job) ? "it didn't start" : null);
       result = { done: true, result: failure ? { error: failure } : {
         path: options.worktreePath ?? "/repos/worktrees/demo-3785", created: options.created ?? false,
         prompt: "Backend prompt", note: "Worktree ready",
@@ -132,6 +136,10 @@ async function harness(options = {}) {
     }, validateWorktreeRouting: async (target, workspaceKey) => {
       routingChecks.push({ target: { ...target }, workspaceKey });
       if (options.routingError) throw new Error(options.routingError);
+      return options.routingBase ?? "";
+    }, prepareWorktreeBranch: async (target, branch, base = "") => {
+      branchPreparations.push({ target: { ...target }, branch, base });
+      if (options.branchPreparationError) throw new Error(options.branchPreparationError);
     } },
     "herdr": {
       shared: key => sharedStore.get(key), setShared: (key, value) => {
@@ -224,7 +232,7 @@ async function harness(options = {}) {
     Object.assign(client, { ws: workspace, on: "", workspaces: [{ id: workspace, name: "Workspace", urlKey: "example" }], lists: {} });
     client.create(cx, true);
   };
-  return { client, cx, flush, openCapture, storage, requests, commands, hcCalls, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
+  return { client, cx, flush, openCapture, storage, requests, commands, hcCalls, branchPreparations, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
@@ -1762,4 +1770,44 @@ test("CHA-4248: an acknowledged worker that never reports startup fails within t
   assert.equal(h.requests.some(x => x.request.op === "start"), false);
   assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
   assert.equal(h.client.busy, "");
+});
+
+
+for (const machine of ["remote", null]) test(`CHA-4248: a fresh no-origin repository prepares its issue branch before launching on ${machine ?? "explicit local"}`, async () => {
+  const folder = "/repos/newly initialized";
+  const h = await harness({ requireLocalBranch: true, launchTarget: { machine, folder } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "", "a new committed repository must not fail against the backend's nonexistent origin/main default");
+  assert.equal(h.branchPreparations.length, 1);
+  assert.equal(h.branchPreparations[0].target.machine, machine);
+  assert.equal(h.branchPreparations[0].target.folder, folder);
+  assert.equal(h.branchPreparations[0].branch, ticket.branch);
+  assert.equal(h.branchPreparations[0].base, "");
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1);
+  const opened = h.commands.find(x => x.name === "space.new");
+  assert.ok(opened);
+  assert.equal(opened.args.machine, machine ?? "");
+});
+
+test("CHA-4248: branch preparation failure stops before worker creation and issue transition", async () => {
+  const h = await harness({ launchTarget: { machine: "remote", folder: "/repos/newly initialized" },
+    branchPreparationError: "Could not prepare the local issue branch" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /Could not prepare the local issue branch/);
+  assert.equal(h.branchPreparations.length, 1);
+  assert.deepEqual(h.hcCalls, []);
+  assert.equal(h.requests.some(x => ["worktree", "start"].includes(x.request.op)), false);
+  assert.deepEqual(h.commands, []);
+});
+
+test("CHA-4248: configured backend base is passed unchanged to branch preparation", async () => {
+  const h = await harness({ launchTarget: { machine: "remote", folder: "/repos/chosen" }, routingBase: "release/stable" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.equal(h.branchPreparations.length, 1);
+  assert.equal(h.branchPreparations[0].base, "release/stable");
+  assert.ok(h.commands.some(x => x.name === "space.new"));
 });
