@@ -180,7 +180,10 @@
           "id": "status",
           "type": "block",
           "content": {
-            "mod": "workspace-status"
+            "mod": "linear-board",
+            "props": {
+              "role": "status"
+            }
           },
           "size": {
             "px": 28
