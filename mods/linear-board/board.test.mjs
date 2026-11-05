@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   splitName, issueNeedsYou, visibleLabels, delegateOf, machineOf,
-  boardTree, machineGroups,
+  boardTree, machineGroups, laneSince, elapsed, linearMismatch,
 } from "./board.js";
 
 const TEAMS = [{ key: "DEMO", name: "Chainbytes" }, { key: "PKX", name: "PointsKash" }, { key: "STE", name: "StencilWash" }];
@@ -160,4 +160,40 @@ test("machineGroups keeps unreachable machines visible and busiest first", () =>
 
 test("machineGroups always has a row for this machine", () => {
   assert.deepEqual(machineGroups([], []).map(g => g.name), [null]);
+});
+
+test("laneSince prefers Herdr's state-change times and falls back to the ticket's Linear update", () => {
+  const space = tabs => ({ space: { tabs }, issue: { updatedAt: "2026-11-01T00:00:00.000Z" } });
+  const both = space([{ working_since: 500, changed_at: 900 }, { working_since: 300, changed_at: 700 }]);
+  assert.deepEqual(laneSince(both, "working"), { at: 300, source: "herdr" });
+  assert.deepEqual(laneSince(both, "done"), { at: 900, source: "herdr" });
+  assert.deepEqual(laneSince(space([{ working_since: null, changed_at: 800 }]), "working"), { at: 800, source: "herdr" });
+  assert.deepEqual(laneSince(space([{ working_since: null, changed_at: null }]), "idle"),
+    { at: Date.parse("2026-11-01T00:00:00.000Z"), source: "linear" });
+  assert.deepEqual(laneSince({ space: {}, issue: null }, "idle"), { at: null, source: null });
+});
+
+test("elapsed reads as minutes, hours and days", () => {
+  const now = 10 * 86400000;
+  assert.equal(elapsed(now - 20000, now), "<1m");
+  assert.equal(elapsed(now - 4 * 60000, now), "4m");
+  assert.equal(elapsed(now - 5 * 3600000, now), "5h");
+  assert.equal(elapsed(now - 3 * 86400000, now), "3d");
+  assert.equal(elapsed(null, now), "");
+});
+
+test("linearMismatch hides a Linear status that agrees with the group and keeps one that doesn't", () => {
+  const state = (name, type) => ({ state: { name, type }, labels: [] });
+  const progress = state("In Progress", "started");
+  assert.equal(linearMismatch("working", progress), "");
+  assert.equal(linearMismatch("idle", progress), "");
+  assert.equal(linearMismatch("blocked", progress), "");
+  assert.equal(linearMismatch("done", progress), "still In Progress");
+  assert.equal(linearMismatch("working", state("Todo", "unstarted")), "Linear: Todo");
+  assert.equal(linearMismatch("done", state("Done", "completed")), "");
+  assert.equal(linearMismatch("done", state("Needs Human", "started")), "");
+  assert.equal(linearMismatch("working", state("Needs Human", "started")), "Linear: Needs Human");
+  assert.equal(linearMismatch("blocked", state("Done", "completed")), "Linear: Done");
+  assert.equal(linearMismatch("idle", state("Canceled", "canceled")), "Linear: Canceled");
+  assert.equal(linearMismatch("working", null), "");
 });

@@ -353,7 +353,7 @@ async function harness(options = {}) {
     },
     "fs/promises": { readFile: forbidden("readFile"), writeFile: forbidden("writeFile") },
     "./client.js": { default: BaseClient },
-    "./look.js": { tint: color => color, icon: () => element("icon"), stateIcon: () => "state", MONO: "mono" },
+    "./look.js": { tint: color => color, icon: () => element("icon"), stateIcon: () => "state", priorityIcon: () => "prio", MONO: "mono" },
   };
   const modules = new Map();
   async function load(url) {
