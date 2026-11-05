@@ -20,7 +20,7 @@ import { hc, agents, panes, machines, spaces, run, exec, theme, appHome, props, 
 import { draftStorage, loadDraft, saveDraft, discardDraft, shapeIdea, shapeWithAI } from "./capture.js";
 import { LinearAPI } from "./api.js";
 import { normalizeConfig } from "./config.js";
-import { createRepository, validateRepository, validateWorktreeRouting, prepareWorktreeBranch } from "./repository.js";
+import { createRepository, validateRepository, validateWorktreeRouting, prepareWorktreeBranch, inferRepository } from "./repository.js";
 import { identifyExecutionTarget, descriptionWithExecutionTarget, readExecutionTarget, resolveExecutionTarget } from "./execution-target.js";
 import { tones, tint, countPill, stateIcon, projectIcon, PRIORITIES, priorityIcon, hue, icon, chip, words, key, MONO } from "./look.js";
 
@@ -662,6 +662,32 @@ export default class Linear extends View {
     cx.notify();
   }
 
+  // An existing ticket with no saved repository starts in the one its project
+  // already uses, not a blank new one (CHA-4309). It runs when the ticket's
+  // details or the computer's repositories arrive, only while no repository is
+  // chosen; picking "New repository" afterwards is not overridden.
+  inferLaunchRepository(cx) {
+    const is = this.detail?.issue, t = this.launchTarget;
+    if (this.demo || this.screen !== "issue" || !is || is.id !== this.cur?.id || !t || t.blocked || t.folder
+      || this.repositoriesLoading || !this.repositories?.length) return;
+    const machine = t.machine ?? null, projectId = is.project?.id ?? null;
+    const saved = shared(LAUNCH_TARGETS) ?? {};
+    const pool = typeof this.allIssues === "function" ? this.allIssues() : Object.values(this.lists ?? {}).flatMap(l => l?.items ?? []);
+    const siblings = projectId ? pool.filter(i => i.id !== is.id && i.project?.id === projectId).map(i => {
+      const s = saved[`${this.ws}/${i.id}`];
+      return s && (s.machine ?? null) === machine ? { folder: s.folder, title: i.title } : null;
+    }).filter(Boolean) : [];
+    const repo = inferRepository(this.repositories, {
+      projectFolder: projectId ? this.taskDefaults().projects?.[projectId]?.repositories?.[machine ?? ""] ?? "" : "",
+      projectName: is.project?.name ?? "", siblings, text: [is.title, this.detail.description].join("\n") });
+    if (!repo) return;
+    this.launchTarget = { ...t, machine, folder: repo.folder, name: repo.name, root: this.repoRoot ?? t.root ?? "" };
+    this.repositoryError = "";
+    cx.notify();
+  }
+
+  repositoriesLoaded(cx) { this.inferLaunchRepository(cx); }
+
   blockLaunchTarget(message, cx, computerName = null) {
     const generation = this.targetGeneration = (this.targetGeneration ?? 0) + 1;
     this.agentGeneration = (this.agentGeneration ?? 0) + 1;
@@ -723,6 +749,7 @@ export default class Linear extends View {
         this.detail = d;
         this.cur = d.issue;
         this.replaceRow(d.issue);
+        this.inferLaunchRepository(cx);
         this.issueTargetState = { key, request, status: "ready" };
       } catch (e) {
         if (current()) {
