@@ -202,3 +202,30 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
     assert.deepEqual(closed, ["menu-9", "menu-9", "menu-9", "menu-9"]);
   } finally { currentProps = {}; }
 });
+
+test("sidebar rows show time in state, hide a matching Linear status and list the most recent first", () => {
+  const now = Date.now();
+  const progress = { ...issue, state: { name: "In Progress", type: "started" }, labels: [] };
+  const space = (id, name, tab) => ({ id, name, machine: null, tabs: [tab] });
+  const working = { issue: progress, programs: [], agents: [], status: "working", space: { ...space("w", "Working one", { working_since: now - 4 * 60000, changed_at: now - 60000 }), machine: "snoke" } };
+  const finished = { issue: progress, programs: [], agents: [], status: "done", space: space("d", "Finished one", { changed_at: now - 12 * 60000 }) };
+  const todo = { issue: { ...progress, state: { name: "Todo", type: "unstarted" } }, programs: [], agents: [], status: "working", space: space("t", "Todo one", { working_since: now - 30000 }) };
+  const idle = { issue: { ...progress, updatedAt: new Date(now - 3 * 86400000).toISOString() }, programs: [], agents: [], status: "idle", space: space("i", "Idle one", {}) };
+  const line = (r, lane) => text(nodes(board.workRow(r, `age-${r.space.id}`, lane)).find(node => node.attributes.text_size?.[0] === 11));
+  assert.equal(line(working, "working"), "Working 4m · snoke");
+  assert.equal(line(finished, "done"), "Agent finished 12m ago · still In Progress · local");
+  assert.equal(line(todo, "working"), "Working <1m · Linear: Todo · local");
+  assert.equal(line(idle, "idle"), "Idle 3d · local");
+  for (const row of [working, finished, idle].map((r, i) => board.workRow(r, `age-${i}`, ["working", "done", "idle"][i]))) {
+    assert.doesNotMatch(text(row), /Linear: In Progress/);
+  }
+  const tips = nodes(board.workRow(idle, "tip", "idle")).map(node => node.attributes.tooltip?.[0]).filter(Boolean);
+  assert.ok(tips.some(tip => /last Linear update/.test(tip)), "the label says when its age comes from Linear");
+
+  const saved = board.records, savedEnrich = board.enrichment;
+  board.records = () => [working, todo];
+  board.enrichment = () => ({ byIdentifier: new Map() });
+  try {
+    assert.deepEqual(board.visibleSpaces().map(r => r.space.id), ["t", "w"], "the space that started working most recently comes first");
+  } finally { board.records = saved; board.enrichment = savedEnrich; }
+});

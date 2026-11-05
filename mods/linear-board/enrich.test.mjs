@@ -52,7 +52,7 @@ const answer = (nodes, pageInfo = { hasNextPage: false, endCursor: null }) =>
   JSON.stringify({ data: { issues: { pageInfo, nodes } } });
 
 const node = (identifier, over = {}) => ({
-  id: `uuid-${identifier}`, identifier,
+  id: `uuid-${identifier}`, identifier, updatedAt: "2026-11-01T12:00:00.000Z",
   delegate: null, assignee: { displayName: "sample-user" },
   state: { name: "Todo", type: "unstarted" },
   project: { id: "p1", name: "Helper Project" }, team: { key: "DEMO" },
@@ -107,6 +107,7 @@ test("a delegated issue parses into usable rows", async () => {
   same(parsed.rows, [{
     id: "uuid-DEMO-3589",
     identifier: "DEMO-3589",
+    updatedAt: "2026-11-01T12:00:00.000Z",
     delegate: { id: "agent-spock", name: "Spock", avatarUrl: "https://public.linear.app/a.png", eligible: false },
     contextIncomplete: ["labels"],
     assignee: "sample-user",
