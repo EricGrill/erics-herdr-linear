@@ -21,7 +21,12 @@ for folder in "$root"/* "$root"/.[!.]* "$root"/..?*; do
   [ -d "$folder" ] || continue
   { [ -d "$folder/.git" ] || [ -f "$folder/.git" ]; } || continue
   git -C "$folder" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
-  printf '%s\\0' "$folder"
+  # Blank: what "New repository" makes (no remote, one commit, no files). A
+  # leading "*" marks it; real paths always start with "/".
+  mark=""
+  if [ -z "$(git -C "$folder" remote 2>/dev/null)" ] && [ "$(git -C "$folder" rev-list --count --all 2>/dev/null)" = 1 ] \\
+    && [ -z "$(git -C "$folder" ls-tree HEAD 2>/dev/null)" ]; then mark="*"; fi
+  printf '%s%s\\0' "$mark" "$folder"
 done`;
 
 export async function discoverRepositories(machine) {
@@ -30,7 +35,10 @@ export async function discoverRepositories(machine) {
   if (result.code !== 0) throw new Error(result.stderr || `Could not read ~/code on ${machine ?? "This computer"}.`);
   const [root, ...paths] = result.stdout.split("\0").filter(Boolean);
   if (!root?.startsWith("/")) throw new Error("This computer did not return an absolute ~/code directory.");
-  return { root, repositories: paths.map(folder => ({ folder, name: folder.slice(folder.lastIndexOf("/") + 1) })).sort((a, b) => a.name.localeCompare(b.name)) };
+  return { root, repositories: paths.map(path => {
+    const blank = path.startsWith("*"), folder = blank ? path.slice(1) : path;
+    return { folder, name: folder.slice(folder.lastIndexOf("/") + 1), ...(blank ? { blank: true } : {}) };
+  }).sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
 const VALIDATE = `
@@ -139,13 +147,66 @@ export function matchingRepository(repositories, hints = []) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+const compact = text => String(text ?? "").normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+// A folder Start made for one ticket ("New repository", named for its title).
+// It says nothing about where that ticket's project lives.
+export function madeForTicket(folder, title) {
+  const name = String(folder ?? "").slice(String(folder ?? "").lastIndexOf("/") + 1);
+  const slug = repositorySlug(title);
+  return name === slug || new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`).test(name);
+}
+
+// Repositories a ticket's text points at: a path under code/ (~/code/x,
+// /Users/me/code/x) or a GitHub link (github.com/owner/x). A bare `x` code
+// span is not enough: tickets backtick ordinary words, keys and commands.
+function mentioned(repositories, text) {
+  const body = String(text ?? "");
+  const names = new Set();
+  for (const m of body.matchAll(/(?:^|[\s(`'"<\[])(?:~|\/[^\s`'"<>()]*)\/code\/([A-Za-z0-9._-]+)/g)) names.add(m[1].replace(/\.+$/, "").toLowerCase());
+  for (const m of body.matchAll(/github\.com\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+?)(?:\.git)?(?=[\s/)>#?`'"\]]|$)/g)) names.add(m[1].toLowerCase());
+  return repositories.filter(r => names.has(r.name.toLowerCase()));
+}
+
+/**
+ * The repository an existing ticket belongs in, or null when none can be told.
+ * Start makes a new repository only for null (CHA-4245), so every rule here
+ * must name exactly one non-blank repository on the chosen computer:
+ *  1. the repository this computer last used for the ticket's project;
+ *  2. the repository most of the project's other tickets were started in;
+ *  3. exactly one repository the ticket's own text names;
+ *  4. exactly one repository whose name is the project's name.
+ */
+export function inferRepository(repositories = [], { projectFolder = "", projectName = "", siblings = [], text = "" } = {}) {
+  // A blank repository is never evidence: Start made it for one ticket, and
+  // others were then started in it by mistake (CHA-4309).
+  repositories = repositories.filter(r => !r.blank);
+  const known = folder => repositories.find(r => r.folder === folder) ?? null;
+  if (projectFolder && known(projectFolder)) return known(projectFolder);
+  const votes = new Map();
+  for (const s of siblings) {
+    if (!s?.folder || madeForTicket(s.folder, s.title) || !known(s.folder)) continue;
+    votes.set(s.folder, (votes.get(s.folder) ?? 0) + 1);
+  }
+  const ranked = [...votes].sort((a, b) => b[1] - a[1]);
+  if (ranked.length && (ranked.length === 1 || ranked[0][1] > ranked[1][1])) return known(ranked[0][0]);
+  const named = mentioned(repositories, text);
+  if (named.length === 1) return named[0];
+  const project = compact(projectName);
+  const byProject = project ? repositories.filter(r => compact(r.name) === project) : [];
+  return byProject.length === 1 ? byProject[0] : null;
+}
+
 // An explicit repository choice also supersedes pending ticket-target restoration.
 // Completed agent discovery stays valid because the selected computer did not change.
 export function selectRepository(view, repo, cx) {
   if (view.busy || view.repositoriesLoading || view.launchTarget?.blocked) return false;
   view.targetGeneration = (view.targetGeneration ?? 0) + 1;
   view.targetPicker = null;
-  view.launchTarget = { machine: view.launchTarget.machine, folder: repo.folder, name: repo.name, root: view.repoRoot };
+  // pickedFor records the ticket the choice was made on, so a hand-picked
+  // "New repository" is never replaced by inference when its details reload.
+  view.launchTarget = { machine: view.launchTarget.machine, folder: repo.folder, name: repo.name, root: view.repoRoot,
+    ...(view.screen === "issue" && view.cur?.id ? { pickedFor: view.cur.id } : {}) };
   view.repositoryError = "";
   cx.notify();
   return true;
@@ -188,6 +249,7 @@ export function loadTarget(view, cx, machine, { retain = null, preferredFolder =
       view.agentKey = agents.value.find(a => a.key === preferredAgent)?.key ?? agents.value[0]?.key ?? "";
     } else view.launchError = `Could not check agents: ${agents.reason?.message ?? agents.reason}`;
     if (view.screen === "create" && view.form?.capture && !view.form.draft?.uncertain) view.saveCapture?.(cx);
+    if (repos.status === "fulfilled" && !view.launchTarget.folder) view.repositoriesLoaded?.(cx);
     cx.notify();
   });
 }

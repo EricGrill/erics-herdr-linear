@@ -11,6 +11,16 @@ import { taskContext } from "./model.js";
 const source = await readFile(new URL("./client.js", import.meta.url), "utf8");
 const targetSource = await readFile(new URL("./execution-target.js", import.meta.url), "utf8");
 const mainSource = await readFile(new URL("./main.js", import.meta.url), "utf8");
+// The real, pure repository inference; the rest of repository.js stays stubbed below.
+const { inferRepository, selectRepository: pickRepository } = await (async () => {
+  const context = vm.createContext({});
+  const real = new vm.SourceTextModule(await readFile(new URL("./repository.js", import.meta.url), "utf8"), { context });
+  await real.link(() => new vm.SyntheticModule(["exec", "knownAgents", "machines"], function () {
+    for (const name of ["exec", "knownAgents", "machines"]) this.setExport(name, () => { throw new Error("inference runs no commands"); });
+  }, { context }));
+  await real.evaluate();
+  return real.namespace;
+})();
 const ticket = {
   id: "issue-one", identifier: "DEMO-3785", title: "Research newly starred repos",
   url: "https://linear.app/example/issue/DEMO-3785", branch: "sample-user/demo-3785-research",
@@ -129,7 +139,7 @@ async function harness(options = {}) {
     "gpui-base": { ...Object.fromEntries(["v_flex", "h_flex", "Input", "Textarea", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
       InputState: textState, TextareaState: textState },
     "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
-    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, createRepository: async (target, title) => {
+    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, inferRepository, createRepository: async (target, title) => {
       creations.push({ target: { ...target }, title });
       if (options.creationError) throw new Error(options.creationError);
       const root = target.machine ? "/home/build/code" : "/Users/me/code", name = options.createdName ?? "new-work";
@@ -536,6 +546,127 @@ test("Start without a chosen repository makes a new one on the chosen computer o
   assert.deepEqual(request.request.dirs, ["/home/build/code/new-work"]);
   assert.equal(h.client.launchTarget.folder, "/home/build/code/new-work");
   assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "build-2");
+});
+
+test("Start on an existing ticket uses its project's repository, not a new one (CHA-4309)", async () => {
+  const project = { id: "project-herdr", name: "Eric's Herdr Linear" };
+  const issue = { ...ticket, title: "Sidebar rows: show the ticket title first, project second", project };
+  const real = { name: "erics-herdr-linear", folder: "/Users/me/code/erics-herdr-linear" };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "Row labels." }) });
+  Object.assign(h.client, { cur: issue, repositories: [{ name: "holonet", folder: "/Users/me/code/holonet" }, real], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, real.folder);
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, [real.folder]);
+});
+
+test("a sibling ticket's repository is used, ignoring a blank one Start made for another ticket (CHA-4309)", async () => {
+  const project = { id: "project-x", name: "Unrelated name" };
+  const issue = { ...ticket, project }, sibling = { id: "issue-two", identifier: "DEMO-1", title: "Sibling work", project };
+  const blankSibling = { id: "issue-three", identifier: "DEMO-2", title: "Blank started work", project };
+  const real = { name: "app", folder: "/Users/me/code/app" }, blank = { name: "blank-started-work", folder: "/Users/me/code/blank-started-work" };
+  const sharedStore = new Map([["linear-workspace.launch-targets", {
+    "workspace-one/issue-two": { folder: real.folder, name: "app", machine: null },
+    "workspace-one/issue-three": { folder: blank.folder, name: blank.name, machine: null } }]]);
+  const h = await harness({ sharedStore, launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "" }) });
+  Object.assign(h.client, { cur: issue, lists: { mine: { items: [issue, sibling, blankSibling] } }, repositories: [real, blank], repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, real.folder);
+});
+
+test("with no repository to infer, Start still makes a new one, and a chosen New repository stays (CHA-4245)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Brand new idea" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "Start from scratch." }) });
+  Object.assign(h.client, { cur: issue, repositories: [{ name: "holonet", folder: "/Users/me/code/holonet" }], repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.deepEqual(h.creations.map(c => c.title), [ticket.title]);
+});
+
+test("a hand-picked New repository survives the ticket's details reloading (CHA-4309)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Holonet" } }, other = { ...ticket, id: "issue-two", project: { id: "p", name: "Holonet" } };
+  const holonet = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue: h.client.cur, description: "" }) });
+  Object.assign(h.client, { cur: issue, repositories: [holonet], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+  // The picker's "New repository" row, then refresh (r), reload or a state change.
+  assert.equal(pickRepository(h.client, { folder: "", name: "" }, h.cx), true);
+  for (let i = 0; i < 2; i++) {
+    h.client.loadDetail(h.cx);
+    await h.flush();
+    assert.equal(h.client.launchTarget.folder, "", "an explicit New repository is not overridden");
+  }
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.deepEqual(h.creations.map(c => c.title), [ticket.title]);
+  // The pick belongs to that ticket: another ticket opened next still infers its repository.
+  Object.assign(h.client, { cur: other, launchTarget: { ...h.client.launchTarget, folder: "", name: "" } });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+});
+
+test("opening a second ticket re-infers its own repository instead of keeping the first one's (CHA-4309)", async () => {
+  const herdr = { name: "erics-herdr-linear", folder: "/Users/me/code/erics-herdr-linear" }, holonet = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const a = { ...ticket, id: "issue-a", title: "Sidebar rows", project: { id: "p-herdr", name: "Eric's Herdr Linear" } };
+  const b = { ...ticket, id: "issue-b", title: "Relay retries", project: { id: "p-holo", name: "Holonet" } };
+  const c = { ...ticket, id: "issue-c", title: "Brand new idea", project: { id: "p-new", name: "Something else" } };
+  const details = { [a.id]: { issue: a, description: "" }, [b.id]: { issue: b, description: "" }, [c.id]: { issue: c, description: "Start from scratch." } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: request => details[request.issue] });
+  Object.assign(h.client, { repositories: [herdr, holonet], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  const open = issue => h.openIssue.call(h.client, issue, h.cx); // the real openIssue; the harness stubs it
+  open(a);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, herdr.folder);
+  open(b);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder, "B names Holonet, so it does not run in A's repository");
+  h.client.worktree(h.cx, true, { issue: b });
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, [holonet.folder]);
+  // Nothing names a repository for C: A's or B's inferred one is not carried over.
+  open(c);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+});
+
+test("a repository picked by hand still carries over to the next ticket; only inferred ones are re-inferred (CHA-4309)", async () => {
+  const holonet = { name: "holonet", folder: "/Users/me/code/holonet" }, app = { name: "app", folder: "/Users/me/code/app" };
+  const a = { ...ticket, id: "issue-a", project: { id: "p-holo", name: "Holonet" } }, b = { ...ticket, id: "issue-b", project: { id: "p-x", name: "Unrelated" } };
+  const details = { [a.id]: { issue: a, description: "" }, [b.id]: { issue: b, description: "" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: request => details[request.issue] });
+  Object.assign(h.client, { repositories: [holonet, app], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  const open = issue => h.openIssue.call(h.client, issue, h.cx);
+  open(a);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+  assert.equal(pickRepository(h.client, app, h.cx), true);
+  open(b);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, app.folder);
+});
+
+test("repositories arriving after the ticket's details still infer its repository (CHA-4309)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Holonet" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "" }) });
+  Object.assign(h.client, { cur: issue, repositories: [], repositoriesLoading: true });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+  Object.assign(h.client, { repositories: [{ name: "holonet", folder: "/Users/me/code/holonet" }], repositoriesLoading: false });
+  h.client.repositoriesLoaded(h.cx);
+  assert.equal(h.client.launchTarget.folder, "/Users/me/code/holonet");
 });
 
 test("a refused launch never makes a new repository", async () => {
