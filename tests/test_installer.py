@@ -92,6 +92,22 @@ class InstallerTests(unittest.TestCase):
         self.run_install("--update")
         self.assertEqual(keys, json.loads((self.home / "keys.json").read_text()))
 
+    def test_linux_legacy_linear_shortcut_moves_to_api_key_browser(self):
+        installer.platform.system.return_value = "Linux"
+        self.before_keys["global"]["cmd-l"] = "mod.open:linear"
+        (self.home / "keys.json").write_text(json.dumps(self.before_keys))
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual("mod.open:linear-board", keys["global"]["cmd-l"])
+        self.assertEqual("app.quit", keys["global"]["ctrl-q"])
+
+    def test_other_linear_mod_shortcuts_are_preserved(self):
+        self.before_keys["global"]["cmd-l"] = "mod.open:linear-workspace"
+        (self.home / "keys.json").write_text(json.dumps(self.before_keys))
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual("mod.open:linear-workspace", keys["global"]["cmd-l"])
+
     def test_custom_linear_shortcut_is_preserved(self):
         self.before_keys["global"]["cmd-l"] = "my.custom-action"
         (self.home / "keys.json").write_text(json.dumps(self.before_keys))
