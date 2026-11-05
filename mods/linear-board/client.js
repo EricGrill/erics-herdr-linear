@@ -666,7 +666,9 @@ export default class Linear extends View {
   // already uses, not a blank new one (CHA-4309). It runs when the ticket's
   // details or the computer's repositories arrive, only while no repository is
   // chosen. A repository picked by hand on this ticket, "New repository"
-  // included, is never overridden, even when the details reload.
+  // included, is never overridden, even when the details reload. An inferred
+  // repository is marked with its ticket (inferredFor), so opening another
+  // ticket drops it and infers again.
   inferLaunchRepository(cx) {
     const is = this.detail?.issue, t = this.launchTarget;
     if (this.demo || this.screen !== "issue" || !is || is.id !== this.cur?.id || !t || t.blocked || t.folder || t.pickedFor === is.id
@@ -682,7 +684,7 @@ export default class Linear extends View {
       projectFolder: projectId ? this.taskDefaults().projects?.[projectId]?.repositories?.[machine ?? ""] ?? "" : "",
       projectName: is.project?.name ?? "", siblings, text: [is.title, this.detail.description].join("\n") });
     if (!repo) return;
-    this.launchTarget = { ...t, machine, folder: repo.folder, name: repo.name, root: this.repoRoot ?? t.root ?? "" };
+    this.launchTarget = { ...t, machine, folder: repo.folder, name: repo.name, root: this.repoRoot ?? t.root ?? "", inferredFor: is.id };
     this.repositoryError = "";
     cx.notify();
   }
@@ -703,6 +705,14 @@ export default class Linear extends View {
 
   openIssue(is, cx, direct = false) {
     const saved = this.savedLaunchTarget(is);
+    // A repository inferred for another ticket is not this ticket's choice:
+    // drop it so this ticket infers its own (CHA-4309). Explicit picks stay.
+    const t = this.launchTarget;
+    if (t?.inferredFor && t.inferredFor !== is.id) {
+      const { inferredFor, ...rest } = t;
+      const keep = saved && saved.folder === t.folder && (saved.machine ?? null) === (t.machine ?? null);
+      this.launchTarget = keep ? rest : { ...rest, folder: "", name: "" };
+    }
     if (saved && (saved.folder !== this.launchTarget?.folder || (saved.machine ?? null) !== (this.launchTarget?.machine ?? null))) {
       if (this.chooseComputer) this.chooseComputer(saved.machine ?? null, cx, saved);
       else this.launchTarget = { ...saved };

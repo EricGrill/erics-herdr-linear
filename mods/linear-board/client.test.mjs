@@ -615,6 +615,47 @@ test("a hand-picked New repository survives the ticket's details reloading (CHA-
   assert.equal(h.client.launchTarget.folder, holonet.folder);
 });
 
+test("opening a second ticket re-infers its own repository instead of keeping the first one's (CHA-4309)", async () => {
+  const herdr = { name: "erics-herdr-linear", folder: "/Users/me/code/erics-herdr-linear" }, holonet = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const a = { ...ticket, id: "issue-a", title: "Sidebar rows", project: { id: "p-herdr", name: "Eric's Herdr Linear" } };
+  const b = { ...ticket, id: "issue-b", title: "Relay retries", project: { id: "p-holo", name: "Holonet" } };
+  const c = { ...ticket, id: "issue-c", title: "Brand new idea", project: { id: "p-new", name: "Something else" } };
+  const details = { [a.id]: { issue: a, description: "" }, [b.id]: { issue: b, description: "" }, [c.id]: { issue: c, description: "Start from scratch." } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: request => details[request.issue] });
+  Object.assign(h.client, { repositories: [herdr, holonet], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  const open = issue => h.openIssue.call(h.client, issue, h.cx); // the real openIssue; the harness stubs it
+  open(a);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, herdr.folder);
+  open(b);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder, "B names Holonet, so it does not run in A's repository");
+  h.client.worktree(h.cx, true, { issue: b });
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, [holonet.folder]);
+  // Nothing names a repository for C: A's or B's inferred one is not carried over.
+  open(c);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+});
+
+test("a repository picked by hand still carries over to the next ticket; only inferred ones are re-inferred (CHA-4309)", async () => {
+  const holonet = { name: "holonet", folder: "/Users/me/code/holonet" }, app = { name: "app", folder: "/Users/me/code/app" };
+  const a = { ...ticket, id: "issue-a", project: { id: "p-holo", name: "Holonet" } }, b = { ...ticket, id: "issue-b", project: { id: "p-x", name: "Unrelated" } };
+  const details = { [a.id]: { issue: a, description: "" }, [b.id]: { issue: b, description: "" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: request => details[request.issue] });
+  Object.assign(h.client, { repositories: [holonet, app], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  const open = issue => h.openIssue.call(h.client, issue, h.cx);
+  open(a);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+  assert.equal(pickRepository(h.client, app, h.cx), true);
+  open(b);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, app.folder);
+});
+
 test("repositories arriving after the ticket's details still infer its repository (CHA-4309)", async () => {
   const issue = { ...ticket, project: { id: "p", name: "Holonet" } };
   const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "" }) });
