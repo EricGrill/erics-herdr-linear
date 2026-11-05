@@ -26,6 +26,7 @@ const QUERY = `query BoardEnrichment($after: String) {
       id
       identifier
       priority
+      updatedAt
       delegate { id name displayName avatarUrl active app isAssignable }
       assignee { displayName }
       state { name type }
@@ -80,6 +81,7 @@ export function parseEnrichment(text) {
     id: node?.id ?? null,
     identifier: String(node?.identifier ?? ""),
     priority: Number.isInteger(node?.priority) ? node.priority : 0,
+    updatedAt: node?.updatedAt ? String(node.updatedAt) : null,
     delegate: node?.delegate ? {
       id: node.delegate.id ? String(node.delegate.id) : null,
       name: String(node.delegate.name ?? node.delegate.displayName ?? ""),

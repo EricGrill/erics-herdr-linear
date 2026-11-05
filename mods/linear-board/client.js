@@ -143,6 +143,9 @@ const ISSUE_KEY = /^(?:[A-Za-z][A-Za-z0-9_]*-)?\d{1,9}$/;
 // Where the lists are kept between openings.
 const CACHE = `${appHome()}/linear-workspace-cache.json`;
 const LAUNCH_TARGETS = "linear-workspace.launch-targets";
+const AGENT_PREFS = "linear-workspace.agents";
+// Words typed in the sidebar also search Linear, once there are this many letters.
+const SEARCH_MIN = 2;
 
 // The list's heights: a heading's, a row's (34 and a gap), and the most it
 // takes before it scrolls.
@@ -257,7 +260,7 @@ export default class Linear extends View {
     this.keys = cx.focus_handle();
     // The list's scroll position, so the chosen row is kept in sight.
     this.scroll = VirtualListScrollHandle.new();
-    this.input = InputState.new({ placeholder: this.role === "sidebar" ? "Search spaces or tickets…" : this.docked ? "Search projects or issue ID…" : "Type to filter, or an issue's key…  ← → to change tabs" });
+    this.input = InputState.new({ placeholder: this.role === "sidebar" ? "Search spaces or Linear tickets…" : this.docked ? "Search projects or issue ID…" : "Type to filter, or an issue's key…  ← → to change tabs" });
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
       this.at = 0;
@@ -538,19 +541,26 @@ export default class Linear extends View {
 
   // An issue's key in the filter: looked up across the workspace, shortly
   // after you stop typing.
+  // In the sidebar, other words are searched in Linear too.
   lookUp(cx) {
     const q = this.filter.trim();
-    if (this.tab !== "mine" || this.drilled || !ISSUE_KEY.test(q)) {
+    const keyed = ISSUE_KEY.test(q), text = !keyed && this.role === "sidebar" && q.length >= SEARCH_MIN;
+    if (this.tab !== "mine" || this.drilled || (!keyed && !text)) {
       this.found = null;
       return;
     }
-    cx.timer.after(300, (cx) => {
+    cx.timer.after(text ? 400 : 300, (cx) => {
       if (this.filter.trim() !== q) return;
       cx.spawn(async (cx) => {
         try {
-          const res = await this.linear({ op: "find", key: q });
+          const res = await this.linear(text ? { op: "search", query: q } : { op: "find", key: q });
           if (this.filter.trim() === q) this.found = { query: q, issues: res.issues };
-        } catch {}
+        } catch (e) {
+          // The herdr-linear backend (OAuth sign-in) only finds issues by key.
+          const why = String(e?.message ?? e);
+          const error = /no op "search"/.test(why) ? "needs the Linear API key from erics-linear.config.json" : why;
+          if (this.filter.trim() === q) this.found = { query: q, issues: [], error };
+        }
         cx.notify();
       });
     });
@@ -616,7 +626,7 @@ export default class Linear extends View {
     if (this.demo || (this.targetGeneration ?? 0) !== expectedGeneration || this.cur?.id !== is.id) return;
     let saved;
     try { saved = readExecutionTarget(description); }
-    catch (error) { this.blockLaunchTarget(error.message, cx); return; }
+    catch (error) { await this.agentsWhileBlocked(cx, this.blockLaunchTarget(error.message, cx)); return; }
     if (!saved) return;
     const generation = this.blockLaunchTarget("Resolving the ticket's saved computer…", cx, saved.computerName);
     try {
@@ -626,8 +636,29 @@ export default class Linear extends View {
       if (this.chooseComputer) this.chooseComputer(resolved.machine, cx, resolved);
       else this.launchTarget = resolved;
     } catch (error) {
-      if (this.cur?.id === is.id && this.targetGeneration === generation) this.repositoryError = String(error?.message ?? error);
+      if (this.cur?.id === is.id && this.targetGeneration === generation) {
+        this.repositoryError = String(error?.message ?? error);
+        await this.agentsWhileBlocked(cx, generation);
+      }
     }
+    cx.notify();
+  }
+
+  // A blocked target still lists the installed agents, so the harness choice is
+  // always on screen. Start stays blocked until a computer is chosen explicitly.
+  async agentsWhileBlocked(cx, generation) {
+    const named = this.launchTarget?.machine;
+    const machine = named && machines().some((m) => m.name === named && m.layout === "ready") ? named : null;
+    const agentGeneration = this.agentGeneration;
+    let choices = [], error = "";
+    try { choices = (await knownAgents({ on: machine })).filter((a) => a.installed); }
+    catch (e) { error = `Could not check agents: ${e?.message ?? e}`; }
+    if (this.targetGeneration !== generation || this.agentGeneration !== agentGeneration || !this.launchTarget?.blocked) return;
+    const preferred = shared(AGENT_PREFS)?.[named ?? ""] ?? shared(AGENT_PREFS)?.[machine ?? ""];
+    this.agentChoices = choices;
+    this.agentKey = choices.find((a) => a.key === preferred)?.key ?? choices[0]?.key ?? "";
+    this.launchError = error;
+    this.agentsChecked = true;
     cx.notify();
   }
 
@@ -1334,7 +1365,7 @@ export default class Linear extends View {
       this.loadAll(cx);
       const execution = f.draft.execution;
       if (execution?.folder) this.rememberLaunchTarget(issue, execution);
-      else this.blockLaunchTarget("Choose a computer and repository when you are ready to start work.", cx);
+      else void this.agentsWhileBlocked(cx, this.blockLaunchTarget("Choose a computer and repository when you are ready to start work.", cx));
       this.openIssue(issue, cx);
       if (!f.clearedConfirmed) {
         discardDraft(this.draftStore, f.storageKey, f.draft);

@@ -8,7 +8,7 @@ import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
 import { tint, icon, stateIcon, priorityIcon, MONO } from "./look.js";
 import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
-import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
+import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf, laneSince, elapsed, linearMismatch } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue, fetchPullRequests, rowPullRequest } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
   crewContext, reassignChoices, requestGate } from "./queue.js";
@@ -28,6 +28,7 @@ const ENRICH_REQUEST = "linear-board.enrich-request";
 const PULLS = "linear-board.pulls";
 const CONFIG = "erics-linear.config";
 const ENRICH_MS = 60000;
+const AGE_TICK_MS = 30000;
 // Crew checks this often whether the sidebar has published its Linear connection, and
 // retries a failed agent list no sooner than CREW_RETRY_MS after the last attempt.
 const CREW_TICK_MS = 2000, CREW_RETRY_MS = 30000;
@@ -111,6 +112,8 @@ export default class LinearWorkspace extends LinearClient {
     this.tab = "mine";
     if (this.role === "sidebar") {
       cx.timer.every(10000, cx => this.resolveSpaces(cx));
+      // Row ages ("Working 4m") move with the clock, not only when a space changes.
+      cx.timer.every(AGE_TICK_MS, cx => cx.notify());
       this.startEnrich(cx);
       cx.timer.every(ENRICH_MS, cx => this.startEnrich(cx));
       this.loadTeams(cx);
@@ -195,7 +198,7 @@ export default class LinearWorkspace extends LinearClient {
     if (!extra) return issue;
     return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state,
       priority: Number.isInteger(issue.priority) ? issue.priority : extra.priority,
-      teamKey: issue.teamKey ?? extra.teamKey, project: issue.project === undefined ? extra.project : issue.project };
+      teamKey: issue.teamKey ?? extra.teamKey, updatedAt: issue.updatedAt ?? extra.updatedAt ?? null, project: issue.project === undefined ? extra.project : issue.project };
   }
 
   filterWorkspace() { return props()?.workspaceId ?? this.ws ?? activeWorkspace(); }
@@ -547,8 +550,10 @@ export default class LinearWorkspace extends LinearClient {
   }
   enter(cx) {
     if (this.role === "sidebar") {
-      const record = this.visibleSpaces()[0];
+      const records = this.visibleSpaces(), record = records[0];
+      const is = !record && this.linearMatches(records).issues[0];
       if (record) this.selectWork(record);
+      else if (is) this.visit(is);
     } else if (this.role === "projects") {
       const is = this.found?.issues?.[0] ?? this.allIssues().find(i => this.matches(i));
       if (is) this.visit(is);
@@ -637,6 +642,14 @@ export default class LinearWorkspace extends LinearClient {
     const label = lane === "blocked" ? (record.status === "blocked" ? "Needs input" : "Needs your attention")
       : lane === "done" ? (record.status === "done" ? "Agent finished" : "Done in Linear")
       : lane === "working" ? "Working" : "Idle";
+    const since = record.since ?? laneSince(record, lane), now = Date.now();
+    const age = elapsed(since.at, now);
+    const when = !age ? "" : lane === "done" ? ` ${age === "<1m" ? "just now" : `${age} ago`}` : ` ${age}`;
+    const mismatch = is ? linearMismatch(lane, is, this.attentionRules()) : "";
+    const status = [`${label}${when}`, mismatch || (!is ? "no ticket" : ""), record.space.machine ?? "local"].filter(Boolean).join(" · ");
+    const source = since.source === "herdr" ? `In this state since ${new Date(since.at).toLocaleString()} (Herdr)`
+      : since.source === "linear" ? `Herdr has no state change for this space yet; age is from the ticket's last Linear update, ${new Date(since.at).toLocaleString()}`
+      : "No state-change time yet";
     const badges = this.rowBadges(record, is ? this.enrich(is) : null, id);
     return h_flex().id(id).min_w(0).h(49).flex_none().px(8).gap(8).items_center().rounded(6)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
@@ -645,7 +658,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
-        .child(div().truncate().text_size(11).text_color(color).child(`${label}${is?.state?.name ? ` · Linear: ${is.state.name}` : !is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`)))
+        .child(div().truncate().text_size(11).text_color(color).tooltip(source).child(status)))
       .when(badges.length > 0, el => el.child(h_flex().id(`${id}-badges`).flex_none().gap(4).items_center().children(badges)))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -864,17 +877,28 @@ export default class LinearWorkspace extends LinearClient {
       const lane = record.status === "blocked" || issueNeedsYou(issue, this.attentionRules()) ? "blocked"
         : record.status === "working" ? "working"
         : record.status === "done" || issue?.state?.type === "completed" ? "done" : "idle";
-      return { ...record, issue, lane };
+      return { ...record, issue, lane, since: laneSince({ ...record, issue }, lane) };
     }).filter(record => {
       if (!matchesFilters(record, filters)) return false;
       const hay = [record.space.name, record.space.machine, record.issue?.identifier, record.issue?.title,
         ...record.agents.map(a => a.title)].filter(Boolean).join(" ").toLowerCase();
       return words.every(word => hay.includes(word));
-    }).sort((a, b) => rank[a.lane] - rank[b.lane] || a.space.name.localeCompare(b.space.name));
+    }).sort((a, b) => rank[a.lane] - rank[b.lane]
+      || (b.since.at ?? -Infinity) - (a.since.at ?? -Infinity)
+      || a.space.name.localeCompare(b.space.name));
+  }
+
+  /** Linear's matches for the sidebar's words, without the tickets already shown as spaces. */
+  linearMatches(records = this.visibleSpaces()) {
+    const q = (this.filter ?? "").trim();
+    if (!q || this.found?.query !== q) return { issues: [], searching: q.length >= 2, error: "" };
+    const shown = new Set(records.map(r => r.issue?.id).filter(Boolean));
+    return { issues: this.found.issues.filter(is => !shown.has(is.id)), searching: false, error: this.found.error ?? "" };
   }
 
   sidebar() {
     const t = theme(), records = this.visibleSpaces(), filters = this.homeFilters(), count = filterCount(filters);
+    const linear = this.linearMatches(records);
     const choices = this.filterChoices(filters);
     const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
       `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
@@ -910,7 +934,13 @@ export default class LinearWorkspace extends LinearClient {
         .children(groups.filter(group => group.records.length).flatMap(group => [
           this.section(group.name, group.records.length, group.color),
           ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
-        ])))
+        ]))
+        .when(linear.issues.length > 0, el => el
+          .child(this.section("LINEAR TICKETS", linear.issues.length))
+          .children(linear.issues.map(is => this.issueRow(is, "search"))))
+        .when(linear.searching, el => el.child(div().py(6).text_size(11).text_color(t.muted).child("Searching Linear…")))
+        .when(Boolean(linear.error), el => el.child(div().py(6).text_size(11).text_color(t.blocked).truncate()
+          .child(`Linear search: ${linear.error}`))))
       .when(Boolean(this.signedOut), el => el.child(this.button("sign-in", "Sign in to Linear", cx => this.signIn(cx))))
       .when(Boolean(this.err), el => el.child(div().py(3).text_size(11).text_color(t.blocked).truncate().child(this.err)));
   }
