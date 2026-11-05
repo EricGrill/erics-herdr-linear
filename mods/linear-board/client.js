@@ -898,8 +898,11 @@ export default class Linear extends View {
   issueMenu(is, cx) {
     cx?.stop_propagation?.();
     if (!is?.url) return null;
-    return openOverlay({ mod: "linear-board", kind: "popup", width: 220, height: 122,
-      props: { role: "issue-menu", issue: { identifier: is.identifier ?? "", title: is.title ?? "", url: is.url }, demo: Boolean(this.demo) } });
+    // With a Linear id the menu also offers Pin and Tags (tags.js), which need two more rows.
+    const tags = Boolean(is.id) && !this.demo;
+    return openOverlay({ mod: "linear-board", kind: "popup", width: 220, height: tags ? 187 : 122,
+      props: { role: "issue-menu", issue: { id: is.id ?? null, identifier: is.identifier ?? "", title: is.title ?? "", url: is.url,
+        teamKey: is.teamKey ?? is.team?.key ?? null }, demo: Boolean(this.demo) } });
   }
 
   copy(text, cx) {

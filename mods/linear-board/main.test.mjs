@@ -339,7 +339,7 @@ async function harness(options = {}) {
   }
   const native = {
     "gpui-kit": { div: () => element(), svg: () => element(), image: () => element() },
-    "gpui-base": { v_flex: () => element("column"), h_flex: () => element("row"), Input: { new: () => element("input") }, Popup: {}, TextView: {} },
+    "gpui-base": { v_flex: () => element("column"), h_flex: () => element("row"), Input: { new: () => element("input") }, InputState: {}, Popup: {}, TextView: {} },
     "herdr": {
       spaces: () => allSpaces, panes: () => [], agents: () => allAgents, machines: () => [],
       window: () => ({ platform: "macos" }), keys: () => [],

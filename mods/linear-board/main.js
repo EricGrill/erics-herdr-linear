@@ -1,7 +1,7 @@
 // Derived from the MIT-licensed herdr-linear app mod v0.14.2.
 // Modified for Eric's Herdr Linear: spaces-first layout, configurable enrichment and attention rules.
 import { div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Input, Popup, TextView } from "gpui-base";
+import { v_flex, h_flex, Input, InputState, Popup, TextView } from "gpui-base";
 import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec, window, keys } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
@@ -14,6 +14,8 @@ import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, qu
   crewContext, reassignChoices, requestGate } from "./queue.js";
 import { normalizeConfig } from "./config.js";
 import { readGitState, readPr, headerParts, aheadBehind, uncommitted, workingSince, runningFor, branchHover } from "./git.js";
+import { isPinned, rowTags, rowColor, tagMenuItems, fetchIssueTags, fetchCatalog, pickable, canCreate, tagName,
+  setTag, setPinned, createTag, labelState, withLabels, fetchIssueLabels } from "./tags.js";
 import { FILTER_FIELDS, normalizeFilters, toggleFilter, filterCount, matchesFilters, filterOptions } from "./filters.js";
 
 // Shared with the linear-workspace layout on purpose: an issue/space link made in one
@@ -27,6 +29,9 @@ const ENRICH_REQUEST = "linear-board.enrich-request";
 // Pull requests linked to the issues open in spaces, by issue key. Kept apart from ENRICH
 // so a Crew re-read of the enrichment never wipes them.
 const PULLS = "linear-board.pulls";
+// Labels of the issues open in spaces, in any workflow state, by issue key. Pins, tags and
+// row colors are these Linear labels, so they are the same on every machine (CHA-4318).
+const TAGS = "linear-board.tags";
 const CONFIG = "erics-linear.config";
 const ENRICH_MS = 60000;
 const AGE_TICK_MS = 30000;
@@ -46,6 +51,26 @@ const activeWorkspace = () => shared(ACTIVE) ?? "";
 const sharedIssues = () => shared(DATA)?.[activeWorkspace()]?.issues ?? [];
 const sharedEnrich = () => shared(ENRICH) ?? { rows: [], error: null, fetchedAt: null, partial: false };
 const sharedPulls = () => shared(PULLS)?.pulls ?? {};
+const sharedTags = () => shared(TAGS)?.tags ?? {};
+
+/** One issue's labels as the sidebar has them now: the per-space read, else the bulk one. */
+function liveLabels(identifier) {
+  const key = String(identifier ?? "").toUpperCase();
+  const fresh = sharedTags()[key];
+  if (fresh) return fresh.labels;
+  return sharedEnrich().rows.find(row => String(row.identifier).toUpperCase() === key)?.labels ?? [];
+}
+
+/** Publishes labels Linear just returned for one issue, so every copy of the mod redraws
+ *  at once. In-flight reads started before the write are dropped rather than published. */
+function publishLabels(identifier, labels) {
+  const key = String(identifier ?? "").toUpperCase();
+  if (!key || !Array.isArray(labels)) return;
+  enrichmentRequest();
+  setShared(ENRICH, withLabels(sharedEnrich(), key, labels));
+  const tags = shared(TAGS) ?? {};
+  setShared(TAGS, { ...tags, tags: { ...(tags.tags ?? {}), [key]: labelState(labels) } });
+}
 
 // Sidebar and Crew share one publication order, including reads started before a move.
 function enrichmentRequest() {
@@ -120,6 +145,7 @@ export default class LinearWorkspace extends LinearClient {
     if (this.role === "crew") return void this.crewInit(cx);
     if (this.role === "issue-menu") return void this.issueMenuInit(cx);
     if (this.role === "status") return void this.statusInit(cx);
+    if (this.role === "issue-tags") return void this.tagsInit(cx);
     if (PASSIVE.includes(this.role)) {
       // These copies re-render on shared state and on the live space/agent lists; the
       // strip is the only one that needs a clock, to settle its own height.
@@ -176,6 +202,7 @@ export default class LinearWorkspace extends LinearClient {
           setShared(ENRICH, { rows: result.rows, error: result.error, fetchedAt: result.fetchedAt, partial: result.partial, on: this.on || null });
         }
         await this.loadPulls(config, current);
+        await this.loadTags(config, current);
       } catch (error) {
         if (!current()) return;
         setShared(ENRICH, { ...sharedEnrich(), error: `Layout config: ${error?.message ?? error}`, on: this.on || null });
@@ -191,6 +218,15 @@ export default class LinearWorkspace extends LinearClient {
     if (!current()) return;
     if (result.error) setShared(PULLS, { ...(shared(PULLS) ?? {}), error: result.error });
     else setShared(PULLS, { pulls: result.pulls, error: null, fetchedAt: Date.now() });
+  }
+
+  /** Labels for the issues open in spaces. A failed read keeps the last good one. */
+  async loadTags(config, current = () => true) {
+    const ids = this.records().map(r => r.issue?.id).filter(Boolean);
+    const result = await fetchIssueTags({ on: this.on || null, config, ids });
+    if (!current()) return;
+    if (result.error) setShared(TAGS, { ...(shared(TAGS) ?? {}), error: result.error });
+    else setShared(TAGS, { tags: result.tags, error: null, fetchedAt: Date.now() });
   }
 
   loadTeams(cx) {
@@ -221,11 +257,15 @@ export default class LinearWorkspace extends LinearClient {
   enrich(issue, index = null) {
     if (!issue?.identifier) return issue;
     const lookup = index ?? this.enrichment();
-    const extra = lookup.byIdentifier?.get(String(issue.identifier).toUpperCase());
-    if (!extra) return issue;
-    return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state,
+    const key = String(issue.identifier).toUpperCase();
+    const extra = lookup.byIdentifier?.get(key);
+    const merged = !extra ? issue : { ...issue, delegate: extra.delegate, labels: extra.labels, labelColors: extra.labelColors ?? {}, state: issue.state ?? extra.state,
       priority: Number.isInteger(issue.priority) ? issue.priority : extra.priority,
       teamKey: issue.teamKey ?? extra.teamKey, updatedAt: issue.updatedAt ?? extra.updatedAt ?? null, project: issue.project === undefined ? extra.project : issue.project };
+    // The per-space label read covers tickets in any state and is refreshed after each
+    // pin or tag change, so it wins over the bulk read of open issues.
+    const fresh = sharedTags()[key];
+    return fresh ? { ...merged, labels: fresh.labels, labelColors: fresh.colors } : merged;
   }
 
   filterWorkspace() { return props()?.workspaceId ?? this.ws ?? activeWorkspace(); }
@@ -556,8 +596,8 @@ export default class LinearWorkspace extends LinearClient {
     cx.stop_propagation();
     const is = issueWithUrl(issue);
     if (!is?.url) return openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space.id } } });
-    return openOverlay({ mod: "linear-board", kind: "popup", width: 220, height: 268, props: { role: "issue-menu",
-      issue: { identifier: is.identifier ?? "", title: is.title ?? "", url: is.url },
+    return openOverlay({ mod: "linear-board", kind: "popup", width: 220, height: is.id ? 333 : 268, props: { role: "issue-menu",
+      issue: { id: is.id ?? null, identifier: is.identifier ?? "", title: is.title ?? "", url: is.url, teamKey: is.teamKey ?? is.team?.key ?? null },
       space: { id: space.id, folder: folder ?? space.folder ?? null, machine: space.machine ?? null } } });
   }
   visit(is) {
@@ -677,15 +717,22 @@ export default class LinearWorkspace extends LinearClient {
     const source = since.source === "herdr" ? `In this state since ${new Date(since.at).toLocaleString()} (Herdr)`
       : since.source === "linear" ? `Herdr has no state change for this space yet; age is from the ticket's last Linear update, ${new Date(since.at).toLocaleString()}`
       : "No state-change time yet";
-    const badges = this.rowBadges(record, is ? this.enrich(is) : null, id);
-    return h_flex().id(id).min_w(0).h(49).flex_none().px(8).gap(8).items_center().rounded(6)
+    const full = is ? this.enrich(is) : null;
+    const badges = this.rowBadges(record, full, id);
+    const tags = rowTags(full), stripe = rowColor(full);
+    return h_flex().id(id).min_w(0).h(49).flex_none().pl(4).pr(8).gap(7).items_center().rounded(6)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
       .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx, record.issue, record.folder))
+      // The row's color is its first tag's Linear color; an untagged row keeps the gap.
+      .child(div().id(`${id}-color`).w(3).h(30).flex_none().rounded(2)
+        .when(Boolean(stripe), el => el.bg(stripe).tooltip(`Color from the Linear tag “${tags.find(tag => tag.color)?.name}”`)))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeadline(is) : record.space.name))
-        .child(div().truncate().text_size(11).text_color(color).tooltip(source).child(status)))
+        .child(h_flex().min_w(0).gap(4).items_center()
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(color).tooltip(source).child(status))
+          .children(this.tagChips(tags, id))))
       .when(badges.length > 0, el => el.child(h_flex().id(`${id}-badges`).flex_none().gap(4).items_center().children(badges)))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -694,6 +741,16 @@ export default class LinearWorkspace extends LinearClient {
           if (is) this.details(is);
           else dialog({ action: "attach", attachSpace: { id: record.space.id, name: record.space.name, folder: record.folder, machine: record.space.machine ?? null } });
         }).child(is ? "…" : "+"));
+  }
+  /** Up to two of a row's Linear tags, in their Linear colors; the rest are counted. */
+  tagChips(tags, id) {
+    const t = theme(), shown = tags.slice(0, 2), more = tags.length - shown.length;
+    const short = name => (name.length > 14 ? `${name.slice(0, 13)}…` : name);
+    const all = `Linear tags: ${tags.map(tag => tag.name).join(", ")}`;
+    return [
+      ...shown.map((tag, i) => this.chip(`${id}-tag-${i}`, short(tag.name), tag.color ?? t.dim).tooltip(all)),
+      ...(more > 0 ? [this.chip(`${id}-tag-more`, `+${more}`, t.dim).tooltip(all)] : []),
+    ];
   }
   /** The right side of a sidebar row: the agent when it isn't Claude, an Urgent or High
    *  priority, and the linked pull request's state. Each explains itself on hover. */
@@ -904,11 +961,11 @@ export default class LinearWorkspace extends LinearClient {
       const lane = record.status === "blocked" || issueNeedsYou(issue, this.attentionRules()) ? "blocked"
         : record.status === "working" ? "working"
         : record.status === "done" || issue?.state?.type === "completed" ? "done" : "idle";
-      return { ...record, issue, lane, since: laneSince({ ...record, issue }, lane) };
+      return { ...record, issue, lane, pinned: isPinned(issue), since: laneSince({ ...record, issue }, lane) };
     }).filter(record => {
       if (!matchesFilters(record, filters)) return false;
       const hay = [record.space.name, record.space.machine, record.issue?.identifier, record.issue?.title,
-        ...record.agents.map(a => a.title)].filter(Boolean).join(" ").toLowerCase();
+        ...rowTags(record.issue).map(tag => tag.name), ...record.agents.map(a => a.title)].filter(Boolean).join(" ").toLowerCase();
       return words.every(word => hay.includes(word));
     }).sort((a, b) => rank[a.lane] - rank[b.lane]
       || (b.since.at ?? -Infinity) - (a.since.at ?? -Infinity)
@@ -929,13 +986,15 @@ export default class LinearWorkspace extends LinearClient {
     const choices = this.filterChoices(filters);
     const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
       `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
+    // Pinned spaces (the Linear "Pinned" label) come first; each keeps its own state line.
     const groups = [
+      { status: "pinned", name: "PINNED", color: t.accent ?? t.foreground },
       { status: "blocked", name: "NEEDS YOU", color: t.blocked },
       { status: "done", name: "DONE", color: t.done },
       { status: "working", name: "WORKING", color: t.working },
       { status: "idle", name: "IDLE", color: t.dim },
-    ].map(group => ({ ...group, records: records.filter(record => record.lane === group.status) }));
-    setAgentOrder(records.flatMap(record => record.agents.map(a => a.address)));
+    ].map(group => ({ ...group, records: records.filter(record => group.status === "pinned" ? record.pinned : !record.pinned && record.lane === group.status) }));
+    setAgentOrder(groups.flatMap(group => group.records).flatMap(record => record.agents.map(a => a.address)));
     return v_flex().id("spaces-home").size_full().min_w(0).min_h(0).px(10).gap(7).bg(t.chrome)
       .child(h_flex().h(32).flex_none().items_center().gap(5)
         .child(this.button("open-projects", "Projects", () => this.openProjects()))
@@ -960,7 +1019,7 @@ export default class LinearWorkspace extends LinearClient {
           .child(this.filter || count ? "No matching spaces" : "No open spaces. Start a task to begin.")))
         .children(groups.filter(group => group.records.length).flatMap(group => [
           this.section(group.name, group.records.length, group.color),
-          ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
+          ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, record.lane ?? group.status)),
         ]))
         .when(linear.issues.length > 0, el => el
           .child(this.section("LINEAR TICKETS", linear.issues.length))
@@ -1701,21 +1760,43 @@ export default class LinearWorkspace extends LinearClient {
   }
   issueMenuItems() {
     const p = props() ?? {};
-    return [...issueMenuItems(p.issue), ...spaceMenuItems(p.space, this.menuGit)];
+    const tags = p.demo ? [] : tagMenuItems(p.issue, isPinned({ labels: liveLabels(p.issue?.identifier) }));
+    return [...issueMenuItems(p.issue), ...tags, ...spaceMenuItems(p.space, this.menuGit)];
   }
   issueMenuChoose(i, cx) {
     const p = props() ?? {}, it = this.issueMenuItems()[i];
-    if (!it) return;
+    if (!it || this.menuBusy) return;
+    if (it.action === "pin") return void this.pinFromMenu(it, cx);
     // Act before closing: closing drops this popup's view and the context with it.
     if (it.action === "copy") cx.write_to_clipboard(it.url);
+    else if (it.action === "tags") openOverlay({ mod: "linear-board", kind: "popup", width: 280, height: 380,
+      props: { role: "issue-tags", issue: p.issue } });
     else if (it.action === "open") { if (!p.demo) cx.open_url(it.url); }
     else if (it.action === "run") run(it.command, it.args);
     else if (it.action === "worktree") openOverlay({ mod: "worktree", kind: "dialog",
       ...(it.args.action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it.args });
     closeOverlay(p.overlay);
   }
+  /** Pins or unpins from the menu. The menu stays open until Linear confirms, so a failure
+   *  is shown where it was asked for. */
+  pinFromMenu(it, cx) {
+    const p = props() ?? {}, is = p.issue ?? {};
+    const pinned = it.label !== "Unpin";
+    this.menuBusy = pinned ? "Pinning…" : "Unpinning…";
+    this.menuError = "";
+    cx.notify();
+    cx.spawn(async cx => {
+      const result = await setPinned({ on: sharedEnrich().on ?? null, config: shared(CONFIG) ?? {}, id: is.id, team: is.teamKey ?? null, pinned });
+      if (result.labels) publishLabels(is.identifier, result.labels);
+      this.menuBusy = null;
+      if (result.ok) return void closeOverlay(p.overlay);
+      this.menuError = result.error || "Linear did not confirm the change";
+      cx.notify();
+    });
+  }
   issueMenuView() {
     const t = theme(), p = props() ?? {}, items = this.issueMenuItems();
+    const kind = it => (it.action === "copy" || it.action === "open" ? "link" : it.action === "pin" || it.action === "tags" ? "tag" : "space");
     return v_flex().id("issue-menu").track_focus(this.menuFocus).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
       .on_key_down((e, cx) => {
         const n = items.length;
@@ -1729,16 +1810,111 @@ export default class LinearWorkspace extends LinearClient {
       })
       .when(Boolean(p.issue?.identifier), el => el.child(div().px(8).pt(3).pb(4).truncate().text_size(10.5).font_family(MONO).text_color(t.dim).child(p.issue.identifier)))
       .children(items.map((it, i) => v_flex()
-        .when(i > 0 && it.action !== "copy" && it.action !== "open" && ["copy", "open"].includes(items[i - 1].action),
-          el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+        .when(i > 0 && kind(it) !== kind(items[i - 1]), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
         .child(h_flex().id(`issue-menu-${i}`).h(28).px(8).gap(9).rounded(7).items_center()
         .text_color(t.foreground).when(i === this.menuAt, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).cursor_pointer()
         .on_click((_e, cx) => this.issueMenuChoose(i, cx))
-        .child(div().flex_1().child(it.label)))));
+        .child(div().flex_1().child(it.action === "pin" && this.menuBusy ? this.menuBusy : it.label)))))
+      .when(Boolean(this.menuError), el => el.child(div().px(8).py(4).text_size(11).text_color(t.blocked).child(this.menuError)));
+  }
+
+  /** The tag picker for one issue: the workspace's and its team's Linear labels, checked
+   *  when the issue has them. Clicking one adds or removes just that label in Linear. */
+  tagsInit(cx) {
+    const is = props()?.issue ?? {};
+    this.tagQuery = "";
+    this.tagCatalog = null;
+    this.tagOwn = null;
+    this.tagBusy = null;
+    this.tagError = "";
+    this.tagNote = "";
+    this.tagSearch = InputState.new({ placeholder: "Find or create a tag…" });
+    this.tagSearch.on("change", (_e, cx) => { this.tagQuery = this.tagSearch.value(); cx.notify(); });
+    this.tagSearch.on("submit", (_e, cx) => {
+      const first = this.tagRows()[0];
+      if (canCreate(this.tagCatalog ?? [], this.tagQuery) && (!first || first.name.toLowerCase() !== this.tagQuery.trim().toLowerCase())) this.tagCreate(cx);
+      else if (first) this.tagToggle(first, cx);
+    });
+    this.tagSearch.focus();
+    const on = sharedEnrich().on ?? null, config = shared(CONFIG) ?? {};
+    cx.spawn(async cx => {
+      const [catalog, own] = await Promise.all([
+        fetchCatalog({ on, config, team: is.teamKey ?? "" }),
+        fetchIssueLabels({ on, config, id: is.id }),
+      ]);
+      this.tagCatalog = catalog.labels;
+      this.tagNote = catalog.complete ? "" : "Showing the first labels Linear returned.";
+      if (own.labels) { this.tagOwn = own.labels.map(l => l.name); publishLabels(is.identifier, own.labels); }
+      this.tagError = catalog.error || own.error || "";
+      cx.notify();
+    });
+  }
+  tagCurrent() { return this.tagOwn ?? liveLabels(props()?.issue?.identifier); }
+  tagRows() { return pickable(this.tagCatalog ?? [], this.tagCurrent(), this.tagQuery); }
+  async tagWrite(cx, label, wanted) {
+    const is = props()?.issue ?? {};
+    const result = await setTag({ on: sharedEnrich().on ?? null, config: shared(CONFIG) ?? {}, id: is.id, labelId: label.id, wanted });
+    if (result.labels) { this.tagOwn = result.labels.map(l => l.name); publishLabels(is.identifier, result.labels); }
+    this.tagError = result.ok ? "" : result.error || "Linear did not confirm the change";
+    this.tagBusy = null;
+    cx.notify();
+  }
+  tagToggle(label, cx) {
+    if (this.tagBusy || !label?.id) return;
+    const wanted = !this.tagCurrent().some(name => String(name).toLowerCase() === label.name.toLowerCase());
+    this.tagBusy = label.id;
+    this.tagError = "";
+    cx.notify();
+    cx.spawn(cx => this.tagWrite(cx, label, wanted));
+  }
+  tagCreate(cx) {
+    if (this.tagBusy) return;
+    const { name, error } = tagName(this.tagQuery);
+    if (error) { this.tagError = error; return void cx.notify(); }
+    this.tagBusy = "create";
+    this.tagError = "";
+    cx.notify();
+    cx.spawn(async cx => {
+      const made = await createTag({ on: sharedEnrich().on ?? null, config: shared(CONFIG) ?? {}, name });
+      if (made.error) { this.tagBusy = null; this.tagError = made.error; return void cx.notify(); }
+      this.tagCatalog = [...(this.tagCatalog ?? []), made.label];
+      this.tagQuery = "";
+      this.tagSearch.set_value("");
+      await this.tagWrite(cx, made.label, true);
+    });
+  }
+  tagsView() {
+    const t = theme(), p = props() ?? {}, is = p.issue ?? {};
+    const rows = this.tagRows(), loading = this.tagCatalog === null;
+    const create = !loading && canCreate(this.tagCatalog, this.tagQuery) ? tagName(this.tagQuery).name : null;
+    return v_flex().id("issue-tags").size_full().min_h(0).p(6).gap(5).bg(t.popover).text_size(12.5)
+      .on_key_down((e, _cx) => { if (e.key === "escape") closeOverlay(p.overlay); })
+      .child(h_flex().px(4).gap(6).items_center()
+        .child(div().flex_none().text_size(10.5).font_family(MONO).text_color(t.dim).child(is.identifier ?? ""))
+        .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim).child("Linear tags · same on every machine")))
+      .child(h_flex().h(28).flex_none().px(7).gap(6).items_center().rounded(6).bg(t.background)
+        .child(icon("search", t.dim, 12)).child(Input.new(this.tagSearch).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
+      .child(v_flex().id("issue-tags-list").flex_1().min_h(0).overflow_y_scrollbar().gap(1)
+        .when(loading, el => el.child(div().px(8).py(6).text_color(t.muted).child("Reading Linear labels…")))
+        .when(Boolean(create), el => el.child(h_flex().id("issue-tags-create").h(26).flex_none().px(8).gap(8).items_center().rounded(6)
+          .cursor_pointer().hover(s => s.bg(t.hover)).text_color(t.accent ?? t.foreground)
+          .on_click((_e, cx) => this.tagCreate(cx))
+          .child(div().flex_1().min_w(0).truncate().child(this.tagBusy === "create" ? `Creating “${create}”…` : `+ Create tag “${create}”`))))
+        .when(!loading && !rows.length && !create, el => el.child(div().px(8).py(6).text_color(t.muted).child("No matching tags")))
+        .children(rows.map((label, i) => h_flex().id(`issue-tag-${i}`).h(26).flex_none().px(8).gap(8).items_center().rounded(6)
+          .cursor_pointer().hover(s => s.bg(t.hover)).text_color(t.foreground)
+          .on_click((_e, cx) => this.tagToggle(label, cx))
+          .child(div().w(14).flex_none().text_color(t.foreground).child(this.tagBusy === label.id ? "…" : label.checked ? "✓" : ""))
+          .child(div().w(8).h(8).flex_none().rounded_full().bg(label.color ?? t.dim))
+          .child(div().flex_1().min_w(0).truncate().child(label.group ? `${label.group} / ${label.name}` : label.name))
+          .when(Boolean(label.team), el => el.child(div().flex_none().text_size(10).text_color(t.dim).child(label.team))))))
+      .when(Boolean(this.tagNote), el => el.child(div().px(6).text_size(10.5).text_color(t.muted).child(this.tagNote)))
+      .when(Boolean(this.tagError), el => el.child(div().px(6).text_size(11).text_color(t.blocked).child(this.tagError)));
   }
 
   render(cx) {
     if (this.role === "issue-menu") return this.issueMenuView();
+    if (this.role === "issue-tags") return this.tagsView();
     if (this.role === "header") return this.header();
     if (this.role === "status") return this.statusBar();
     if (this.role === "launcher") return this.launcher();

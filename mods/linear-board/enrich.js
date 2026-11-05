@@ -32,7 +32,7 @@ const QUERY = `query BoardEnrichment($after: String) {
       state { name type }
       project { id name }
       team { key }
-      labels(first: ${LABEL_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { name } }
+      labels(first: ${LABEL_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { name color } }
     }
   }
 }`;
@@ -93,6 +93,8 @@ export function parseEnrichment(text) {
     project: node?.project?.id ? { id: String(node.project.id), name: String(node.project.name ?? "") } : null,
     teamKey: node?.team?.key ? String(node.team.key) : null,
     labels: nodesOf(node?.labels).map(l => String(l?.name ?? "")).filter(Boolean),
+    labelColors: Object.fromEntries(nodesOf(node?.labels)
+      .filter(l => l?.name && /^#[0-9a-f]{6}$/i.test(String(l.color ?? ""))).map(l => [String(l.name), String(l.color)])),
     contextIncomplete: contextMissing(node?.labels, "labels"),
   })).filter(row => row.identifier);
   return {
@@ -288,7 +290,7 @@ const ISSUE_FIELDS = `
       team { key }
       assignee { id displayName }
       delegate { id name displayName active app isAssignable }
-      labels(first: ${LABEL_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { name } }
+      labels(first: ${LABEL_PAGE_SIZE}) { pageInfo { hasNextPage endCursor } nodes { name color } }
       inverseRelations(first: 25) { pageInfo { hasNextPage endCursor } nodes { type issue { identifier title state { name type } } } }`;
 
 const QUEUE_QUERY = `query CrewQueue($delegate: ID!, $after: String) {

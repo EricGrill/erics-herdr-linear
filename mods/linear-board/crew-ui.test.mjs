@@ -39,7 +39,7 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
   const effect = name => (...args) => { effects.push({ name, args }); };
   const boundaries = {
     "gpui-kit": { div: () => native("div"), svg: () => native("svg"), image: () => native("image") },
-    "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {},
+    "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, InputState: {}, Popup: {},
       TextView: { markdown: (id, body) => native("markdown").id(id).child(body) } },
     "./client.js": { default: class {
       rememberProject(id, workspace) { effects.push({ name: "rememberProject", id, workspace }); }

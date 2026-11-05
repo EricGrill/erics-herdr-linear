@@ -20,6 +20,14 @@ the sidebar-footer version in `layouts/erics-linear.json` matches.
   browser and Copy link come first, then Rename, New/Open worktree, Close. Without a ticket,
   Herdr's own space menu. Right-click a tab for Rename, New tab, Close. Closing a space does
   not change its Linear ticket.
+- Pin, tag and color spaces with Linear labels, so they are the same on every machine.
+  Right-click a space or issue for **Pin to top**/**Unpin** and **Tags…**. Pinning adds the
+  workspace label `Pinned` (made on first use); pinned spaces show under PINNED above the
+  other groups and keep their own state line. **Tags…** lists the workspace's and the
+  issue's team's labels, leaving out routing labels (`agent:`, `repo:`, …) and label
+  groups; typing a new name offers **Create tag**. A row shows up to two tags as chips in
+  their Linear colors, and a stripe in its first tag's color. Recolor a tag in Linear.
+  Each change adds or removes one label and is read back from Linear before it shows.
 - Right-click an issue (Projects rows, the issue panel, the task dialog's list and issue
   screen, Crew) for Open in Linear app, Open in browser, Copy link. The app link is the
   web link under `linear://`; it needs the Linear desktop app on this computer.
