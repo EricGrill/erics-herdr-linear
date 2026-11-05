@@ -1,6 +1,6 @@
 {
   "name": "erics-herdr-linear",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "A spaces-first Herdr layout for Linear work, with portable installs and updates.",
   "type": "module",
