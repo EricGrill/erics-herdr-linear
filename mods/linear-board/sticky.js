@@ -28,7 +28,8 @@ export function clampScroll(offset, height, viewport) {
 }
 
 /** Which header to pin at `offset`, and how far up it is pushed by the next header
- *  arriving under it. Null at the top, where the real header is already showing. */
+ *  arriving under it, or by the end of its group when it is the last one. Null at the
+ *  top, where the real header is already showing, and past the last group. */
 export function pinnedHeader(layout, offset) {
   if (!(offset > 0)) return null;
   const headers = layout.items.filter(item => item.row === -1);
@@ -38,8 +39,8 @@ export function pinnedHeader(layout, offset) {
     else { next = h; break; }
   }
   if (!current) return null;
-  const top = next ? Math.min(0, next.y - offset - current.h) : 0;
-  return { group: current.group, top };
+  const top = Math.min(0, (next ? next.y : layout.height) - offset - current.h);
+  return top > -current.h ? { group: current.group, top } : null;
 }
 
 /** The scrollbar thumb, or null when everything fits. */

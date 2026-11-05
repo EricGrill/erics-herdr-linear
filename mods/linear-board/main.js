@@ -536,8 +536,10 @@ export default class LinearWorkspace extends LinearClient {
   }
   enter(cx) {
     if (this.role === "sidebar") {
-      const record = this.visibleSpaces()[0];
+      const records = this.visibleSpaces(), record = records[0];
+      const is = !record && this.linearMatches(records).issues[0];
       if (record) this.selectWork(record);
+      else if (is) this.visit(is);
     } else if (this.role === "projects") {
       const is = this.found?.issues?.[0] ?? this.allIssues().find(i => this.matches(i));
       if (is) this.visit(is);
@@ -867,8 +869,17 @@ export default class LinearWorkspace extends LinearClient {
     }).sort((a, b) => rank[a.lane] - rank[b.lane] || a.space.name.localeCompare(b.space.name));
   }
 
+  /** Linear's matches for the sidebar's words, without the tickets already shown as spaces. */
+  linearMatches(records = this.visibleSpaces()) {
+    const q = (this.filter ?? "").trim();
+    if (!q || this.found?.query !== q) return { issues: [], searching: q.length >= 2, error: "" };
+    const shown = new Set(records.map(r => r.issue?.id).filter(Boolean));
+    return { issues: this.found.issues.filter(is => !shown.has(is.id)), searching: false, error: this.found.error ?? "" };
+  }
+
   sidebar() {
     const t = theme(), records = this.visibleSpaces(), filters = this.homeFilters(), count = filterCount(filters);
+    const linear = this.linearMatches(records);
     const choices = this.filterChoices(filters);
     const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
       `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
@@ -883,8 +894,10 @@ export default class LinearWorkspace extends LinearClient {
     const shown = groups.filter(group => group.records.length);
     const stack = stackLayout(shown.map(group => ({ rows: group.records.length })), HOME_ROWS);
     const viewport = this.homeViewport ?? 0;
-    this.homeScroll = clampScroll(this.homeScroll, stack.height, viewport);
-    const pin = pinnedHeader(stack, this.homeScroll), bar = thumb(this.homeScroll, stack.height, viewport);
+    // The groups' height is known from their rows; anything after them is measured.
+    const content = Math.max(stack.height, this.homeContent ?? 0);
+    this.homeScroll = clampScroll(this.homeScroll, content, viewport);
+    const pin = pinnedHeader(stack, this.homeScroll), bar = thumb(this.homeScroll, content, viewport);
     return v_flex().id("spaces-home").size_full().min_w(0).min_h(0).px(10).gap(7).bg(t.chrome)
       .child(h_flex().h(32).flex_none().items_center().gap(5)
         .child(this.button("open-projects", "Projects", () => this.openProjects()))
@@ -912,16 +925,27 @@ export default class LinearWorkspace extends LinearClient {
           if (height !== this.homeViewport) { this.homeViewport = height; cx.notify(); }
         })
         .on_scroll_wheel((e, cx) => {
-          const next = clampScroll(this.homeScroll - (e.delta?.y ?? 0), stack.height, this.homeViewport ?? 0);
+          const next = clampScroll(this.homeScroll - (e.delta?.y ?? 0), content, this.homeViewport ?? 0);
           if (next !== this.homeScroll) { this.homeScroll = next; cx.notify(); }
         })
         .when(!records.length, el => el.child(div().py(12).text_size(12).text_color(t.muted)
           .child(this.filter || count ? "No matching spaces" : "No open spaces. Start a task to begin.")))
-        .child(v_flex().absolute().left(0).right(0).top(-this.homeScroll).gap(HOME_ROWS.gap)
+        .child(v_flex().id("spaces-column").absolute().left(0).right(0).top(-this.homeScroll).gap(HOME_ROWS.gap)
+          // Linear search results below the groups vary in height, so the column is measured.
+          .on_size_change((size, cx) => {
+            const height = size.height / (settings()?.zoom || 1);
+            if (height !== this.homeContent) { this.homeContent = height; cx.notify(); }
+          })
           .children(shown.flatMap(group => [
             this.section(group.name, group.records.length, group.color),
             ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
-          ])))
+          ]))
+          .when(linear.issues.length > 0, el => el
+            .child(this.section("LINEAR TICKETS", linear.issues.length))
+            .children(linear.issues.map(is => this.issueRow(is, "search"))))
+          .when(linear.searching, el => el.child(div().py(6).text_size(11).text_color(t.muted).child("Searching Linear…")))
+          .when(Boolean(linear.error), el => el.child(div().py(6).text_size(11).text_color(t.blocked).truncate()
+            .child(`Linear search: ${linear.error}`))))
         .when(Boolean(pin), el => el.child(div().id("pinned-group").absolute().left(0).right(0).top(pin.top).bg(t.chrome)
           .child(this.section(shown[pin.group].name, shown[pin.group].records.length, shown[pin.group].color))))
         .when(Boolean(bar), el => el.child(div().absolute().right(0).w(3).top(bar.top).h(bar.h).rounded(2).bg(t.border))))

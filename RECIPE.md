@@ -15,7 +15,10 @@ brand row, a space list that takes the remaining height, and a **69 px** Setting
 machine footer. The header reads **Erics Linear**.
 
 At the top of the list, Projects, Crew, and Agents are content-width buttons. A search
-field filters spaces by name, ticket, machine, or agent title. New task sits beside the
+field filters spaces by name, ticket, machine, or agent title, and also searches Linear: tickets
+from any team that match (by words or an issue key) appear under LINEAR TICKETS, leaving out
+those already shown as spaces. Word search uses the configured Linear API key; the herdr-linear
+sign-in only finds issues by key. New task sits beside the
 number of matching spaces. Below it, non-empty groups appear in this order:
 
 1. Needs you, using the theme's blocked color.
@@ -49,7 +52,7 @@ can change Herdr's report from done to idle; the UI reflects that live state. Gr
 does not change Linear workflow state.
 
 Click a space to select it and focus its most relevant agent. Search Enter selects the
-first matching space. Clicking an ellipsis opens the issue's state, description, labels,
+first matching space, or opens the first Linear ticket when no space matches. Clicking an ellipsis opens the issue's state, description, labels,
 branch, and pull requests. An unlinked workspace can attach to an existing issue without
 moving its directory or changing its branch.
 
@@ -92,7 +95,9 @@ the computer refreshes the repository and installed-agent choices and discards s
 responses. Save the selected physical computer and repository with a queued ticket so
 another client cannot reinterpret the origin's local computer as its own.
 Starting shows the repository, machine, and installed-agent choice, checks eligibility and agent
-availability, prepares a worktree, and opens a space with ticket context. Reopening a
+availability, prepares a worktree, and opens a space with ticket context. The agent choice
+is always listed, even when a ticket's saved computer or repository cannot be used here or
+a quick capture has none yet; Start then stays blocked until a computer is chosen. Reopening a
 worktree must still include that context. Existing open spaces are selected without
 silently prompting their running agent. New follow-up references the source ticket in
 the description; it is not a native parent/sub-issue relation.

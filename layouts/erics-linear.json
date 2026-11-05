@@ -42,7 +42,7 @@
             "mod": "erics-linear-chrome",
             "props": {
               "footer": true,
-              "version": "0.1.3"
+              "version": "0.1.4"
             }
           },
           "size": {

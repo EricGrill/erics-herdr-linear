@@ -245,12 +245,19 @@ test("the sidebar pins the current group's header while scrolling and publishes 
     assert.ok(notified >= 2);
     assert.equal(board.homeScroll, 260);
     assert.match(text(pinned()), /WORKING\|6/);
+    // Linear search results below the groups are measured, and can be scrolled to.
+    nodes(view).find(n => n.attributes.id?.[0] === "spaces-column").attributes.on_size_change[0]({ width: 280, height: 1000 }, cx);
+    view = board.sidebar();
+    list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: -10000 } }, cx);
+    view = board.sidebar();
+    assert.equal(board.homeScroll, 800);
+    assert.equal(pinned(), undefined, "no group header covers the search results");
     list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: 10000 } }, cx);
     view = board.sidebar();
     assert.equal(board.homeScroll, 0);
     assert.equal(pinned(), undefined);
   } finally {
     Object.assign(board, saved);
-    board.homeScroll = 0; board.homeViewport = 0;
+    board.homeScroll = 0; board.homeViewport = 0; board.homeContent = 0;
   }
 });

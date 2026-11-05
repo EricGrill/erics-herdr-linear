@@ -27,6 +27,13 @@ test("the next header pushes the pinned one up instead of overlapping it", () =>
   assert.deepEqual(pinnedHeader(stack, 135), { group: 1, top: 0 });
 });
 
+test("the last header leaves with its group, so it never covers what follows", () => {
+  // Linear search results can follow the last group.
+  assert.deepEqual(pinnedHeader(stack, 300), { group: 1, top: -9 });
+  assert.equal(pinnedHeader(stack, 319), null);
+  assert.equal(pinnedHeader(stack, 400), null);
+});
+
 test("scrolling stops at either end, and an unmeasured list does not scroll", () => {
   assert.equal(clampScroll(-50, 319, 200), 0);
   assert.equal(clampScroll(500, 319, 200), 119);
