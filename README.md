@@ -97,8 +97,11 @@ line, shortened to 100 characters; the full text is saved as the description.
 Team and project remain editable. These choices are remembered per Linear workspace;
 a removed or completed status falls back to an available open status.
 
-Select **Computer**, then **Repository**. The repository list comes from
-the selected computer's own `~/code`; it never clones. **New repository** is the default:
+Select **Computer**. A matching repository is selected automatically from that
+computer's own `~/code`, using the project name first, then the focused repository's
+name (including Herdr worktrees). This also works after switching computers, without
+choosing a local storage path. Use **Repository** to override the default. It never
+clones. **New repository** is the fallback when no name matches:
 when no repository is chosen, **Start agent** and **Create & start** make a new Git
 repository in that computer's `~/code`, named from the ticket title (a taken name gets
 `-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. That
@@ -117,7 +120,8 @@ version assumptions, and policy limits. Existing sessions retain their launch se
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
-Choosing a repository saves that project's computer and repository for future tasks
+An explicit repository choice overrides the name default and saves that project's
+computer and repository for future tasks
 (or the workspace's choice when no project is selected),
 with separate repository choices for each computer. Agent selections are also remembered
 for each computer. These preferences persist in this

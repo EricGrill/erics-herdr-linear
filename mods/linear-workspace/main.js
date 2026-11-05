@@ -3,7 +3,7 @@ import { v_flex, h_flex, Input, Popup } from "gpui-base";
 import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
-import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
+import { computers, loadTarget, repositoryName, selectRepository as selectTargetRepository } from "./repository.js";
 import { tint, icon, stateIcon, MONO } from "./look.js";
 import { issueKey, folderOf, matchIssue, workRecords, projectGroups, taskContext, issueNeedsYou } from "./model.js";
 
@@ -229,9 +229,10 @@ export default class LinearWorkspace extends LinearClient {
     const source = this.repositorySource;
     const project = this.screen === "create"
       ? this.lists.projects?.items?.find(p => p.id === this.form?.project)
-      : this.screen === "project" ? this.curProject : this.drilled;
-    const hints = [project?.name];
-    if ((source?.machine ?? null) === (machine ?? null)) hints.push(source?.folder);
+      : this.screen === "project" ? this.curProject : this.screen === "issue" ? this.cur?.project : this.drilled;
+    // Names travel between computers; absolute source paths do not. Discovery
+    // resolves the name inside the selected computer's own ~/code directory.
+    const hints = [project?.name, repositoryName(source?.folder)];
     loadTarget(this, cx, machine, { retain, hints, preferredFolder: this.mappedRepository(machine), preferredAgent: shared(PREFS)?.[machine ?? ""] ?? "" });
   }
   create(cx, capture = !props()?.attachSpace, projectId = null) {

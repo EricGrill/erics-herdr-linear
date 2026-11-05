@@ -140,11 +140,13 @@ test("unavailable/unknown computers never run local commands", async () => {
   assert.equal(h.calls.length, 0);
 });
 
-test("preselection requires one existing match, does not guess from a path basename", async () => {
+test("preselection tries name hints in order and requires an unambiguous existing match", async () => {
   const h = await harness(), repos = [{ name: "one", folder: "/home/code/one" }, { name: "two", folder: "/home/code/two" }];
   assert.equal(h.matchingRepository(repos, ["ONE"]), repos[0]);
   assert.equal(h.matchingRepository(repos, ["missing"]), null);
-  assert.equal(h.matchingRepository(repos, ["one", "two"]), null);
+  assert.equal(h.matchingRepository(repos, ["one", "two"]), repos[0]);
+  assert.equal(h.matchingRepository(repos, ["missing", "two"]), repos[1]);
+  assert.equal(h.matchingRepository([...repos, { name: "ONE", folder: "/home/code/ONE" }], ["one", "two"]), null);
   assert.equal(h.matchingRepository(repos, ["/worktrees/one"]), null);
 });
 

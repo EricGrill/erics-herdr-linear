@@ -127,7 +127,7 @@ async function harness(options = {}) {
     "gpui-base": { ...Object.fromEntries(["v_flex", "h_flex", "Input", "Textarea", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
       InputState: textState, TextareaState: textState },
     "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
-    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, validateRepository: async target => {
+    "./repository.js": { computers: () => [], loadTarget: () => {}, repositoryName: () => "", selectRepository: () => {}, validateRepository: async target => {
       validations.push({ ...target });
       if (options.validationError) throw new Error(options.validationError);
       return target.folder;

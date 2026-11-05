@@ -142,9 +142,19 @@ export async function trustForClaude(machine, folder) {
   }
 }
 
+export function repositoryName(folder) {
+  if (typeof folder !== "string") return "";
+  // Herdr's worktree layout includes a repository segment before the branch.
+  return folder.match(/\/\.herdr\/worktrees\/([^/]+)(?:\/|$)/)?.[1]
+    ?? folder.replace(/\/+$/, "").split("/").pop();
+}
+
 export function matchingRepository(repositories, hints = []) {
-  const matches = repositories.filter(r => hints.some(h => h && (r.folder === h || r.name.toLowerCase() === h.toLowerCase())));
-  return matches.length === 1 ? matches[0] : null;
+  for (const hint of hints.filter(Boolean)) {
+    const matches = repositories.filter(r => r.folder === hint || r.name.toLowerCase() === hint.toLowerCase());
+    if (matches.length) return matches.length === 1 ? matches[0] : null;
+  }
+  return null;
 }
 
 const compact = text => String(text ?? "").normalize("NFKD").toLowerCase().replace(/[^a-z0-9]/g, "");

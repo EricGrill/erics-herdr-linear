@@ -139,7 +139,7 @@ async function harness(options = {}) {
     "gpui-base": { ...Object.fromEntries(["v_flex", "h_flex", "Input", "Textarea", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
       InputState: textState, TextareaState: textState },
     "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
-    "./repository.js": { computers: () => [], loadTarget: () => {}, selectRepository: () => {}, inferRepository, createRepository: async (target, title) => {
+    "./repository.js": { computers: () => [], loadTarget: () => {}, repositoryName: () => "", selectRepository: () => {}, inferRepository, createRepository: async (target, title) => {
       creations.push({ target: { ...target }, title });
       if (options.creationError) throw new Error(options.creationError);
       const root = target.machine ? "/home/build/code" : "/Users/me/code", name = options.createdName ?? "new-work";

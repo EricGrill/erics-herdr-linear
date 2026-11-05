@@ -314,8 +314,12 @@ test("an offline restored draft keeps its repository without enabling an unvalid
   assert.equal(h.view.launchTarget.folder, "");
   assert.match(h.view.repositoryError, /Could not discover/);
   h.view.chooseComputer("remote", h.cx);
+  assert.equal(h.view.launchTarget.machine, "remote");
+  assert.equal(h.view.launchTarget.folder, "", "the old target is not available while discovery is pending");
   await h.settle();
-  assert.equal(h.view.form.draft.execution, null, "an explicit computer change clears the old target");
+  assert.equal(h.view.launchTarget.folder, "/remote/code/one");
+  assert.equal(h.view.form.draft.execution.machine, "remote");
+  assert.equal(h.view.form.draft.execution.folder, "/remote/code/one", "the draft saves the newly discovered target on the selected computer");
 });
 
 test("late project metadata completes repository defaults without replacing an explicit choice", async () => {
@@ -403,4 +407,58 @@ test("CHA-4220: opening a follow-up preserves a recovered raw-only idea", async 
   assert.equal(h.view.captureDescription.value(), idea);
   assert.equal(h.view.title.value(), idea);
   assert.doesNotMatch(h.view.captureDescription.value(), /Follow-up/);
+});
+
+for (const [from, to] of [["remote", null], [null, "remote"]]) test(`repository name follows computer changes: ${from} to ${to}`, async () => {
+  const h = await harness({ props: { source: { machine: from, folder: "/different-home/code/one/" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, `/${from ?? "local"}/code/one`);
+  h.view.chooseComputer(to, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, `/${to ?? "local"}/code/one`);
+  assert.equal(h.view.launchTarget.machine, to);
+  assert.equal(h.view.repositoryError, "");
+});
+
+test("project repository name wins over a different focused repository without another selection", async () => {
+  const h = await harness({ props: { source: { machine: null, folder: "/local/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.curProject = project;
+  h.view.screen = "project";
+  h.view.create(h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+test("issue project selects its repository without inheriting the focused repository", async () => {
+  const h = await harness({ props: { source: { machine: null, folder: "/local/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.screen = "issue";
+  h.view.cur = { id: "issue-one", project };
+  h.view.chooseComputer(null, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+for (const folder of ["/home/.herdr/worktrees/one/feature-branch", "/home/.herdr/worktrees/one/user/feature-branch/src"]) test(`Herdr worktree uses the repository name rather than the branch: ${folder}`, async () => {
+  const h = await harness({ props: { source: { machine: "remote", folder } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.chooseComputer(null, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/local/code/one");
+});
+
+test("a project display name without a repository match falls back to the source repository name", async () => {
+  const h = await harness({ projects: [{ ...project, name: "Project display name" }],
+    props: { source: { machine: "remote", folder: "/remote/code/two" } } });
+  h.view.init({}, h.cx);
+  await h.settle();
+  h.view.create(h.cx);
+  h.view.pickProject(project.id, h.cx);
+  await h.settle();
+  assert.equal(h.view.launchTarget.folder, "/remote/code/two");
 });
