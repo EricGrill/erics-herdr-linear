@@ -45,7 +45,7 @@ Today no key is bound to `linear-board.capture`.
 
 | Scope | Already taken (do not reuse) |
 | --- | --- |
-| Herdr `global` (Snoke `keys.json`) | cmd-q/h/t/w/n/p/b/d/l/,/[/]/=/+/-/0/1-9, cmd-shift-l/p/d/w/enter/[/]//, cmd-alt-h/[/]/arrows, cmd-alt-shift-arrows, ctrl-1-9, ctrl-tab, f2, shift-f2 |
+| Herdr `global` (Snoke `keys.json`) | cmd-q/h/t/w/n/p/b/d/l/,/[/]/=/+/-/0/1-9, cmd-shift-l/p/d/w/enter/[/]//, cmd-alt-h/[/]/arrows, cmd-alt-shift-arrows, ctrl-1-9, ctrl-tab, ctrl-shift-tab, f2, shift-f2 |
 | `layout:erics-linear` | cmd-shift-c/i/a/f/e/x, cmd-alt-a, cmd-w (Linux: alt-shift-a/c/i/d/f/e/x) |
 | `terminal` | cmd-c/v/left/right/backspace, ctrl-v, alt-left/right/backspace |
 | Programs (AGENTS.md) | plain ctrl+c/d/l/r/w/a/e/u/k/z/[ ; option+letters/digits type characters on Mac layouts |
@@ -66,8 +66,12 @@ with the same combination. Candidates to check on each machine: **ctrl-option-cm
 - **Voice stays editable:** dictated text lands in the editable field. Nothing is published
   until the person clicks **Create issue**. Shaping is user-invoked. Capture never starts an
   agent or a worktree (CHA-4200 invariants).
-- **Unavailable or offline:** a failed `do` exits 1. The wrapper should then (a) launch or
-  raise Herdr and try once more, and (b) if that also fails, post an OS notification:
+- **Unavailable or offline:** a failed `do` exits 1. Exit 0 does not prove the form opened:
+  if no sidebar copy of `linear-board` is showing, the command can do nothing and still
+  succeed (gap 1). So the wrapper treats "exit 0 and the capture overlay is open" (checked
+  with `herdr-app status`) as success, and anything else as failure. On failure it should
+  (a) launch or raise Herdr and try once more, and (b) if that also fails, post an OS
+  notification:
   "Herdr isn't open. Open it and choose Capture idea. Nothing was saved." No text was taken
   outside the app, so no idea is lost. Offline Linear is already handled: the draft is saved
   locally first.
@@ -76,7 +80,9 @@ with the same combination. Candidates to check on each machine: **ctrl-option-cm
 
 1. **Delivery outside the layout.** Only the `erics-linear` sidebar handles `capture`. If
    another layout is showing, the command may do nothing. Check what `do` returns in that
-   case, and decide whether to switch layouts first or fall back to `mod.open`.
+   case, and decide whether to switch layouts first or fall back to `mod.open`. Do not
+   retry `mod.open` blindly: a second `mod.open` closes the overlay (`AGENTS.md:577`), so a
+   retry could close a capture form that is already open. Check `herdr-app status` first.
 2. **Window not raised.** No command brings Herdr to the front (`app.show_all` only unhides
    hidden apps on macOS). The macOS wrapper probably needs `open -a` on the Herdr app before
    `do`. On Hyprland, use `focuswindow`.
