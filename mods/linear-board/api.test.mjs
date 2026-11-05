@@ -145,3 +145,20 @@ test("start checks current branch before updating and set-state only sends reque
   await h.api.ask({ op: "set-state", issue: "issue-one", state: "requested-state" });
   assert.equal(h.calls.filter(c => c.query.startsWith("mutation")).length, 1);
 });
+
+test("search finds tickets in every team by Linear's own relevance, without reading short words", async () => {
+  const h = await harness(({ query, variables }) => {
+    assert.match(query, /query TaskSearch\(\$term: String!, \$first: Int\) \{ searchIssues\(term: \$term, first: \$first\)/);
+    assert.deepEqual(plain(variables), { term: "harness choice", first: 20 });
+    return { data: { searchIssues: { nodes: [issue({ identifier: "EX-9", state: { id: "done", type: "completed", name: "Done", position: 0 } })] } } };
+  });
+  const found = await h.api.ask({ op: "search", query: "  harness choice " });
+  assert.deepEqual(plain(found.issues.map(i => [i.identifier, i.state.name, i.group])), [["EX-9", "Done", ""]]);
+  assert.deepEqual(plain(await h.api.ask({ op: "search", query: " a " })), { issues: [] });
+  assert.equal(h.calls.filter(c => c.query.includes("TaskSearch")).length, 1);
+});
+
+test("search refuses an incomplete Linear reply", async () => {
+  const h = await harness(() => ({ data: { searchIssues: null } }));
+  await assert.rejects(h.api.ask({ op: "search", query: "harness" }), /no search results/);
+});
