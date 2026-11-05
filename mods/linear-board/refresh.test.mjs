@@ -39,7 +39,7 @@ async function harness(count = 1) {
     "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [],
       shared: key => data.get(key), setShared: (key, value) => data.set(key, value), theme: () => ({}),
       setAgentOrder: dummy, run: dummy, props: () => ({}), openOverlay: dummy, closeOverlay: dummy,
-      knownAgents: dummy, appHome: () => "/fake", exec: dummy },
+      knownAgents: dummy, settings: () => ({ zoom: 1 }), appHome: () => "/fake", exec: dummy },
   };
   const cache = new Map();
   function load(specifier) {
@@ -76,7 +76,7 @@ test("refresh reloads all linked tickets including completed ones beyond the bac
   assert.ok(h.view.allIssues().every(row => row.state.name === "Done"));
   assert.equal(h.view.refreshing, false);
   assert.equal(h.view.err, "");
-  assert.match(text(h.view.sidebar()), /Needs input · Linear: Done · local/);
+  assert.match(text(h.view.sidebar()), /Needs input · Linear: Done\|+local/);
 });
 
 test("fresh periodic list responses replace shared ticket data and older responses cannot undo them", async () => {

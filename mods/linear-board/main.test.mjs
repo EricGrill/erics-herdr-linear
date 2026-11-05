@@ -38,6 +38,7 @@ async function harness(options = {}) {
       return { code: 0, stdout: "", stderr: "" };
     },
     knownAgents: async ({ on }) => [{ key: on === "remote" ? "remote-agent" : "local-agent", installed: true }],
+    settings: () => ({ zoom: 1 }),
   };
   const modules = new Map();
   async function link(specifier) {
@@ -348,7 +349,7 @@ async function harness(options = {}) {
       setAgentOrder: order => orders.push(order), props: () => properties,
       openOverlay: request => { overlays.push(request); return `overlay-${overlays.length}`; },
       closeOverlay: id => closed.push(id), run: (name, args) => commands.push({ name, args }),
-      knownAgents: forbidden("knownAgents"), pickFolder: forbidden("pickFolder"), appHome: forbidden("appHome"), exec: forbidden("exec"),
+      settings: () => ({ zoom: 1 }), knownAgents: forbidden("knownAgents"), pickFolder: forbidden("pickFolder"), appHome: forbidden("appHome"), exec: forbidden("exec"),
     },
     "fs/promises": { readFile: forbidden("readFile"), writeFile: forbidden("writeFile") },
     "./client.js": { default: BaseClient },

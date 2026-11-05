@@ -148,7 +148,7 @@ async function harness(options = {}) {
       shared: key => sharedStore.get(key), setShared: (key, value) => {
         if (key.includes(".idea-drafts:") && options.failDraftWrite?.()) throw new Error("Disk full");
         sharedStore.set(key, value);
-      }, setAgentOrder: noop,
+      }, setAgentOrder: noop, settings: () => ({ zoom: 1 }),
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
       run: (name, args) => { commands.push({ name, args }); return {}; }, exec, hc, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
@@ -163,7 +163,7 @@ async function harness(options = {}) {
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
   const link = async specifier => {
-    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js"].includes(specifier)) {
+    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js", "./machines.js", "./sticky.js"].includes(specifier)) {
       const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
       await real.link(link);
       return real;

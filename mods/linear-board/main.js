@@ -2,7 +2,7 @@
 // Modified for Eric's Herdr Linear: spaces-first layout, configurable enrichment and attention rules.
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, Popup, TextView } from "gpui-base";
-import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec } from "herdr";
+import { spaces, panes, agents, machines, theme, settings, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
@@ -13,6 +13,8 @@ import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDe
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
   crewContext, reassignChoices, requestGate } from "./queue.js";
 import { normalizeConfig } from "./config.js";
+import { machineColor, machineLabel, machineState, stateWord } from "./machines.js";
+import { stackLayout, clampScroll, pinnedHeader, thumb } from "./sticky.js";
 import { FILTER_FIELDS, normalizeFilters, toggleFilter, filterCount, matchesFilters, filterOptions } from "./filters.js";
 
 // Shared with the linear-workspace layout on purpose: an issue/space link made in one
@@ -24,6 +26,10 @@ const PREFS = "linear-workspace.agents", ACTIVE = "linear-workspace.workspace";
 const ENRICH = "linear-board.enrich", FILTER = "linear-board.filters", TEAMS = "linear-board.teams";
 const ENRICH_REQUEST = "linear-board.enrich-request";
 const CONFIG = "erics-linear.config";
+// How many open spaces need you, for the window header to show while the sidebar is a rail.
+const NEEDS = "erics-linear.needs-you";
+// The sidebar's fixed row heights, which its pinned group headers are placed by.
+const HOME_ROWS = { header: 28, row: 49, gap: 3 };
 const ENRICH_MS = 60000;
 // Crew checks this often whether the sidebar has published its Linear connection, and
 // retries a failed agent list no sooner than CREW_RETRY_MS after the last attempt.
@@ -627,7 +633,9 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
-        .child(div().truncate().text_size(11).text_color(color).child(`${label}${is?.state?.name ? ` · Linear: ${is.state.name}` : !is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`)))
+        .child(h_flex().min_w(0).gap(6).items_center()
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(color).child(`${label}${is?.state?.name ? ` · Linear: ${is.state.name}` : !is ? " · no ticket" : ""}`))
+          .child(this.machineTag(record.space.machine ?? null, `${id}-machine`))))
       .children(this.harnessIcons([record]))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -657,15 +665,39 @@ export default class LinearWorkspace extends LinearClient {
       .child(String(text));
   }
 
+  /** A machine's own color, the same everywhere it is drawn. */
+  machineDot(name, size = 7) {
+    const t = theme(), known = machines();
+    const state = machineState(name, known);
+    const color = machineColor(t, name, known.map(m => m.name ?? null));
+    // Offline: an outline only, so a dead machine reads at a glance without its color changing.
+    return div().size(size).rounded(size).flex_none()
+      .when(state === "online", el => el.bg(color))
+      .when(state === "connecting", el => el.bg(tint(color, 0.45)))
+      .when(state === "offline", el => el.border_1().border_color(color));
+  }
+
+  /** The machine a row runs on: its dot, its name, and whether it can be reached. */
+  machineTag(name, id) {
+    const t = theme(), state = machineState(name, machines()), word = stateWord(state);
+    return h_flex().id(id).flex_none().gap(4).items_center()
+      .tooltip(`${machineLabel(name)}${word ? ` · ${word}` : ""}`)
+      .child(this.machineDot(name))
+      .child(div().text_size(11).font_family(MONO).text_color(state === "online" ? t.muted : t.blocked)
+        .child(word ? `${machineLabel(name)} · ${word}` : machineLabel(name)));
+  }
+
   /** Which machines a row's work is running on, and whether Herdr can still reach them.
    *  An issue with no local work gets no chip at all rather than a misleading "local". */
   machineChips(records, id) {
-    const t = theme();
-    const reachable = new Map(machines().map(m => [m.name ?? null, m.layout === "ready"]));
+    const t = theme(), known = machines();
     const names = [...new Set(records.map(r => r.space.machine ?? null))];
     return names.map((name, i) => {
-      const ok = reachable.get(name) !== false;
-      return this.chip(`${id}-machine-${i}`, name ?? "local", ok ? t.muted : t.blocked, { faded: !ok });
+      const state = machineState(name, known), word = stateWord(state), ok = state === "online";
+      return h_flex().id(`${id}-machine-${i}`).flex_none().px(5).h(16).gap(4).items_center().rounded(4)
+        .bg(tint(ok ? t.muted : t.blocked, 0.14)).tooltip(`${machineLabel(name)}${word ? ` · ${word}` : ""}`)
+        .child(this.machineDot(name, 6))
+        .child(div().text_size(10).text_color(ok ? t.muted : t.blocked).child(word ? `${machineLabel(name)} · ${word}` : machineLabel(name)));
     });
   }
 
@@ -805,17 +837,29 @@ export default class LinearWorkspace extends LinearClient {
     });
   }
 
-  visibleSpaces() {
-    const index = this.enrichment(), filters = this.homeFilters();
-    const words = (this.filter ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const rank = { blocked: 0, done: 1, working: 2, idle: 3 };
+  /** Every open space with its sidebar lane, before search and filters. */
+  laned(index = this.enrichment()) {
     return this.records().map(record => {
       const issue = this.enrich(record.issue, index);
       const lane = record.status === "blocked" || issueNeedsYou(issue, this.attentionRules()) ? "blocked"
         : record.status === "working" ? "working"
         : record.status === "done" || issue?.state?.type === "completed" ? "done" : "idle";
       return { ...record, issue, lane };
-    }).filter(record => {
+    });
+  }
+
+  /** Tells the window header how many spaces need you. Counted before search and filters:
+   *  a filter hiding them does not make them need you less. Written only on change. */
+  publishNeeds() {
+    const n = this.laned().filter(record => record.lane === "blocked").length;
+    if ((shared(NEEDS) ?? 0) !== n) setShared(NEEDS, n);
+  }
+
+  visibleSpaces() {
+    const index = this.enrichment(), filters = this.homeFilters();
+    const words = (this.filter ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const rank = { blocked: 0, done: 1, working: 2, idle: 3 };
+    return this.laned(index).filter(record => {
       if (!matchesFilters(record, filters)) return false;
       const hay = [record.space.name, record.space.machine, record.issue?.identifier, record.issue?.title,
         ...record.agents.map(a => a.title)].filter(Boolean).join(" ").toLowerCase();
@@ -835,6 +879,12 @@ export default class LinearWorkspace extends LinearClient {
       { status: "idle", name: "IDLE", color: t.dim },
     ].map(group => ({ ...group, records: records.filter(record => record.lane === group.status) }));
     setAgentOrder(records.flatMap(record => record.agents.map(a => a.address)));
+    this.publishNeeds();
+    const shown = groups.filter(group => group.records.length);
+    const stack = stackLayout(shown.map(group => ({ rows: group.records.length })), HOME_ROWS);
+    const viewport = this.homeViewport ?? 0;
+    this.homeScroll = clampScroll(this.homeScroll, stack.height, viewport);
+    const pin = pinnedHeader(stack, this.homeScroll), bar = thumb(this.homeScroll, stack.height, viewport);
     return v_flex().id("spaces-home").size_full().min_w(0).min_h(0).px(10).gap(7).bg(t.chrome)
       .child(h_flex().h(32).flex_none().items_center().gap(5)
         .child(this.button("open-projects", "Projects", () => this.openProjects()))
@@ -854,13 +904,27 @@ export default class LinearWorkspace extends LinearClient {
       .when(count > 0, el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).tooltip(summary).child(summary))
         .child(this.button("clear-home-filters", "Clear", cx => this.applyFilter({}, cx)))))
-      .child(v_flex().id("spaces-by-status").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().gap(3)
+      // The list scrolls itself so the current group's header can stay pinned on top:
+      // GPUI's scroll areas never say how far they have scrolled.
+      .child(div().id("spaces-by-status").flex_1().min_h(0).min_w(0).relative().overflow_hidden()
+        .on_size_change((size, cx) => {
+          const height = size.height / (settings()?.zoom || 1);
+          if (height !== this.homeViewport) { this.homeViewport = height; cx.notify(); }
+        })
+        .on_scroll_wheel((e, cx) => {
+          const next = clampScroll(this.homeScroll - (e.delta?.y ?? 0), stack.height, this.homeViewport ?? 0);
+          if (next !== this.homeScroll) { this.homeScroll = next; cx.notify(); }
+        })
         .when(!records.length, el => el.child(div().py(12).text_size(12).text_color(t.muted)
           .child(this.filter || count ? "No matching spaces" : "No open spaces. Start a task to begin.")))
-        .children(groups.filter(group => group.records.length).flatMap(group => [
-          this.section(group.name, group.records.length, group.color),
-          ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
-        ])))
+        .child(v_flex().absolute().left(0).right(0).top(-this.homeScroll).gap(HOME_ROWS.gap)
+          .children(shown.flatMap(group => [
+            this.section(group.name, group.records.length, group.color),
+            ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
+          ])))
+        .when(Boolean(pin), el => el.child(div().id("pinned-group").absolute().left(0).right(0).top(pin.top).bg(t.chrome)
+          .child(this.section(shown[pin.group].name, shown[pin.group].records.length, shown[pin.group].color))))
+        .when(Boolean(bar), el => el.child(div().absolute().right(0).w(3).top(bar.top).h(bar.h).rounded(2).bg(t.border))))
       .when(Boolean(this.signedOut), el => el.child(this.button("sign-in", "Sign in to Linear", cx => this.signIn(cx))))
       .when(Boolean(this.err), el => el.child(div().py(3).text_size(11).text_color(t.blocked).truncate().child(this.err)));
   }
@@ -1035,10 +1099,12 @@ export default class LinearWorkspace extends LinearClient {
         .when(!records.length, el => el.child(div().py(6).text_size(10.5).text_color(t.muted).child("No open workspaces")))
         .children(groups.flatMap(group => [
           h_flex().id(`machine-${group.name ?? "local"}`).h(18).flex_none().items_center().gap(6).pt(3)
+            .child(this.machineDot(group.name, 6))
             .child(div().text_size(9.5).font_semibold().text_color(group.reachable ? t.muted : t.blocked)
-              .child((group.name ?? "local").toUpperCase()))
+              .child(machineLabel(group.name).toUpperCase()))
             .child(div().flex_1())
-            .when(!group.reachable, el => el.child(div().text_size(9.5).text_color(t.blocked).child("unreachable")))
+            .when(!group.reachable, el => el.child(div().text_size(9.5).text_color(t.blocked)
+              .child(stateWord(machineState(group.name, machines())) || "unreachable")))
             .when(group.reachable && group.records.length > 0, el => el.child(div().text_size(9.5).text_color(t.dim).child(String(group.records.length)))),
           ...group.records.map(r => this.spaceRow(r, `strip-${group.name ?? "local"}-${r.space.id}`)),
         ])));

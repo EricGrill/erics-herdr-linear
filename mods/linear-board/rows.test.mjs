@@ -21,16 +21,18 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const overlays = [], closed = [], commands = [];
 let currentProps = {};
+let knownMachines = [];
+const sharedState = new Map();
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
-  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {}, TextView: {} },
+  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: { new: () => native("input") }, Popup: {}, TextView: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
-    spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: () => null,
-    theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
-    setShared: noop, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
-    closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
+    spaces: () => [], panes: () => [], agents: () => [], machines: () => knownMachines, shared: key => sharedState.get(key) ?? null,
+    theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000", ansi4: "#0000ff", ansi5: "#ff00ff", ansi6: "#00ffff" }),
+    setShared: (key, value) => { sharedState.set(key, value); }, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
+    closeOverlay: id => { closed.push(id); }, knownAgents: noop, settings: () => ({ zoom: 1 }), pickFolder: noop, appHome: () => "/fake", exec: noop,
   },
 };
 const cache = new Map();
@@ -201,4 +203,54 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
     assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ space: "space-7", action: "new" }));
     assert.deepEqual(closed, ["menu-9", "menu-9", "menu-9", "menu-9"]);
   } finally { currentProps = {}; }
+});
+
+test("a space row shows its machine's dot, and says when the machine is offline or reconnecting", () => {
+  knownMachines = [{ name: null, layout: "ready" }, { name: "darth", layout: "unavailable" }, { name: "maul", layout: "loading" }];
+  try {
+    const on = name => ({ ...record, space: { ...record.space, machine: name } });
+    const dot = row => nodes(row).find(n => n.attributes.size?.[0] === 7 && n.attributes.rounded?.[0] === 7);
+    const local = board.workRow(on(null), "home-local");
+    assert.ok(dot(local).attributes.bg, "an online machine is a filled dot");
+    assert.match(text(local), /\|local$|\|local\|/);
+    const offline = board.workRow(on("darth"), "home-darth");
+    assert.match(text(offline), /darth · offline/);
+    assert.ok(dot(offline).attributes.border_1 && !dot(offline).attributes.bg, "an offline machine is an outline");
+    assert.match(text(board.workRow(on("maul"), "home-maul")), /maul · connecting…/);
+    assert.notEqual(dot(local).attributes.bg[0], dot(board.workRow(on("maul"), "home-maul")).attributes.bg[0]);
+  } finally { knownMachines = []; }
+});
+
+test("the sidebar pins the current group's header while scrolling and publishes the needs-you count", () => {
+  const saved = { records: board.records, enrichment: board.enrichment, attentionRules: board.attentionRules, homeFilters: board.homeFilters };
+  const make = (n, status) => Array.from({ length: n }, (_, i) => ({ ...record, agents: [], status,
+    issue: { ...issue, id: `${status}-${i}`, identifier: `DEMO-${status}-${i}` }, space: { id: `${status}-${i}`, name: `${status} ${i}`, machine: null } }));
+  board.records = () => [...make(2, "blocked"), ...make(6, "working")];
+  board.enrichment = () => ({ byIdentifier: new Map(), rows: [] });
+  board.attentionRules = () => ({});
+  board.homeFilters = () => ({ team: [], status: [], project: [], crew: [] });
+  try {
+    sharedState.delete("erics-linear.needs-you");
+    let view = board.sidebar();
+    assert.equal(sharedState.get("erics-linear.needs-you"), 2);
+    const list = () => nodes(view).find(n => n.attributes.id?.[0] === "spaces-by-status");
+    const pinned = () => nodes(view).find(n => n.attributes.id?.[0] === "pinned-group");
+    assert.equal(pinned(), undefined, "nothing pinned at the top");
+    let notified = 0;
+    const cx = { notify: () => { notified++; } };
+    list().attributes.on_size_change[0]({ width: 280, height: 200 }, cx);
+    view = board.sidebar();
+    list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: -260 } }, cx);
+    view = board.sidebar();
+    assert.ok(notified >= 2);
+    assert.equal(board.homeScroll, 260);
+    assert.match(text(pinned()), /WORKING\|6/);
+    list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: 10000 } }, cx);
+    view = board.sidebar();
+    assert.equal(board.homeScroll, 0);
+    assert.equal(pinned(), undefined);
+  } finally {
+    Object.assign(board, saved);
+    board.homeScroll = 0; board.homeViewport = 0;
+  }
 });
