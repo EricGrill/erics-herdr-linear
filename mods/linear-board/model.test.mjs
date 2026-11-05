@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { issueKey, issueLabel, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems, spaceMenuItems } from "./model.js";
+import { issueKey, issueLabel, issueHeadline, issueHover, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems, spaceMenuItems } from "./model.js";
 
 const issue = (id = "one", identifier = "DEMO-3785", extra = {}) => ({
   id, identifier, title: "Research new stars", url: `https://linear.app/example/issue/${identifier}`,
@@ -287,4 +287,12 @@ test("a space's own menu entries match Herdr's space menu, worktree entries only
   const close = spaceMenuItems({ id: "s1" }).at(-1);
   assert.equal(close.command, "space.close");
   assert.deepEqual(close.args, { id: "s1" });
+});
+
+test("sidebar headlines put the title before the project, which moves to the hover text", () => {
+  const is = { identifier: "DEMO-9", title: " Give every deploy a version ", project: { name: "Herdr" } };
+  assert.equal(issueHeadline(is), "DEMO-9 · Give every deploy a version");
+  assert.equal(issueHover(is), "DEMO-9 · Give every deploy a version (Herdr)");
+  assert.equal(issueHeadline({ identifier: "DEMO-9" }), "DEMO-9");
+  assert.equal(issueHover({ identifier: "DEMO-9", title: "T", project: { name: "  " } }), "DEMO-9 · T");
 });

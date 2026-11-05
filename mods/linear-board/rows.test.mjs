@@ -61,9 +61,25 @@ board.records = () => [record];
 const nodes = node => typeof node === "object" && node !== null ? [node, ...node.nodes.flatMap(nodes)] : [];
 const text = node => typeof node === "string" ? node : (node?.nodes ?? []).map(text).join("|");
 
-test("sidebar, compact and project rows show the project after the issue key and the actual harness", () => {
+test("sidebar and compact space rows lead with the key and title, then the project", () => {
+  for (const row of [board.workRow(record, "home"), board.spaceRow(record, "strip")]) {
+    const shown = text(row);
+    assert.ok(shown.includes("|DEMO-42 · Fix a bug|"), `title on line 1: ${shown}`);
+    assert.ok(shown.indexOf("Sample project") > shown.indexOf("Fix a bug"), "project after the title");
+    assert.doesNotMatch(shown, /DEMO-42 \(Sample project\)/);
+    assert.ok(nodes(row).some(node => node.attributes.tooltip?.[0] === "DEMO-42 · Fix a bug (Sample project)"), "hover shows the full title and project");
+  }
+  const bare = { ...record, issue: { id: "two", identifier: "DEMO-7", title: "No home", project: null } };
+  for (const row of [board.workRow(bare, "home"), board.spaceRow(bare, "strip")]) {
+    assert.match(text(row), /DEMO-7 · No home/);
+    assert.doesNotMatch(text(row), /\(\)|undefined|null/);
+  }
+});
+
+test("sidebar, compact and project rows show the issue key, project and the actual harness", () => {
   for (const row of [board.workRow(record, "home"), board.spaceRow(record, "strip"), board.issueRow(issue, "search")]) {
-    assert.match(text(row), /DEMO-42 \(Sample project\)/);
+    assert.match(text(row), /DEMO-42/);
+    assert.match(text(row), /Sample project/);
     const glyph = nodes(row).find(node => node.asset === program.icon);
     assert.equal(glyph.type, "svg");
     const wrapper = nodes(row).find(node => node.nodes.includes(glyph));
@@ -71,7 +87,6 @@ test("sidebar, compact and project rows show the project after the issue key and
     assert.deepEqual(wrapper.attributes.tooltip, ["Codex"]);
     assert.deepEqual(wrapper.attributes.accessibility_label, ["Codex"]);
   }
-  assert.ok(nodes(board.workRow(record, "home")).some(node => node.attributes.tooltip?.[0] === "DEMO-42 (Sample project) · Fix a bug"));
 });
 
 test("enrichment fills an absent project but preserves an explicitly unassigned project", () => {
@@ -276,10 +291,10 @@ test("sidebar rows show time in state, hide a matching Linear status and list th
   const todo = { issue: { ...progress, state: { name: "Todo", type: "unstarted" } }, programs: [], agents: [], status: "working", space: space("t", "Todo one", { working_since: now - 30000 }) };
   const idle = { issue: { ...progress, updatedAt: new Date(now - 3 * 86400000).toISOString() }, programs: [], agents: [], status: "idle", space: space("i", "Idle one", {}) };
   const line = (r, lane) => text(nodes(board.workRow(r, `age-${r.space.id}`, lane)).find(node => node.attributes.text_size?.[0] === 11));
-  assert.equal(line(working, "working"), "Working 4m · snoke");
-  assert.equal(line(finished, "done"), "Agent finished 12m ago · still In Progress · local");
-  assert.equal(line(todo, "working"), "Working <1m · Linear: Todo · local");
-  assert.equal(line(idle, "idle"), "Idle 3d · local");
+  assert.equal(line(working, "working"), "Working 4m · Sample project · snoke");
+  assert.equal(line(finished, "done"), "Agent finished 12m ago · Sample project · still In Progress · local");
+  assert.equal(line(todo, "working"), "Working <1m · Sample project · Linear: Todo · local");
+  assert.equal(line(idle, "idle"), "Idle 3d · Sample project · local");
   for (const row of [working, finished, idle].map((r, i) => board.workRow(r, `age-${i}`, ["working", "done", "idle"][i]))) {
     assert.doesNotMatch(text(row), /Linear: In Progress/);
   }

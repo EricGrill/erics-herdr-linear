@@ -7,7 +7,7 @@ import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
 import { tint, icon, stateIcon, priorityIcon, MONO } from "./look.js";
-import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
+import { issueKey, issueLabel, issueHeadline, issueHover, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf, laneSince, elapsed, linearMismatch } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue, fetchPullRequests, rowPullRequest } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
@@ -646,7 +646,7 @@ export default class LinearWorkspace extends LinearClient {
     const age = elapsed(since.at, now);
     const when = !age ? "" : lane === "done" ? ` ${age === "<1m" ? "just now" : `${age} ago`}` : ` ${age}`;
     const mismatch = is ? linearMismatch(lane, is, this.attentionRules()) : "";
-    const status = [`${label}${when}`, mismatch || (!is ? "no ticket" : ""), record.space.machine ?? "local"].filter(Boolean).join(" · ");
+    const status = [`${label}${when}`, is?.project?.name?.trim(), mismatch || (!is ? "no ticket" : ""), record.space.machine ?? "local"].filter(Boolean).join(" · ");
     const source = since.source === "herdr" ? `In this state since ${new Date(since.at).toLocaleString()} (Herdr)`
       : since.source === "linear" ? `Herdr has no state change for this space yet; age is from the ticket's last Linear update, ${new Date(since.at).toLocaleString()}`
       : "No state-change time yet";
@@ -657,7 +657,7 @@ export default class LinearWorkspace extends LinearClient {
       .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx, record.issue, record.folder))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
+        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeadline(is) : record.space.name))
         .child(div().truncate().text_size(11).text_color(color).tooltip(source).child(status)))
       .when(badges.length > 0, el => el.child(h_flex().id(`${id}-badges`).flex_none().gap(4).items_center().children(badges)))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
@@ -1094,7 +1094,10 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(record.needs ? "need" : record.status === "working" ? "work" : "idle", color, 11)
         .when(record.status === "working", el => el.spin(1100)))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
-        .tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? issueLabel(is) : record.space.name))
+        .tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeadline(is) : record.space.name))
+      .when(Boolean(is?.project?.name?.trim()), el => el.child(div().flex_none().max_w(84).truncate().px(4).rounded(4)
+        .bg(tint(t.muted, 0.12)).text_size(9.5).text_color(t.muted)
+        .tooltip(is.project.name.trim()).child(is.project.name.trim())))
       .children(this.harnessIcons([record]))
       .child(div().flex_none().text_size(10).text_color(color)
         .child(record.needs ? (record.status === "blocked" ? "needs you" : "ready") : record.status === "working" ? "working" : ""));
