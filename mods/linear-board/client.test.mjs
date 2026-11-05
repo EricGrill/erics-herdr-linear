@@ -184,7 +184,7 @@ async function harness(options = {}) {
   const mainStubs = {
     "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou", "issueMenuItems", "spaceMenuItems"].map(name => [name, name === "taskContext" ? taskContext : noop])),
     "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf"].map(name => [name, noop])),
-    "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "fetchQueue", "fetchAgents", "fetchIssueDetail", "reassignIssue"].map(name => [name, noop])),
+    "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "fetchQueue", "fetchAgents", "fetchIssueDetail", "reassignIssue", "fetchPullRequests", "rowPullRequest"].map(name => [name, noop])),
     "./queue.js": Object.fromEntries(["attentionOf", "sortQueue", "queueCounts", "crewRoster", "herdrActivity", "age", "queueStatus", "reassignBatch", "batchSummary", "crewContext", "reassignChoices", "requestGate"].map(name => [name, noop])),
     "./config.js": { normalizeConfig: noop },
   };

@@ -25,6 +25,7 @@ const QUERY = `query BoardEnrichment($after: String) {
     nodes {
       id
       identifier
+      priority
       delegate { id name displayName avatarUrl active app isAssignable }
       assignee { displayName }
       state { name type }
@@ -78,6 +79,7 @@ export function parseEnrichment(text) {
   const rows = page.nodes.map(node => ({
     id: node?.id ?? null,
     identifier: String(node?.identifier ?? ""),
+    priority: Number.isInteger(node?.priority) ? node.priority : 0,
     delegate: node?.delegate ? {
       id: node.delegate.id ? String(node.delegate.id) : null,
       name: String(node.delegate.name ?? node.delegate.displayName ?? ""),
@@ -163,6 +165,104 @@ export async function fetchEnrichment({ on = null, pages = 4, config = {} } = {}
     after = parsed.cursor;
   }
   return { rows, fetchedAt: Date.now(), partial: true, error: null };
+}
+
+// ---- Pull requests linked to the issues the sidebar shows ---------------------------
+//
+// Only for the handful of issues open in spaces, never the whole workspace: attachments
+// nested under 250 issues would push the enrichment query past Linear's complexity cap.
+// GitHub pull requests arrive as attachments. Their open/merged state, and checks when
+// Linear's GitHub integration records them, are in the attachment's `metadata`.
+
+export const PULL_ISSUE_CAP = 50;
+
+const PULLS_QUERY = `query BoardPullRequests($ids: [ID!], $first: Int) {
+  issues(first: $first, filter: { id: { in: $ids } }) {
+    nodes {
+      id
+      identifier
+      attachments(first: 10) { nodes { title url sourceType metadata updatedAt } }
+    }
+  }
+}`;
+
+const PULL_URL = /^https?:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\/(\d+)(?:[/?#]|$)/i;
+const FAILED = /^(?:fail(?:ed|ure|ing)?|error(?:ed)?|timed_out|cancel(?:l)?ed|action_required|startup_failure)$/i;
+const PASSED = /^(?:success(?:ful)?|pass(?:ed|ing)?|neutral|skipped)$/i;
+const PENDING = /^(?:pending|queued|in_progress|running|waiting|requested|expected)$/i;
+const lower = v => (typeof v === "string" ? v.trim().toLowerCase() : "");
+
+/** Overall checks verdict from whatever shape the metadata carries: "failing",
+ *  "passing", "pending", or null when it says nothing about checks. Pure. */
+export function checksOf(meta) {
+  if (!meta || typeof meta !== "object") return null;
+  const summary = [meta.checksStatus, meta.checkStatus, meta.ciStatus, meta.checks?.status, meta.checks?.conclusion,
+    meta.checks?.state, meta.statusCheckRollup?.state, meta.statusCheckRollup].find(v => typeof v === "string" && v.trim());
+  const list = [meta.checks, meta.checks?.nodes, meta.checkRuns, meta.statusChecks].find(Array.isArray) ?? [];
+  const states = list.map(c => lower(typeof c === "string" ? c : c?.conclusion || c?.state || c?.status)).filter(Boolean);
+  if (summary) states.push(lower(summary));
+  if (!states.length) return null;
+  if (states.some(s => FAILED.test(s))) return "failing";
+  if (states.some(s => PENDING.test(s) || !PASSED.test(s))) return "pending";
+  return "passing";
+}
+
+/** One attachment -> a pull request, or null when it isn't one. `state` is one of
+ *  "failing", "ready", "open", "draft", "merged" or "closed". Pure. */
+export function pullRequestOf(attachment) {
+  const url = String(attachment?.url ?? "");
+  const match = url.match(PULL_URL);
+  if (!match) return null;
+  const meta = attachment.metadata && typeof attachment.metadata === "object" ? attachment.metadata : {};
+  const status = lower(meta.status ?? meta.state);
+  const checks = checksOf(meta);
+  const review = lower(meta.reviewDecision ?? meta.reviewStatus);
+  let state = "open";
+  if (status === "merged" || meta.mergedAt || meta.merged === true) state = "merged";
+  else if (status === "closed" || meta.closedAt) state = "closed";
+  else if (checks === "failing") state = "failing";
+  else if (status === "draft" || meta.draft === true || meta.isDraft === true) state = "draft";
+  else if (status === "approved" || review === "approved" || checks === "passing") state = "ready";
+  return {
+    url, repo: match[1], number: Number(match[2]),
+    title: String(attachment.title ?? `${match[1]}#${match[2]}`),
+    state, checks, approved: status === "approved" || review === "approved",
+    updatedAt: str(attachment.updatedAt),
+  };
+}
+
+const PULL_RANK = { failing: 0, ready: 1, open: 2, draft: 3, merged: 4 };
+
+/** The one pull request a row should show: an open one before a merged one, a failing
+ *  one before the rest. Closed pull requests are never shown. Pure. */
+export function rowPullRequest(prs = []) {
+  return prs.filter(pr => pr && pr.state in PULL_RANK)
+    .sort((a, b) => PULL_RANK[a.state] - PULL_RANK[b.state] || String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))[0] ?? null;
+}
+
+/** One answer -> { "KEY-1": [pull requests] }. Pure. */
+export function parsePullRequests(text) {
+  const { data, error } = dataOf(text);
+  if (error) return { pulls: {}, error };
+  if (!Array.isArray(data.issues?.nodes)) return { pulls: {}, error: "Linear returned no issues block" };
+  const pulls = {};
+  for (const node of data.issues.nodes) {
+    if (!node?.identifier) continue;
+    pulls[String(node.identifier).toUpperCase()] = nodesOf(node.attachments).map(pullRequestOf).filter(Boolean);
+  }
+  return { pulls, error: null };
+}
+
+/** Pull requests for the given Linear issue ids. Never throws. */
+export async function fetchPullRequests({ on = null, config = {}, ids = [] } = {}) {
+  const wanted = [...new Set(ids.filter(Boolean).map(String))].slice(0, PULL_ISSUE_CAP);
+  if (!wanted.length) return { pulls: {}, error: null };
+  const { auth, error } = authOf(config);
+  if (error) return { pulls: {}, error };
+  if (!auth.enabled) return { pulls: {}, error: null };
+  const result = await request({ on, auth, query: PULLS_QUERY, variables: { ids: wanted, first: wanted.length } });
+  if (result.error) return { pulls: {}, error: result.error };
+  return parsePullRequests(result.text);
 }
 
 // ---- Crew: one agent's queue, issue inspection, and delegate reassignment ------------
