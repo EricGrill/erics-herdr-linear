@@ -158,13 +158,13 @@ export function madeForTicket(folder, title) {
 }
 
 // Repositories a ticket's text points at: a path under code/ (~/code/x,
-// /Users/me/code/x), a GitHub link (github.com/owner/x) or a `x` code span.
+// /Users/me/code/x) or a GitHub link (github.com/owner/x). A bare `x` code
+// span is not enough: tickets backtick ordinary words, keys and commands.
 function mentioned(repositories, text) {
   const body = String(text ?? "");
   const names = new Set();
-  for (const m of body.matchAll(/(?:^|[\s(`'"<\[])(?:~|\/[^\s`'"<>()]*)\/code\/([A-Za-z0-9._-]+)/g)) names.add(m[1].toLowerCase());
+  for (const m of body.matchAll(/(?:^|[\s(`'"<\[])(?:~|\/[^\s`'"<>()]*)\/code\/([A-Za-z0-9._-]+)/g)) names.add(m[1].replace(/\.+$/, "").toLowerCase());
   for (const m of body.matchAll(/github\.com\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+?)(?:\.git)?(?=[\s/)>#?`'"\]]|$)/g)) names.add(m[1].toLowerCase());
-  for (const m of body.matchAll(/`([A-Za-z0-9._-]+)`/g)) names.add(m[1].toLowerCase());
   return repositories.filter(r => names.has(r.name.toLowerCase()));
 }
 
@@ -203,7 +203,10 @@ export function selectRepository(view, repo, cx) {
   if (view.busy || view.repositoriesLoading || view.launchTarget?.blocked) return false;
   view.targetGeneration = (view.targetGeneration ?? 0) + 1;
   view.targetPicker = null;
-  view.launchTarget = { machine: view.launchTarget.machine, folder: repo.folder, name: repo.name, root: view.repoRoot };
+  // pickedFor records the ticket the choice was made on, so a hand-picked
+  // "New repository" is never replaced by inference when its details reload.
+  view.launchTarget = { machine: view.launchTarget.machine, folder: repo.folder, name: repo.name, root: view.repoRoot,
+    ...(view.screen === "issue" && view.cur?.id ? { pickedFor: view.cur.id } : {}) };
   view.repositoryError = "";
   cx.notify();
   return true;

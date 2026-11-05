@@ -665,10 +665,11 @@ export default class Linear extends View {
   // An existing ticket with no saved repository starts in the one its project
   // already uses, not a blank new one (CHA-4309). It runs when the ticket's
   // details or the computer's repositories arrive, only while no repository is
-  // chosen; picking "New repository" afterwards is not overridden.
+  // chosen. A repository picked by hand on this ticket, "New repository"
+  // included, is never overridden, even when the details reload.
   inferLaunchRepository(cx) {
     const is = this.detail?.issue, t = this.launchTarget;
-    if (this.demo || this.screen !== "issue" || !is || is.id !== this.cur?.id || !t || t.blocked || t.folder
+    if (this.demo || this.screen !== "issue" || !is || is.id !== this.cur?.id || !t || t.blocked || t.folder || t.pickedFor === is.id
       || this.repositoriesLoading || !this.repositories?.length) return;
     const machine = t.machine ?? null, projectId = is.project?.id ?? null;
     const saved = shared(LAUNCH_TARGETS) ?? {};

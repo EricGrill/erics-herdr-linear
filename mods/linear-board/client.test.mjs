@@ -12,7 +12,7 @@ const source = await readFile(new URL("./client.js", import.meta.url), "utf8");
 const targetSource = await readFile(new URL("./execution-target.js", import.meta.url), "utf8");
 const mainSource = await readFile(new URL("./main.js", import.meta.url), "utf8");
 // The real, pure repository inference; the rest of repository.js stays stubbed below.
-const { inferRepository } = await (async () => {
+const { inferRepository, selectRepository: pickRepository } = await (async () => {
   const context = vm.createContext({});
   const real = new vm.SourceTextModule(await readFile(new URL("./repository.js", import.meta.url), "utf8"), { context });
   await real.link(() => new vm.SyntheticModule(["exec", "knownAgents", "machines"], function () {
@@ -588,6 +588,31 @@ test("with no repository to infer, Start still makes a new one, and a chosen New
   h.client.worktree(h.cx, true, { issue });
   await h.flush();
   assert.deepEqual(h.creations.map(c => c.title), [ticket.title]);
+});
+
+test("a hand-picked New repository survives the ticket's details reloading (CHA-4309)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Holonet" } }, other = { ...ticket, id: "issue-two", project: { id: "p", name: "Holonet" } };
+  const holonet = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue: h.client.cur, description: "" }) });
+  Object.assign(h.client, { cur: issue, repositories: [holonet], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+  // The picker's "New repository" row, then refresh (r), reload or a state change.
+  assert.equal(pickRepository(h.client, { folder: "", name: "" }, h.cx), true);
+  for (let i = 0; i < 2; i++) {
+    h.client.loadDetail(h.cx);
+    await h.flush();
+    assert.equal(h.client.launchTarget.folder, "", "an explicit New repository is not overridden");
+  }
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.deepEqual(h.creations.map(c => c.title), [ticket.title]);
+  // The pick belongs to that ticket: another ticket opened next still infers its repository.
+  Object.assign(h.client, { cur: other, launchTarget: { ...h.client.launchTarget, folder: "", name: "" } });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
 });
 
 test("repositories arriving after the ticket's details still infer its repository (CHA-4309)", async () => {

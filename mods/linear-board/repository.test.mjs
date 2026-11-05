@@ -107,11 +107,16 @@ test("an existing ticket's repository is inferred from its project, siblings or 
   assert.equal(h.inferRepository(repos, { siblings: [sibling(`${blank.folder}`, "Sidebar rows: show the ticket title first, project second"), sibling(other.folder)] }), other);
   assert.equal(h.inferRepository(repos, { siblings: [sibling(real.folder), sibling(other.folder)] }), null, "a tie is not a choice");
   assert.equal(h.inferRepository(repos, { siblings: [sibling("/elsewhere/repo")] }), null);
-  // 3. The ticket's text names one repository: a ~/code path, a GitHub link or a code span.
+  // 3. The ticket's text names one repository: a ~/code path or a GitHub link.
   assert.equal(h.inferRepository(repos, { text: "The real code lives in `~/code/erics-herdr-linear`." }), real);
   assert.equal(h.inferRepository(repos, { text: "Repo: [https://github.com/EricGrill/erics-herdr-linear](<https://github.com/EricGrill/erics-herdr-linear>)" }), real);
   assert.equal(h.inferRepository(repos, { text: "See /Users/me/code/holonet/docs." }), other);
-  assert.equal(h.inferRepository(repos, { text: "Touches `holonet` and `erics-herdr-linear`." }), null, "two named repositories are ambiguous");
+  assert.equal(h.inferRepository(repos, { text: "It lives in ~/code/holonet." }), other, "a sentence's full stop is not part of the name");
+  assert.equal(h.inferRepository(repos, { text: "Touches ~/code/holonet and ~/code/erics-herdr-linear." }), null, "two named repositories are ambiguous");
+  // A backticked word is not a repository reference, even when a repository has that name.
+  const app = { name: "app", folder: "/Users/me/code/app" }, config = { name: "config", folder: "/Users/me/code/config" };
+  assert.equal(h.inferRepository([app, config, other], { text: "Rename `app` in the `config` file, then run `holonet`." }), null);
+  assert.equal(h.inferRepository([app, other], { text: "The `app` key is wrong." }), null);
   assert.equal(h.inferRepository(repos, { text: "holonet is a word here, not a repository reference" }), null);
   // 4. The project's name, ignoring case and punctuation.
   assert.equal(h.inferRepository(repos, { projectName: "Eric's Herdr Linear" }), real);
