@@ -21,13 +21,15 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const overlays = [], closed = [], commands = [];
 let currentProps = {};
+let liveSpaces = [];
+const sharedState = new Map();
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
   "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {}, TextView: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
-    spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: () => null,
+    spaces: () => liveSpaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [], shared: key => sharedState.get(key) ?? null,
     theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
     setShared: noop, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
     closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
@@ -201,4 +203,28 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
     assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ space: "space-7", action: "new" }));
     assert.deepEqual(closed, ["menu-9", "menu-9", "menu-9", "menu-9"]);
   } finally { currentProps = {}; }
+});
+
+test("status bar shows machine, ahead/behind, uncommitted and running time, with the branch only in hover text", () => {
+  const branch = "r2d2/CHA-4305-header-git-state";
+  const space = { id: "remote/space-1", name: "Example", machine: "build-2", folder: "/home/build/code/repo", branch, active: true,
+    tabs: [{ id: "tab-1", working_since: Date.now() - 12 * 60_000 }] };
+  liveSpaces = [space];
+  sharedState.set("linear-board.git", { key: `build-2\u0000remote/space-1\u0000/home/build/code/repo`,
+    git: { branch, upstream: "origin/main", ahead: 2, behind: 1, changed: 3, added: 40, removed: 2 }, pr: { number: 36, state: "OPEN", checks: "passing" } });
+  try {
+    const bar = board.statusBar();
+    const shown = text(bar);
+    assert.match(shown, /build-2/);
+    assert.match(shown, /↑2 ↓1/);
+    assert.match(shown, /3 uncommitted/);
+    assert.match(shown, /working 12m/);
+    assert.doesNotMatch(shown, new RegExp(branch), "the branch is not repeated in the bar");
+    assert.ok(nodes(bar).some(n => n.attributes.tooltip?.[0] === `${branch} (against origin/main)`));
+    // A different folder's read is never shown for this space.
+    sharedState.set("linear-board.git", { key: "elsewhere", git: { ahead: 9, behind: 9, changed: 9 } });
+    const other = text(board.statusBar());
+    assert.doesNotMatch(other, /↑9|9 uncommitted/);
+    assert.doesNotMatch(other, /undefined|null/);
+  } finally { liveSpaces = []; sharedState.clear(); }
 });

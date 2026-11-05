@@ -36,7 +36,7 @@ async function harness(count = 1) {
     "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, Popup: {}, TextView: {} },
     "./client.js": { default: Client },
     "fs/promises": { readFile: async () => "{}" },
-    "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [],
+    "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
       shared: key => data.get(key), setShared: (key, value) => data.set(key, value), theme: () => ({}),
       setAgentOrder: dummy, run: dummy, props: () => ({}), openOverlay: dummy, closeOverlay: dummy,
       knownAgents: dummy, appHome: () => "/fake", exec: dummy },

@@ -150,6 +150,7 @@ async function harness(options = {}) {
         sharedStore.set(key, value);
       }, setAgentOrder: noop,
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
+      window: () => ({ platform: "macos" }), keys: () => [],
       run: (name, args) => { commands.push({ name, args }); return {}; }, exec, hc, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
       openOverlay: options.openOverlay ?? noop, nextCommand: async () => new Promise(() => {}),
@@ -163,7 +164,7 @@ async function harness(options = {}) {
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
   const link = async specifier => {
-    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js"].includes(specifier)) {
+    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js", "./git.js"].includes(specifier)) {
       const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
       await real.link(link);
       return real;

@@ -46,7 +46,7 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
     } },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": {
-      spaces: () => [], panes: () => [], agents: () => [], machines: () => [],
+      spaces: () => [], panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
       shared: key => state.get(key), setShared: (key, value) => { effects.push({ name: "setShared", key }); state.set(key, value); },
       theme: () => new Proxy({}, { get: () => "#777777" }), props: () => ({ role: "crew" }),
       setAgentOrder: effect("setAgentOrder"), run: effect("run"), exec: effect("exec"),
