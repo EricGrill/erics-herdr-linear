@@ -6,10 +6,10 @@ import { spaces, panes, agents, machines, theme, shared, setShared, setAgentOrde
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
-import { tint, icon, stateIcon, MONO } from "./look.js";
+import { tint, icon, stateIcon, priorityIcon, MONO } from "./look.js";
 import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf, laneSince, elapsed, linearMismatch } from "./board.js";
-import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue } from "./enrich.js";
+import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue, fetchPullRequests, rowPullRequest } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
   crewContext, reassignChoices, requestGate } from "./queue.js";
 import { normalizeConfig } from "./config.js";
@@ -23,6 +23,9 @@ const PREFS = "linear-workspace.agents", ACTIVE = "linear-workspace.workspace";
 // other copy, so only one of them talks to Linear.
 const ENRICH = "linear-board.enrich", FILTER = "linear-board.filters", TEAMS = "linear-board.teams";
 const ENRICH_REQUEST = "linear-board.enrich-request";
+// Pull requests linked to the issues open in spaces, by issue key. Kept apart from ENRICH
+// so a Crew re-read of the enrichment never wipes them.
+const PULLS = "linear-board.pulls";
 const CONFIG = "erics-linear.config";
 const ENRICH_MS = 60000;
 const AGE_TICK_MS = 30000;
@@ -36,6 +39,7 @@ const PASSIVE = ["header", "launcher", "spaces", "issue", "agent", "crew", "filt
 const activeWorkspace = () => shared(ACTIVE) ?? "";
 const sharedIssues = () => shared(DATA)?.[activeWorkspace()]?.issues ?? [];
 const sharedEnrich = () => shared(ENRICH) ?? { rows: [], error: null, fetchedAt: null, partial: false };
+const sharedPulls = () => shared(PULLS)?.pulls ?? {};
 
 // Sidebar and Crew share one publication order, including reads started before a move.
 function enrichmentRequest() {
@@ -43,6 +47,8 @@ function enrichmentRequest() {
   setShared(ENRICH_REQUEST, version);
   return () => shared(ENRICH_REQUEST) === version;
 }
+
+const isClaude = program => /claude/i.test(`${program?.key ?? ""} ${program?.name ?? ""}`);
 
 /** Records for a copy of the mod that has no lists of its own. */
 function sharedRecords(extraIssues = []) {
@@ -142,12 +148,22 @@ export default class LinearWorkspace extends LinearClient {
         } else {
           setShared(ENRICH, { rows: result.rows, error: result.error, fetchedAt: result.fetchedAt, partial: result.partial, on: this.on || null });
         }
+        await this.loadPulls(config, current);
       } catch (error) {
         if (!current()) return;
         setShared(ENRICH, { ...sharedEnrich(), error: `Layout config: ${error?.message ?? error}`, on: this.on || null });
       } finally { this.enriching = false; cx.notify(); resolve(); }
     }));
     return this.enrichPromise;
+  }
+
+  /** Pull requests for the issues open in spaces. A failed read keeps the last good one. */
+  async loadPulls(config, current = () => true) {
+    const ids = this.records().map(r => r.issue?.id).filter(Boolean);
+    const result = await fetchPullRequests({ on: this.on || null, config, ids });
+    if (!current()) return;
+    if (result.error) setShared(PULLS, { ...(shared(PULLS) ?? {}), error: result.error });
+    else setShared(PULLS, { pulls: result.pulls, error: null, fetchedAt: Date.now() });
   }
 
   loadTeams(cx) {
@@ -181,6 +197,7 @@ export default class LinearWorkspace extends LinearClient {
     const extra = lookup.byIdentifier?.get(String(issue.identifier).toUpperCase());
     if (!extra) return issue;
     return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state,
+      priority: Number.isInteger(issue.priority) ? issue.priority : extra.priority,
       teamKey: issue.teamKey ?? extra.teamKey, updatedAt: issue.updatedAt ?? extra.updatedAt ?? null, project: issue.project === undefined ? extra.project : issue.project };
   }
 
@@ -633,6 +650,7 @@ export default class LinearWorkspace extends LinearClient {
     const source = since.source === "herdr" ? `In this state since ${new Date(since.at).toLocaleString()} (Herdr)`
       : since.source === "linear" ? `Herdr has no state change for this space yet; age is from the ticket's last Linear update, ${new Date(since.at).toLocaleString()}`
       : "No state-change time yet";
+    const badges = this.rowBadges(record, is ? this.enrich(is) : null, id);
     return h_flex().id(id).min_w(0).h(49).flex_none().px(8).gap(8).items_center().rounded(6)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
@@ -641,7 +659,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(v_flex().flex_1().min_w(0).gap(3)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
         .child(div().truncate().text_size(11).text_color(color).tooltip(source).child(status)))
-      .children(this.harnessIcons([record]))
+      .when(badges.length > 0, el => el.child(h_flex().id(`${id}-badges`).flex_none().gap(4).items_center().children(badges)))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => {
@@ -650,9 +668,41 @@ export default class LinearWorkspace extends LinearClient {
           else dialog({ action: "attach", attachSpace: { id: record.space.id, name: record.space.name, folder: record.folder, machine: record.space.machine ?? null } });
         }).child(is ? "…" : "+"));
   }
-  harnessIcons(records) {
+  /** The right side of a sidebar row: the agent when it isn't Claude, an Urgent or High
+   *  priority, and the linked pull request's state. Each explains itself on hover. */
+  rowBadges(record, is, id) {
+    const t = theme(), badges = [];
+    badges.push(...this.harnessIcons([record], { skipClaude: true }));
+    if (is && (is.priority === 1 || is.priority === 2)) {
+      const name = is.priority === 1 ? "Urgent" : "High";
+      badges.push(div().id(`${id}-priority`).w(13).h(13).flex_none().tooltip(`Priority: ${name}`).accessibility_label(`Priority: ${name}`)
+        .child(icon(priorityIcon(is.priority), is.priority === 1 ? t.blocked : t.muted, 13)));
+    }
+    const pr = is ? rowPullRequest(sharedPulls()[String(is.identifier).toUpperCase()]) : null;
+    if (pr) badges.push(this.pullBadge(pr, `${id}-pr`));
+    return badges;
+  }
+  pullBadge(pr, id) {
+    const t = theme();
+    const look = {
+      failing: [t.blocked, "failing", "checks failing"],
+      ready: [t.done ?? t.muted, "ready", pr.checks === "passing" ? "checks passed, ready to merge" : "approved, ready to merge"],
+      open: [t.working ?? t.muted, "open", pr.checks === "pending" ? "open, checks running" : "open"],
+      draft: [t.dim, "draft", "draft"],
+      merged: [t.dim, "merged", "merged"],
+    }[pr.state];
+    const [color, word, why] = look;
+    const hover = `Pull request #${pr.number} ${why}: ${pr.title}. Click to open it.`;
+    return h_flex().id(id).flex_none().h(16).px(4).gap(3).items_center().rounded(4)
+      .bg(tint(color, 0.14)).text_size(10).text_color(color).cursor_pointer().hover(s => s.opacity(0.8))
+      .tooltip(hover).accessibility_label(hover)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); cx.open_url(pr.url); })
+      .child(icon("pr", color, 10)).child(word);
+  }
+  harnessIcons(records, { skipClaude = false } = {}) {
     const programs = new Map(records.flatMap(r => r.programs ?? []).map(p => [p.key, p]));
-    return [...programs.values()].map(p => {
+    return [...programs.values()].filter(p => !skipClaude || !isClaude(p)).map(p => {
       const glyph = p.icon ? (p.tint ? svg(p.icon).text_color(theme().muted) : image(p.icon))
         : icon("work", theme().muted, 13);
       return div().w(13).h(13).flex_none().tooltip(p.name).accessibility_label(p.name)

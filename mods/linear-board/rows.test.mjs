@@ -21,13 +21,14 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const overlays = [], closed = [], commands = [];
 let currentProps = {};
+const sharedState = {};
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
   "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {}, TextView: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
-    spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: () => null,
+    spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: key => sharedState[key] ?? null,
     theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
     setShared: noop, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
     closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
@@ -201,6 +202,69 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
     assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ space: "space-7", action: "new" }));
     assert.deepEqual(closed, ["menu-9", "menu-9", "menu-9", "menu-9"]);
   } finally { currentProps = {}; }
+});
+
+test("CHA-4304: sidebar rows hide the Claude icon but keep other agents and the … menu", () => {
+  const claude = { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: true };
+  const row = board.workRow({ ...record, programs: [claude] }, "claude-row");
+  assert.ok(!nodes(row).some(node => node.asset === claude.icon), "no repeated Claude icon");
+  assert.ok(!nodes(row).some(node => node.attributes.id?.[0] === "claude-row-badges"), "no empty badge strip");
+  assert.equal(nodes(row).find(node => node.attributes.id?.[0] === "claude-row-details").nodes[0], "…");
+  const mixed = board.workRow({ ...record, programs: [claude, program] }, "mixed-row");
+  assert.ok(nodes(mixed).some(node => node.asset === program.icon), "Codex still shows");
+  assert.ok(!nodes(mixed).some(node => node.asset === claude.icon));
+  // The compact strip is unchanged and still names every harness.
+  assert.ok(nodes(board.spaceRow({ ...record, programs: [claude] }, "strip-claude")).some(node => node.asset === claude.icon));
+});
+
+test("CHA-4304: Urgent and High tickets are marked; Medium, Low and none are not", () => {
+  const marked = p => nodes(board.workRow({ ...record, programs: [], issue: { ...issue, priority: p } }, `prio-${p}`))
+    .find(node => node.attributes.id?.[0] === `prio-${p}-priority`);
+  assert.deepEqual(marked(1).attributes.tooltip, ["Priority: Urgent"]);
+  assert.deepEqual(marked(2).attributes.tooltip, ["Priority: High"]);
+  for (const p of [0, 3, 4, undefined]) assert.equal(marked(p), undefined, `priority ${p}`);
+  // Priority filled in from enrichment when the herdr-linear issue lacks it.
+  const index = { byIdentifier: new Map([["DEMO-42", { priority: 1 }]]) };
+  assert.equal(board.enrich({ identifier: "DEMO-42" }, index).priority, 1);
+  assert.equal(board.enrich({ identifier: "DEMO-42", priority: 3 }, index).priority, 3);
+});
+
+test("CHA-4304: a linked pull request shows its state, explains it on hover and opens on click", () => {
+  const pr = (state, extra = {}) => ({ url: "https://github.com/acme/app/pull/7", repo: "acme/app", number: 7, title: "Fix a bug", state, checks: null, ...extra });
+  const badge = (prs, id) => {
+    sharedState["linear-board.pulls"] = { pulls: { "DEMO-42": prs } };
+    try {
+      return nodes(board.workRow({ ...record, programs: [] }, id)).find(node => node.attributes.id?.[0] === `${id}-pr`);
+    } finally { delete sharedState["linear-board.pulls"]; }
+  };
+  const failing = badge([pr("open"), pr("failing", { number: 8 })], "pr-a");
+  assert.match(text(failing), /failing/);
+  assert.match(failing.attributes.tooltip[0], /^Pull request #8 checks failing: Fix a bug\. Click to open it\.$/);
+  assert.match(badge([pr("ready", { checks: "passing" })], "pr-b").attributes.tooltip[0], /ready to merge/);
+  assert.match(text(badge([pr("open")], "pr-c")), /open/);
+  assert.match(text(badge([pr("merged")], "pr-d")), /merged/);
+  assert.equal(badge([pr("closed")], "pr-e"), undefined, "closed pull requests are not shown");
+  assert.equal(badge([], "pr-f"), undefined);
+
+  const opened = [];
+  let stopped = false;
+  failing.attributes.on_click[0]({}, { stop_propagation: () => { stopped = true; }, open_url: url => opened.push(url) });
+  assert.deepEqual(opened, ["https://github.com/acme/app/pull/7"]);
+  assert.ok(stopped, "clicking the badge must not also select the row");
+});
+
+test("CHA-4304: badges sit in a fixed strip and the title truncates, so 300px rows cannot overflow", () => {
+  sharedState["linear-board.pulls"] = { pulls: { "DEMO-42": [{ url: "https://github.com/acme/app/pull/7", number: 7, title: "x", state: "failing" }] } };
+  try {
+    const row = board.workRow({ ...record, issue: { ...issue, priority: 1, title: "A very long title ".repeat(10) } }, "wide");
+    assert.ok(row.attributes.min_w, "row may shrink");
+    const strip = nodes(row).find(node => node.attributes.id?.[0] === "wide-badges");
+    assert.ok(strip.attributes.flex_none);
+    assert.equal(strip.nodes.length, 3, "agent, priority and pull request");
+    const title = row.nodes.find(node => node.type === "column");
+    assert.ok(title.attributes.flex_1 && title.attributes.min_w, "the text column takes the remaining width");
+    assert.ok(title.nodes[0].attributes.truncate, "and truncates the title");
+  } finally { delete sharedState["linear-board.pulls"]; }
 });
 
 test("sidebar rows show time in state, hide a matching Linear status and list the most recent first", () => {
