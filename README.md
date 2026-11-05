@@ -84,7 +84,10 @@ Select **Computer**, then **Repository**. The repository list comes from
 the selected computer's own `~/code`; it never clones. **New repository** is the default:
 when no repository is chosen, **Start agent** and **Create & start** make a new Git
 repository in that computer's `~/code`, named from the ticket title (a taken name gets
-`-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. Plain
+`-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. That
+repository is also marked trusted in the computer's Claude Code config (`~/.claude.json`), so
+Claude doesn't ask to trust it. Claude's trust stops at each Git repository, so trusting `~/code`
+alone isn't enough. Without `python3` or a Claude config, this step is skipped. Plain
 **Create issue** makes nothing. A ticket whose saved computer cannot be resolved stays
 blocked rather than falling back to a new repository.
 Linear's **Start agent**, **Create & start**, and additional agent tabs use each supported
