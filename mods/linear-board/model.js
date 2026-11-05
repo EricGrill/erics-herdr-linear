@@ -34,6 +34,18 @@ export function issueLabel(issue) {
   return `${issue.identifier}${project ? ` (${project})` : ""}`;
 }
 
+/** A sidebar row's first line: the key and the title, so the title is what survives truncation. */
+export function issueHeadline(issue) {
+  const title = issue?.title?.trim();
+  return `${issue.identifier}${title ? ` · ${title}` : ""}`;
+}
+
+/** The hover text for a sidebar row: the full title, then the project. */
+export function issueHover(issue) {
+  const project = issue?.project?.name?.trim();
+  return `${issueHeadline(issue)}${project ? ` (${project})` : ""}`;
+}
+
 export function workRecords({ allSpaces, allPanes, allAgents, issues, links, workspace }) {
   return allSpaces.map(space => {
     const ownAgents = allAgents.filter(a => a.space === space.id);
@@ -68,4 +80,41 @@ export function projectGroups(projects, records, attention = []) {
 
 export function taskContext(issue, description = "") {
   return `Work on Linear issue ${issue.identifier}: ${issue.title}\n${issue.url ?? ""}\n\n${description}\n\nKeep this work scoped to ${issue.identifier}. Use this issue for progress and findings; create linked issues for separate follow-up work. Verify the result and report checks and remaining risks. Do not mark the issue Done just because the agent run finishes.`;
+}
+
+/** The Linear desktop app's link for a linear.app web link: the same path under linear://.
+ *  Anything that is not a linear.app link has no app link. */
+export function linearAppUrl(url) {
+  const m = /^https:\/\/linear\.app\/([^?#]+)/i.exec(String(url ?? ""));
+  return m ? `linear://${m[1].replace(/\/+$/, "")}` : null;
+}
+
+/** What right-clicking an issue offers: open it in the Linear app, in the browser, or copy
+ *  its link. An issue without a web link offers nothing. */
+export function issueMenuItems(issue) {
+  const url = issue?.url ? String(issue.url) : "";
+  if (!url) return [];
+  const app = linearAppUrl(url);
+  return [
+    ...(app ? [{ label: "Open in Linear app", action: "open", url: app }] : []),
+    { label: "Open in browser", action: "open", url },
+    { label: "Copy link", action: "copy", url },
+  ];
+}
+
+/** The space's own entries, after the issue's when a space with a ticket is right-clicked:
+ *  the same Herdr commands as Herdr's space menu. `git` is "main" (a repository's own
+ *  checkout), "linked" (a worktree) or null (not a repository, or not known yet). */
+export function spaceMenuItems(space, git = null) {
+  const id = space?.id;
+  if (!id) return [];
+  return [
+    { label: "Rename", action: "run", command: "space.rename", args: { id } },
+    ...(git ? [
+      { label: "New worktree", action: "worktree", args: { space: id, action: "new" } },
+      { label: "Open worktree", action: "worktree", args: { space: id, action: "open" } },
+    ] : []),
+    ...(git === "linked" ? [{ label: "Remove worktree", action: "worktree", args: { space: id, action: "remove" } }] : []),
+    { label: "Close", action: "run", command: "space.close", args: { id } },
+  ];
 }

@@ -1,6 +1,7 @@
 name: Verify layout
 on:
   push:
+    branches-ignore: [verified]
   pull_request:
 permissions:
   contents: read
@@ -15,3 +16,108 @@ jobs:
       - run: npm test
       - run: npm run test:installer
       - run: npm run check
+
+  # A verified main commit gets the next patch version (package.json and the sidebar
+  # footer, via scripts/bump_version.py) in a release commit on main, unless the merge
+  # set the version itself. That commit becomes the deploy commit: each machine's
+  # updater (scripts/auto_update.py, launchd/systemd timer) pulls the verified branch
+  # and reports back as a deploy/<machine> commit status; an offline machine stays pending.
+  publish:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      statuses: write
+    concurrency:
+      group: deploy-branch
+      cancel-in-progress: false
+    env:
+      MACHINES: omarchy2 snoke ventress
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Decide what to publish
+        id: move
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+          main=$(git rev-parse origin/main)
+          if git fetch --quiet origin +refs/heads/verified:refs/remotes/origin/verified 2>/dev/null \
+             && git merge-base --is-ancestor "$GITHUB_SHA" origin/verified; then
+            echo "verified already includes $GITHUB_SHA; nothing to publish."
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+          elif [ "$main" = "$GITHUB_SHA" ]; then
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(git rev-parse "$main^")" = "$GITHUB_SHA" ] \
+               && git log -1 --format=%s "$main" | grep -q '^chore: release v'; then
+            # A rerun after the release commit was pushed but before verified moved.
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+            echo "released=$main" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved on to ${main::7}; that push's run publishes it."
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Raise the patch version in a release commit
+        id: release
+        if: steps.move.outputs.moved == 'true'
+        env:
+          RELEASED: ${{ steps.move.outputs.released }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASED" ]; then
+            git checkout --quiet "$RELEASED"
+          else
+            # A merge that changed the version itself is released as it is.
+            version=$(python3 scripts/bump_version.py --since "$GITHUB_SHA^")
+            if ! git diff --quiet; then
+              python3 scripts/check.py
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit --quiet -am "chore: release v$version" -m "Automatic patch release of ${GITHUB_SHA::7} (CHA-4286)."
+              # No --force: fails if main moved, and that push's run releases instead.
+              git push origin HEAD:refs/heads/main
+            fi
+          fi
+          echo "target=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      # Pending first, so a fast machine's report cannot be overwritten by it.
+      - name: Mark each machine pending
+        if: steps.move.outputs.moved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.release.outputs.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Deploying v$VERSION at ${TARGET::7}"
+            echo
+            echo "| Machine | Status |"
+            echo "| -- | -- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for machine in $MACHINES; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$TARGET" \
+              -f state=pending -f context="deploy/$machine" \
+              -f description="Waiting for $machine to install v$VERSION" > /dev/null
+            echo "| $machine | pending: its updater reports the installed commit and sidebar version as \`deploy/$machine\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Move the verified branch to the release commit
+        if: steps.move.outputs.moved == 'true'
+        env:
+          TARGET: ${{ steps.release.outputs.target }}
+        # No --force: verified only ever fast-forwards along main.
+        run: git push origin "$TARGET:refs/heads/verified"
+      # If the branch did not move, no machine will install this commit; say so.
+      - name: Clear the pending statuses if the branch did not move
+        if: failure() && steps.release.outputs.target != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.release.outputs.target }}
+        run: |
+          for machine in $MACHINES; do
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$TARGET" \
+              -f state=error -f context="deploy/$machine" \
+              -f description="Not deployed: CI could not move the verified branch" > /dev/null || true
+          done

@@ -26,6 +26,7 @@ MAC_KEYS = {
     "cmd-shift-a": "linear-board.agent", "cmd-shift-f": "linear-board.files",
     "cmd-shift-e": "linear-board.panel", "cmd-shift-x": "linear-board.clear",
     "cmd-alt-a": "mod.open:erics-linear-agents",
+    "cmd-w": "linear-workspace-tabs.close",
 }
 LINUX_KEYS = {
     "alt-shift-c": "linear-board.crew", "alt-shift-i": "linear-board.issue",
@@ -155,6 +156,9 @@ def activate(binary, env):
     raise ValueError("Herdr did not confirm erics-linear as the selected layout")
 
 
+LEGACY_LINEAR_SHORTCUTS = ("mod.open:EricsLinear", "mod.open:linear")
+
+
 def install(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--update", action="store_true", help="Replace an earlier install, with a backup")
@@ -191,6 +195,13 @@ def install(argv=None):
     if shadowed:
         raise ValueError("Terminal bindings take priority over layout shortcuts: " + ", ".join(shadowed))
     keys[SCOPE] = {**old, **desired}
+    # Retire the personal OAuth popup only when its exact legacy binding exists.
+    # The board uses the configured API key; unrelated global shortcuts stay intact.
+    # macOS installed the popup as "EricsLinear", Linux as "linear". Its worktree
+    # flow skips repository routing and local-branch preparation, so on Linux
+    # Start failed with "exit status 128" in repositories without origin/main.
+    if keys.get("global", {}).get("cmd-l") in LEGACY_LINEAR_SHORTCUTS:
+        keys["global"]["cmd-l"] = "mod.open:linear-board"
     keys_bytes = (json.dumps(keys, indent=2) + "\n").encode()
     config_bytes = args.config.expanduser().read_bytes() if args.config else None
     if config_bytes is not None:

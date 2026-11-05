@@ -115,6 +115,7 @@ export function loadTarget(view, cx, machine, { retain = null, preferredFolder =
       view.agentChoices = agents.value;
       view.agentKey = agents.value.find(a => a.key === preferredAgent)?.key ?? agents.value[0]?.key ?? "";
     } else view.launchError = `Could not check agents: ${agents.reason?.message ?? agents.reason}`;
+    if (view.screen === "create" && view.form?.capture && !view.form.draft?.uncertain) view.saveCapture?.(cx);
     cx.notify();
   });
 }
@@ -133,6 +134,7 @@ export async function validateWorktreeRouting(target, workspaceKey) {
   let config;
   try { config = JSON.parse(result.stdout || "{}"); }
   catch { throw new Error("This computer’s herdr-linear config.json is invalid JSON."); }
+  if (config?.base != null && typeof config.base !== "string") throw new Error("This computer’s herdr-linear base configuration is invalid.");
   const repos = config?.repos ?? {};
   if (typeof repos !== "object" || Array.isArray(repos) || Object.values(repos).some(v => v !== null && typeof v !== "string")) throw new Error("This computer’s herdr-linear repository configuration is invalid.");
   let override = repos[""];
@@ -141,4 +143,22 @@ export async function validateWorktreeRouting(target, workspaceKey) {
     if (slash >= 0 && key.slice(0, slash).toLowerCase() === (workspaceKey ?? "").toLowerCase() && key.slice(slash + 1) === "") override = value;
   }
   if (override) throw new Error("Cannot honor the selected repository: this computer’s herdr-linear config.json contains an empty-team repository override. Remove that override before starting this task.");
+  return config?.base ?? "";
+}
+
+// The pinned backend defaults to origin/main even for a new, local-only repo.
+// An existing issue branch avoids that missing ref without inventing an origin.
+const LOCAL_WORK_BRANCH = `
+set -eu
+git -C "$1" check-ref-format --branch "$2" >/dev/null
+if git -C "$1" remote get-url origin >/dev/null 2>&1; then exit 0; fi
+if git -C "$1" show-ref --verify --quiet "refs/heads/$2"; then exit 0; fi
+git -C "$1" branch --no-track -- "$2" HEAD`;
+
+export async function prepareWorktreeBranch(target, branch, base = "") {
+  available(target.machine);
+  if (base) return; // Preserve the user's explicit backend base selection.
+  if (typeof branch !== "string" || !branch) throw new Error("Choose a valid work branch before preparing the worktree.");
+  const result = await exec("sh", ["-c", LOCAL_WORK_BRANCH, "herdr-local-work-branch", target.folder, branch], { on: target.machine ?? null });
+  if (result.code !== 0) throw new Error(result.stderr?.trim() || "Could not prepare the local work branch on the selected computer.");
 }

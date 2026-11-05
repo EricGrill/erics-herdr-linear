@@ -52,7 +52,7 @@ const answer = (nodes, pageInfo = { hasNextPage: false, endCursor: null }) =>
   JSON.stringify({ data: { issues: { pageInfo, nodes } } });
 
 const node = (identifier, over = {}) => ({
-  id: `uuid-${identifier}`, identifier,
+  id: `uuid-${identifier}`, identifier, updatedAt: "2026-11-01T12:00:00.000Z",
   delegate: null, assignee: { displayName: "sample-user" },
   state: { name: "Todo", type: "unstarted" },
   project: { id: "p1", name: "Helper Project" }, team: { key: "DEMO" },
@@ -99,7 +99,7 @@ test("a delegated issue parses into usable rows", async () => {
     node("DEMO-3589", {
       delegate: { id: "agent-spock", name: "Spock", displayName: "spock", avatarUrl: "https://public.linear.app/a.png" },
       state: { name: "Needs Human", type: "started" },
-      labels: { nodes: [{ name: "agent:stalled" }, { name: "needs-eric" }] },
+      labels: { nodes: [{ name: "agent:stalled" }, { name: "needs-eric", color: "#EB5757" }] },
     }),
   ]));
   assert.equal(parsed.error, null);
@@ -107,6 +107,8 @@ test("a delegated issue parses into usable rows", async () => {
   same(parsed.rows, [{
     id: "uuid-DEMO-3589",
     identifier: "DEMO-3589",
+    priority: 0,
+    updatedAt: "2026-11-01T12:00:00.000Z",
     delegate: { id: "agent-spock", name: "Spock", avatarUrl: "https://public.linear.app/a.png", eligible: false },
     contextIncomplete: ["labels"],
     assignee: "sample-user",
@@ -114,6 +116,7 @@ test("a delegated issue parses into usable rows", async () => {
     project: { id: "p1", name: "Helper Project" },
     teamKey: "DEMO",
     labels: ["agent:stalled", "needs-eric"],
+    labelColors: { "needs-eric": "#EB5757" },
   }]);
 });
 
@@ -290,4 +293,61 @@ test("Doppler fallback receives literal configured names and an environment key 
     assert.equal(envResult.status, 0, envResult.stderr);
     assert.equal(existsSync(report), false, "Doppler must not run when the environment key is present");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("CHA-4304: pull request attachments parse into open, failing, ready, draft, merged and closed", async () => {
+  const { api } = await load(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const at = (metadata, url = "https://github.com/acme/app/pull/12") => ({ title: "Fix it", url, sourceType: "github", metadata });
+  const state = m => api.pullRequestOf(at(m))?.state;
+  assert.equal(state({ status: "open" }), "open");
+  assert.equal(state({}), "open", "no metadata still shows an open pull request");
+  assert.equal(state({ status: "draft" }), "draft");
+  assert.equal(state({ status: "merged" }), "merged");
+  assert.equal(state({ status: "closed" }), "closed");
+  assert.equal(state({ status: "approved" }), "ready");
+  assert.equal(state({ status: "open", checks: [{ conclusion: "success" }, { conclusion: "skipped" }] }), "ready");
+  assert.equal(state({ status: "open", checks: [{ conclusion: "success" }, { conclusion: "failure" }] }), "failing");
+  assert.equal(state({ status: "approved", checksStatus: "FAILURE" }), "failing", "failing checks win over approval");
+  assert.equal(state({ status: "open", checks: [{ status: "in_progress" }] }), "open");
+  assert.equal(state({ status: "merged", checks: [{ conclusion: "failure" }] }), "merged");
+  assert.equal(api.pullRequestOf(at({}, "https://github.com/acme/app")), null, "a repository link is not a pull request");
+  assert.equal(api.pullRequestOf(at({}, "https://linear.app/x/issue/A-1")), null);
+  same(api.pullRequestOf(at({ status: "open" })), { url: "https://github.com/acme/app/pull/12", repo: "acme/app", number: 12,
+    title: "Fix it", state: "open", checks: null, approved: false, updatedAt: null });
+
+  assert.equal(api.checksOf(null), null);
+  assert.equal(api.checksOf({ checks: [] }), null);
+  assert.equal(api.checksOf({ checks: [{ conclusion: "success" }, { status: "queued" }] }), "pending");
+});
+
+test("CHA-4304: a row shows the most urgent open pull request and never a closed one", async () => {
+  const { api } = await load(async () => ({ code: 0, stdout: "", stderr: "" }));
+  const pr = (n, state, updatedAt = null) => ({ number: n, state, updatedAt });
+  assert.equal(api.rowPullRequest([pr(1, "merged"), pr(2, "open"), pr(3, "failing")]).number, 3);
+  assert.equal(api.rowPullRequest([pr(1, "merged"), pr(2, "ready")]).number, 2);
+  assert.equal(api.rowPullRequest([pr(1, "open", "2026-01-01"), pr(2, "open", "2026-02-01")]).number, 2);
+  assert.equal(api.rowPullRequest([pr(1, "closed")]), null);
+  assert.equal(api.rowPullRequest(undefined), null);
+});
+
+test("CHA-4304: pull requests are read only for the given issues, in one bounded query", async () => {
+  const reply = JSON.stringify({ data: { issues: { nodes: [
+    { id: "u1", identifier: "demo-1", attachments: { nodes: [
+      { title: "PR", url: "https://github.com/acme/app/pull/3", sourceType: "github", metadata: { status: "open" } },
+      { title: "Repo", url: "https://github.com/acme/app", sourceType: "github", metadata: {} },
+    ] } },
+    { id: "u2", identifier: "DEMO-2", attachments: { nodes: [] } },
+  ] } } });
+  const { api, calls } = await load(async () => ({ code: 0, stdout: reply, stderr: "" }));
+  const none = await api.fetchPullRequests({ config: { enrichment: { enabled: true } }, ids: [] });
+  same(none, { pulls: {}, error: null });
+  assert.equal(calls.length, 0, "no issues, no request");
+  const result = await api.fetchPullRequests({ config: { enrichment: { enabled: true } }, ids: ["u1", "u2", "u1", null] });
+  assert.equal(result.error, null);
+  assert.deepEqual(Object.keys(result.pulls), ["DEMO-1", "DEMO-2"]);
+  assert.equal(result.pulls["DEMO-1"].length, 1);
+  assert.equal(result.pulls["DEMO-1"][0].number, 3);
+  assert.equal(calls.length, 1);
+  const bad = api.parsePullRequests(JSON.stringify({ errors: [{ message: "nope" }] }));
+  same(bad, { pulls: {}, error: "nope" });
 });

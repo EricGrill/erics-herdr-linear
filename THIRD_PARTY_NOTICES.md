@@ -18,6 +18,7 @@ The following are copies or adaptations of Herdr's shipped interface components:
 | `mods/erics-linear-agents/` | `defaults/mods/agents/` | Agent popup sizing, title/shortcut hint, popup-aware compact mode, close-on-selection |
 | `mods/erics-linear-chrome/` | `defaults/mods/workspace-chrome/` | Erics Linear branding and cloned asset paths |
 | `mods/linear-workspace-tabs/` | `defaults/mods/tabs/` | Ticket-based plus-menu launcher and cloned asset paths |
+| `mods/linear-board/main.js` (`status` role) | `defaults/mods/workspace-status/` | Status bar shows git ahead/behind, uncommitted changes and agent running time; branch moved to hover text |
 | `layouts/erics-linear.json` | `defaults/layouts/main.json` | Spaces-first sidebar, custom context header, custom mods and issue/delegate panels |
 
 These upstream portions remain subject to Apache-2.0. Modification notices and

@@ -116,6 +116,14 @@ export class LinearAPI {
         const rows = await this.pages(`query TaskFind($filter: IssueFilter, $after: String) { issues(first: 100, after: $after, filter: $filter) { nodes { ${ISSUE} } ${PAGE} } }`, { filter }, d => d.issues);
         return { issues: rows.map(issueOf) };
       }
+      case "search": {
+        // Linear's own relevance search over every team's tickets, open or closed.
+        const term = String(req.query ?? "").trim();
+        if (term.length < 2) return { issues: [] };
+        const data = await this.query(`query TaskSearch($term: String!, $first: Int) { searchIssues(term: $term, first: $first) { nodes { ${ISSUE} } } }`, { term, first: 20 });
+        if (!Array.isArray(data.searchIssues?.nodes)) throw new Error("Linear returned no search results");
+        return { issues: data.searchIssues.nodes.map(n => ({ ...issueOf(n), group: "" })) };
+      }
       case "detail": {
         const { issue: n } = await this.query(`query TaskDetail($id: String!) { issue(id: $id) { ${ISSUE} description priorityLabel dueDate cycle { number name } labels(first: 50) { nodes { name color } } attachments(first: 25) { nodes { title url } } } }`, { id: req.issue });
         const issue = issueOf(n);

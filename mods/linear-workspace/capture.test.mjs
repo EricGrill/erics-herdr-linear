@@ -29,6 +29,23 @@ async function helper(mod, reply = { code: 0, stdout: JSON.stringify(completed({
 }
 
 for (const mod of ["linear-workspace", "linear-board"]) {
+  test(`${mod}: stable draft storage migrates visible legacy drafts and tombstones prevent resurrection`, async () => {
+    const { api } = await helper(mod), shared = new Map(), local = storage();
+    const key = "linear.idea-draft.v1:one";
+    const legacy = api.saveDraft(local, "one", initial);
+    const stable = api.draftStorage(local, key => shared.get(key) ?? null, (key, value) => shared.set(key, value));
+    assert.equal(api.loadDraft(stable, "one").id, legacy.id);
+    const otherLocal = storage();
+    const other = api.draftStorage(otherLocal, key => shared.get(key), (key, value) => shared.set(key, value));
+    const next = api.saveDraft(other, "one", { ...legacy, idea: "Edited in a new overlay" });
+    assert.throws(() => api.saveDraft(stable, "one", legacy), /another window/);
+    api.discardDraft(other, "one", next);
+    assert.ok(local.getItem(key), "an older overlay still has its checkpoint");
+    assert.equal(api.loadDraft(stable, "one"), null, "discarded ideas cannot reappear from old checkpoints");
+    assert.throws(() => api.saveDraft(stable, "one", legacy), /another window/);
+    const replacement = api.saveDraft(other, "one", { ...initial, idea: "New draft" });
+    assert.notEqual(replacement.id, legacy.id);
+  });
   test(`${mod}: draft round-trip retains editable context and is isolated by workspace`, async () => {
     const { api } = await helper(mod), store = storage();
     const saved = api.saveDraft(store, "workspace-one", initial);

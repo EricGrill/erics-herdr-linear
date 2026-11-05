@@ -7,11 +7,35 @@ spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **
 ![Eric's Herdr Linear](preview.png)
 
 The layout ID is `erics-linear`; its window header reads **Erics Linear**.
+The expanded sidebar shows **Layout v<version>** beside Settings, using this repository's
+`package.json` version. CI raises it with every deploy (see
+[Automatic updates](#automatic-updates-on-merge-to-main)); `npm run check` verifies that
+the sidebar-footer version in `layouts/erics-linear.json` matches.
 
 ## What it does
 
 - Puts work needing attention before finished, working, and idle spaces.
 - Shows each space's Linear ticket and machine. Click a space to return to its terminal.
+- Gives each machine its own colored dot, the same after every restart, and says when a
+  remote machine is offline or reconnecting, on its rows and under Add machine.
+- Keeps the current group's header (Needs you, Done, Working, Idle) pinned while you scroll.
+- Shows the Needs you count beside Erics Linear in the window header, even with the
+  sidebar collapsed. It hides at zero.
+- Right-click a space for its menu: with a Linear ticket, Open in Linear app, Open in
+  browser and Copy link come first, then Rename, New/Open worktree, Close. Without a ticket,
+  Herdr's own space menu. Right-click a tab for Rename, New tab, Close. Closing a space does
+  not change its Linear ticket.
+- Pin, tag and color spaces with Linear labels, so they are the same on every machine.
+  Right-click a space or issue for **Pin to top**/**Unpin** and **Tags…**. Pinning adds the
+  workspace label `Pinned` (made on first use); pinned spaces show under PINNED above the
+  other groups and keep their own state line. **Tags…** lists the workspace's and the
+  issue's team's labels, leaving out routing labels (`agent:`, `repo:`, …) and label
+  groups; typing a new name offers **Create tag**. A row shows up to two tags as chips in
+  their Linear colors, and a stripe in its first tag's color. Recolor a tag in Linear.
+  Each change adds or removes one label and is read back from Linear before it shows.
+- Right-click an issue (Projects rows, the issue panel, the task dialog's list and issue
+  screen, Crew) for Open in Linear app, Open in browser, Copy link. The app link is the
+  web link under `linear://`; it needs the Linear desktop app on this computer.
 - Keeps the full project tree in a separate popup, with search and task creation.
 - Shows live Herdr agents in a scrollable popup, including remote agents and subagents.
 - Shows each Linear agent's full open issue queue in Crew, with attention reasons, issue
@@ -20,56 +44,89 @@ The layout ID is `erics-linear`; its window header reads **Erics Linear**.
   to a ticket without moving its files or changing its branch.
 - Lets you choose the execution computer, then an existing Git repository under that
   computer's `~/code`, instead of using a local-only folder picker.
-- Retains Herdr's terminal tabs, pane controls, Files, Changes, and status bar.
+- Retains Herdr's terminal tabs, pane controls, Files and Changes.
+- The issue header reads status · priority · delegate or assignee · pull request and
+  checks · lines added/removed. The status bar shows the machine, commits ahead/behind,
+  uncommitted changes and how long the agent has been working, for local and remote
+  worktrees alike; the branch is in its hover text. Fields with no value are left out.
 
 The grouping is a view of work, not a workflow automation. Finishing an agent run does
 not mark a Linear ticket Done. Commands typed directly into a terminal can still start
 unlinked work; the issue header identifies spaces that have no ticket.
 
-## Capture an idea first
+## Create a task or capture an idea
 
-Choose **Capture idea** from the issue list or a project's view. Write the thought in
-one field. Team and project remain visible and editable; computer, repository and agent
-selection wait until you choose to start work. The existing **New task** flow retains
-its execution checks.
+Choose **New issue** from the issue list, a project, or the launcher. Write the request in
+one multiline field, then **Create issue**. The first nonempty request line supplies
+the ticket title; the full request is retained as its description. The current task's project
+and repository, or your previous compatible choices, are prefilled and editable.
+Status, priority and assignment are remembered from the previous successful task and
+remain available under **Ticket details**. Repository choices stay scoped to the
+Linear workspace, project and computer. Existing capture commands and shortcuts open
+the same form.
 
-Capture saves a local draft as you type, scoped to the selected Linear workspace in
-that mod. Closing the dialog or restarting Herdr restores it. **Discard draft** removes
-it explicitly. Storage failures and conflicting revisions are shown instead of silently
-replacing another window's draft. Drafts remain local to this app and are not synced
-between computers or the two mods.
+New task saves a local draft as you type, scoped to the selected Linear workspace in
+that mod, using a stable persisted app key across dialog instances.
+Closing the dialog or restarting Herdr restores it, including the selected
+repository. **Discard draft** removes it explicitly. Storage failures and conflicting
+revisions are shown instead of silently replacing another window's draft. Drafts remain
+local to this app and are not synced between computers or the two mods. Existing idea
+drafts open in this form with their original source preserved.
 
-**Shape ticket** makes an immediate local template you can edit. **Improve with AI** is
-an explicit optional action that sends the idea text to OpenAI and returns a proposed
-title, problem, outcome, acceptance checks and open questions. It uses `gpt-6-luna` via
-the Responses API with tools disabled and `store: false`; this does not disable all
+**Improve with AI** is optional. It sends the source idea, or the entered request, to OpenAI for editable suggestions. It uses the existing `gpt-6-luna`
+Responses integration with tools disabled and `store: false`; this does not disable all
 provider retention. It requires `OPENAI_API_KEY` in the Herdr process environment and
 uses the account's API billing. Keys are not placed in preferences or command arguments.
 No agent session or worktree is started for shaping. Without a key or on failure, the
-local draft and basic ticket path remain available.
+local draft and direct creation remain available. Shaped tickets preserve their source
+idea; its **Edit source idea** control also offers the existing local **Shape ticket**
+template.
 
-Review the title and description, then choose **Create ticket**. The original idea is
-preserved in the ticket description. Capture-only tickets do not contain a fabricated
-execution target. After creation, choose **Start agent** and select a validated computer
-and existing repository. A failed or unconfirmed create retains the draft and asks you
-to check recent issues before retrying, since a lost response can follow a successful
-write. Finishing a capture or agent run does not mark an issue Done.
+**Create issue** validates and saves the selected repository with the ticket. A task can
+also be created without a repository, then assigned one later. **Create & start** requires
+an installed agent. Without a chosen repository it first makes a new one (see below); its
+validated target and submitted text are carried through to that launch. A failed or unconfirmed create retains the draft
+and asks you to check recent issues before retrying, since a lost response can follow a
+successful write. Finishing a task creation or agent run does not mark an issue Done.
 
 ## Choose where a task runs
 
-In New task, select **Computer**. The matching repository is selected automatically
-from that computer's own `~/code`, using the project name first, then the focused
-repository's name (including Herdr worktrees). This also works after switching
-computers. You do not need to choose a local storage path; use **Repository** to
-override the default or choose when no name matches.
-It does not create or clone a missing repository.
+In New task, write the request in **What needs doing?**. The title uses the first
+line, shortened to 100 characters; the full text is saved as the description.
+**Ticket details** lets you change the remembered status, priority and assignee.
+Team and project remain editable. These choices are remembered per Linear workspace;
+a removed or completed status falls back to an available open status.
+
+Select **Computer**. A matching repository is selected automatically from that
+computer's own `~/code`, using the project name first, then the focused repository's
+name (including Herdr worktrees). This also works after switching computers, without
+choosing a local storage path. Use **Repository** to override the default. It never
+clones. **New repository** is the fallback when no name matches:
+when no repository is chosen, **Start agent** and **Create & start** make a new Git
+repository in that computer's `~/code`, named from the ticket title (a taken name gets
+`-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. That
+repository is also marked trusted in the computer's Claude Code config (`~/.claude.json`), so
+Claude doesn't ask to trust it. Claude's trust stops at each Git repository, so trusting `~/code`
+alone isn't enough. Without `python3` or a Claude config, this step is skipped. Plain
+**Create issue** makes nothing. A ticket whose saved computer cannot be resolved stays
+blocked rather than falling back to a new repository.
+Linear's **Start agent**, **Create & start**, and additional agent tabs use each supported
+agent's unattended permission mode on the selected computer. This includes Cursor's
+`--force` and current Kimi Code's `--auto`, alongside Codex and Claude Code.
+Pi, PiG, and current Amp already execute tools without built-in approval prompts.
+See [agent permission modes](docs/CHA-4235-agent-permissions.md) for the complete mapping,
+version assumptions, and policy limits. Existing sessions retain their launch settings.
+
 Installed-agent choices are refreshed for that computer. Changing computers clears
 stale repository and agent choices, and unavailable computers cannot be used.
 New tasks remember the last project selected or visited in each Linear workspace.
 An explicit repository choice overrides the name default and saves that project's
-computer and repository for future tasks, with separate choices for each computer. These preferences persist in this
+computer and repository for future tasks
+(or the workspace's choice when no project is selected),
+with separate repository choices for each computer. Agent selections are also remembered
+for each computer. These preferences persist in this
 Herdr app and are shared by both Linear layouts. A missing saved repository stays
-unselected until you choose an existing one.
+unselected; choose one, or Start makes a new one.
 The pinned worktree backend trims path output, so paths containing newlines or ending
 in whitespace are rejected before any ticket or worktree mutation.
 
@@ -231,8 +288,42 @@ bash scripts/update.sh
 ```
 
 The updater uses a fast-forward Git pull and then installs the checked-out version. A
-dirty or divergent checkout needs to be resolved rather than discarded. There is no
-unattended background updater.
+dirty or divergent checkout needs to be resolved rather than discarded.
+
+### Automatic updates on merge to main
+
+When a push to `main` passes CI (`npm test`, `npm run test:installer`, `npm run check`),
+CI raises the patch version (0.1.1 → 0.1.2) in `package.json` and the sidebar footer
+together, commits that to `main` as `chore: release v<version>`, fast-forwards the
+`verified` branch to the release commit and marks each machine as a pending
+`deploy/<machine>` commit status. Turn on the updater once per machine, from its checkout:
+
+```sh
+python3 scripts/auto_update.py install --machine snoke   # omarchy2, snoke, ventress
+```
+
+This adds a launchd agent on macOS or a systemd user timer on Linux. Every five minutes
+(and after login or wake) it fetches `verified` and, when that moved, runs
+`scripts/update.sh --to <commit>`: a fast-forward to exactly the verified commit, then
+`install.py --update`, with `--select` only if the Herdr window is open. It then sets the
+commit's `deploy/<machine>` status to the installed sidebar version and commit, using
+the machine's existing `gh` sign-in, and shows a desktop notification.
+
+Nothing is overwritten. A checkout with local changes, not on `main`, or with commits
+that are not on `verified` is skipped and reported as a failed status and a notification,
+once per commit. A failed install is reported once and retried after 15 minutes, 1 hour,
+4 hours, then daily, without `--select` if it failed while selecting; a new `verified`
+commit is tried at once, and `python3 scripts/auto_update.py run --now` retries
+immediately. A sleeping or offline machine stays pending on GitHub and catches up on
+its next run; if it cannot reach GitHub for a day it says so. Check a machine with
+`python3 scripts/auto_update.py status`; turn it off with `... uninstall`. The log is in
+`~/.local/state/erics-herdr-linear/auto-update.log`. The machine list for pending
+statuses is `MACHINES` in `.github/workflows/verify.yml`.
+
+Every deploy gets the next patch version automatically, so don't bump it in a PR. For a
+minor or major release, set `version` in `package.json` and the `sidebar-footer` version
+in `layouts/erics-linear.json` together in the PR (`npm run check` enforces it); CI then
+releases that version as it is. `python3 scripts/bump_version.py` does the patch bump by hand.
 
 From a machine with SSH access to your other computers, explicitly sync named targets:
 
@@ -258,7 +349,7 @@ herdr-app check mods/linear-workspace
 herdr-app check mods/linear-workspace-tabs
 herdr-app check mods/erics-linear-agents
 herdr-app check mods/erics-linear-chrome
-python3 -m unittest discover -s tests -p 'test_installer.py' -v
+python3 -m unittest discover -s tests -v
 ```
 
 A native check validates an initial render, not every later state. Also inspect the live

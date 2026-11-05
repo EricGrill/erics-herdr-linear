@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { issueKey, issueLabel, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext } from "./model.js";
+import { issueKey, issueLabel, issueHeadline, issueHover, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems, spaceMenuItems } from "./model.js";
 
 const issue = (id = "one", identifier = "DEMO-3785", extra = {}) => ({
   id, identifier, title: "Research new stars", url: `https://linear.app/example/issue/${identifier}`,
@@ -254,4 +254,45 @@ test("reopened worktrees receive the same ticket context as newly created ones",
   assert.ok(prompt.includes(ticket.title));
   assert.ok(prompt.includes(ticket.url));
   assert.equal(taskContext({ ...ticket, created: false }), taskContext({ ...ticket, created: true }));
+});
+
+test("a linear.app issue link becomes the Linear desktop app's linear:// link", () => {
+  assert.equal(linearAppUrl("https://linear.app/example/issue/DEMO-3785/research-new-stars"), "linear://example/issue/DEMO-3785/research-new-stars");
+  assert.equal(linearAppUrl("https://linear.app/example/issue/DEMO-3785/"), "linear://example/issue/DEMO-3785");
+  assert.equal(linearAppUrl("https://linear.app/example/issue/DEMO-3785?foo=1#c"), "linear://example/issue/DEMO-3785");
+  for (const other of ["https://example.com/issue/DEMO-1", "http://linear.app/example/issue/DEMO-1", "javascript:alert(1)", "", null, undefined]) {
+    assert.equal(linearAppUrl(other), null);
+  }
+});
+
+test("the issue menu offers the Linear app first, then the browser and the link", () => {
+  const url = "https://linear.app/example/issue/DEMO-3785";
+  assert.deepEqual(issueMenuItems(issue()).map(i => [i.label, i.action, i.url]), [
+    ["Open in Linear app", "open", "linear://example/issue/DEMO-3785"],
+    ["Open in browser", "open", url],
+    ["Copy link", "copy", url],
+  ]);
+  // A link that is not Linear's has no app entry; an issue without a link offers nothing.
+  assert.deepEqual(issueMenuItems(issue("x", "DEMO-1", { url: "https://example.com/x" })).map(i => i.label), ["Open in browser", "Copy link"]);
+  assert.deepEqual(issueMenuItems(issue("y", "DEMO-2", { url: null })), []);
+  assert.deepEqual(issueMenuItems(null), []);
+});
+
+test("a space's own menu entries match Herdr's space menu, worktree entries only in a repository", () => {
+  const labels = git => spaceMenuItems({ id: "s1" }, git).map(i => i.label);
+  assert.deepEqual(labels(null), ["Rename", "Close"]);
+  assert.deepEqual(labels("main"), ["Rename", "New worktree", "Open worktree", "Close"]);
+  assert.deepEqual(labels("linked"), ["Rename", "New worktree", "Open worktree", "Remove worktree", "Close"]);
+  assert.deepEqual(spaceMenuItems(null), []);
+  const close = spaceMenuItems({ id: "s1" }).at(-1);
+  assert.equal(close.command, "space.close");
+  assert.deepEqual(close.args, { id: "s1" });
+});
+
+test("sidebar headlines put the title before the project, which moves to the hover text", () => {
+  const is = { identifier: "DEMO-9", title: " Give every deploy a version ", project: { name: "Herdr" } };
+  assert.equal(issueHeadline(is), "DEMO-9 · Give every deploy a version");
+  assert.equal(issueHover(is), "DEMO-9 · Give every deploy a version (Herdr)");
+  assert.equal(issueHeadline({ identifier: "DEMO-9" }), "DEMO-9");
+  assert.equal(issueHover({ identifier: "DEMO-9", title: "T", project: { name: "  " } }), "DEMO-9 · T");
 });

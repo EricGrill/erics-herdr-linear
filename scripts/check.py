@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 root = pathlib.Path(__file__).resolve().parents[1]
 required = ["README.md", "RECIPE.md", "preview.png", "LICENSE", "THIRD_PARTY_NOTICES.md",
             "layouts/erics-linear.json", "layouts/erics-linear.svg", "scripts/install.py",
-            "scripts/update.sh", "scripts/sync.sh"]
+            "scripts/update.sh", "scripts/sync.sh", "scripts/auto_update.py"]
 errors = [f"Missing {name}" for name in required if not (root / name).is_file()]
 
 def walk(node):
@@ -23,7 +23,11 @@ try:
     ids = [node["id"] for node in nodes]
     if len(ids) != len(set(ids)):
         errors.append("Duplicate layout IDs")
-except (OSError, ValueError, KeyError) as error:
+    version = json.loads((root / "package.json").read_text())["version"]
+    footer = next(node for node in nodes if node["id"] == "sidebar-footer")
+    if footer.get("content", {}).get("props", {}).get("version") != version:
+        errors.append("Sidebar footer version must match package.json")
+except (OSError, ValueError, KeyError, StopIteration) as error:
     errors.append(f"Layout: {error}")
 
 for path in list((root / "mods").rglob("*.json")) + list((root / "layouts").glob("*.json")):

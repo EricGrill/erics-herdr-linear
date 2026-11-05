@@ -33,13 +33,13 @@ async function harness(count = 1) {
   const dummy = () => {};
   const boundaries = {
     "gpui-kit": { div: native, svg: native, image: native },
-    "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, Popup: {}, TextView: {} },
+    "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, InputState: {}, Popup: {}, TextView: {} },
     "./client.js": { default: Client },
     "fs/promises": { readFile: async () => "{}" },
-    "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [],
+    "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
       shared: key => data.get(key), setShared: (key, value) => data.set(key, value), theme: () => ({}),
       setAgentOrder: dummy, run: dummy, props: () => ({}), openOverlay: dummy, closeOverlay: dummy,
-      knownAgents: dummy, appHome: () => "/fake", exec: dummy },
+      knownAgents: dummy, settings: () => ({ zoom: 1 }), appHome: () => "/fake", exec: dummy },
   };
   const cache = new Map();
   function load(specifier) {
@@ -76,7 +76,7 @@ test("refresh reloads all linked tickets including completed ones beyond the bac
   assert.ok(h.view.allIssues().every(row => row.state.name === "Done"));
   assert.equal(h.view.refreshing, false);
   assert.equal(h.view.err, "");
-  assert.match(text(h.view.sidebar()), /Needs input · Linear: Done · local/);
+  assert.match(text(h.view.sidebar()), /Needs input · Linear: Done\|+local/);
 });
 
 test("fresh periodic list responses replace shared ticket data and older responses cannot undo them", async () => {

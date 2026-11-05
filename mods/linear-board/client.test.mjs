@@ -2,12 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { taskContext } from "./model.js";
 
 const source = await readFile(new URL("./client.js", import.meta.url), "utf8");
 const targetSource = await readFile(new URL("./execution-target.js", import.meta.url), "utf8");
 const mainSource = await readFile(new URL("./main.js", import.meta.url), "utf8");
+// The real, pure repository inference; the rest of repository.js stays stubbed below.
+const { inferRepository, selectRepository: pickRepository } = await (async () => {
+  const context = vm.createContext({});
+  const real = new vm.SourceTextModule(await readFile(new URL("./repository.js", import.meta.url), "utf8"), { context });
+  await real.link(() => new vm.SyntheticModule(["exec", "knownAgents", "machines"], function () {
+    for (const name of ["exec", "knownAgents", "machines"]) this.setExport(name, () => { throw new Error("inference runs no commands"); });
+  }, { context }));
+  await real.evaluate();
+  return real.namespace;
+})();
 const ticket = {
   id: "issue-one", identifier: "DEMO-3785", title: "Research newly starred repos",
   url: "https://linear.app/example/issue/DEMO-3785", branch: "sample-user/demo-3785-research",
@@ -20,16 +33,21 @@ const sourceSpace = { id: "source", active: true, folder: "/repos/sampleWorkspac
 // commands, backend process replies, installed-agent discovery, and UI classes.
 // No process, network connection, timer, or app command leaves this harness.
 async function harness(options = {}) {
-  const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [];
+  const requests = [], commands = [], agentChecks = [], links = [], modes = [], validations = [], routingChecks = [], creations = [];
+  const hcCalls = [], managedJobs = new Set(), branchPreparations = [];
   const sharedStore = options.sharedStore ?? new Map();
   const storage = options.storage ?? new Map();
+  let fakeTime = 1700000000000;
   const context = vm.createContext({
+    ...(options.clockStepMs ? { Date: class extends Date {
+      static now() { fakeTime += options.clockStepMs; return fakeTime; }
+    } } : {}),
     console,
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value),
       removeItem: key => storage.delete(key), flush: options.flushStorage ?? (async () => {}) },
   });
   const allSpaces = options.spaces ?? [sourceSpace];
-  let createCalls = 0;
+  let createCalls = 0, missingJobPolls = options.jobMissingPolls ?? 0;
   const exec = async (command, args, config) => {
     if (command === "sleep") return { code: 0, stdout: "", stderr: "" };
     if (command === "sh" && args[2] === "herdr-execution-target") {
@@ -61,7 +79,7 @@ async function harness(options = {}) {
     let result;
     if (request.op === "status") result = options.statusReply ?? { workspaces: [] };
     else if (request.op === "teams") result = options.teamsReply ? await options.teamsReply() : { teams: options.teams ?? [] };
-    else if (request.op === "states") result = { states: options.states ?? [] };
+    else if (request.op === "states") result = options.statesReply ? await options.statesReply(request) : { states: options.states ?? [] };
     else if (request.op === "list" && request.tab === "recent") result = { issues: options.recent ?? [] };
     else if (request.op === "check-start") result = { issue: ticket };
     else if (request.op === "create") {
@@ -69,14 +87,43 @@ async function harness(options = {}) {
       if (options.loseCreateResponse) throw new Error("Connection closed after create");
       result = options.failCreateAt === createCalls ? { error: "Linear create failed" } : { issue: ticket, note: "Created ticket" };
     } else if (request.op === "worktree") result = { job: "job-one" };
-    else if (request.op === "job") result = { done: true, result: {
-      path: options.worktreePath ?? "/repos/worktrees/demo-3785", created: options.created ?? false,
-      prompt: "Backend prompt", note: "Worktree ready",
-    } };
+    else if (request.op === "job") {
+      if (missingJobPolls > 0) {
+        missingJobPolls -= 1;
+        return { code: 0, stdout: JSON.stringify({ error: "that job is gone" }), stderr: "" };
+      }
+      const work = requests.find(x => x.request.op === "worktree" && x.request.job === request.job);
+      const prepared = branchPreparations.some(p => p.branch === work?.request.target.branch &&
+        (p.target.machine ?? null) === work?.on && p.target.folder === work?.request.dirs[0]);
+      const failure = options.backendJobError ?? (options.requireLocalBranch && !prepared ? "exit status 128" :
+        options.requireManagedWorker && !managedJobs.has(request.job) ? "it didn't start" : null);
+      result = { done: true, result: failure ? { error: failure } : {
+        path: options.worktreePath ?? "/repos/worktrees/demo-3785", created: options.created ?? false,
+        prompt: "Backend prompt", note: "Worktree ready",
+      } };
+    }
     else if (request.op === "detail") result = options.detailReply ? await options.detailReply(request) : options.detailError ? { error: options.detailError } : { issue: ticket, description: options.description ?? "" };
     else if (request.op === "start") result = options.failStart ? { error: "Issue could not be started" } : { note: "Issue started" };
+    // herdr-linear v0.14.2 has no text search; this is its real reply.
+    else if (request.op === "search") result = { error: 'no op "search"' };
     else throw new Error(`Unexpected backend operation ${request.op}`);
     return { code: result.error ? 1 : 0, stdout: JSON.stringify(result), stderr: "" };
+  };
+  // A native exec can return before its detached backend child ever starts.
+  // Only the managed hc worker establishes the job marker in this failure mode.
+  const hc = async args => {
+    hcCalls.push([...args]);
+    if (args[0] === "wait") return { code: 0, stdout: "{}", stderr: "" };
+    assert.equal(args[0], "run", "only managed launch and owned-worker cleanup leave this harness");
+    const separator = args.indexOf("--"), onAt = args.indexOf("--on");
+    assert.ok(separator >= 0, "the worker program follows the hc argument separator");
+    const machine = onAt >= 0 && onAt < separator ? args[onAt + 1] : null;
+    const request = JSON.parse(args.at(-1));
+    assert.equal(request.op, "worktree");
+    requests.push({ request, on: machine });
+    managedJobs.add(request.job);
+    return options.hcRunResult ?? { code: 0,
+      stdout: JSON.stringify({ address: machine ? `${machine}/managed-worker` : "managed-worker" }), stderr: "" };
   };
   const noop = () => {};
   const dummy = new Proxy(function () {}, { get: () => dummy, apply: () => dummy, construct: () => dummy });
@@ -92,20 +139,33 @@ async function harness(options = {}) {
     "gpui-base": { ...Object.fromEntries(["v_flex", "h_flex", "Input", "Textarea", "TextView", "Scrollbar", "v_virtual_list", "VirtualListScrollHandle", "Popup"].map(name => [name, dummy])),
       InputState: textState, TextareaState: textState },
     "fs/promises": { readFile: async () => JSON.stringify(options.config ?? {}), writeFile: async () => {} },
-    "./repository.js": { computers: () => [], loadTarget: () => {}, repositoryName: () => "", selectRepository: () => {}, validateRepository: async target => {
+    "./repository.js": { computers: () => [], loadTarget: () => {}, repositoryName: () => "", selectRepository: () => {}, inferRepository, createRepository: async (target, title) => {
+      creations.push({ target: { ...target }, title });
+      if (options.creationError) throw new Error(options.creationError);
+      const root = target.machine ? "/home/build/code" : "/Users/me/code", name = options.createdName ?? "new-work";
+      return { ...target, folder: `${root}/${name}`, name, root };
+    }, validateRepository: async target => {
       validations.push({ ...target });
       if (options.validationError) throw new Error(options.validationError);
       return target.folder;
     }, validateWorktreeRouting: async (target, workspaceKey) => {
       routingChecks.push({ target: { ...target }, workspaceKey });
       if (options.routingError) throw new Error(options.routingError);
+      return options.routingBase ?? "";
+    }, prepareWorktreeBranch: async (target, branch, base = "") => {
+      branchPreparations.push({ target: { ...target }, branch, base });
+      if (options.branchPreparationError) throw new Error(options.branchPreparationError);
     } },
     "herdr": {
-      shared: key => sharedStore.get(key), setShared: (key, value) => sharedStore.set(key, value), setAgentOrder: noop,
+      shared: key => sharedStore.get(key), setShared: (key, value) => {
+        if (key.includes(".idea-drafts:") && options.failDraftWrite?.()) throw new Error("Disk full");
+        sharedStore.set(key, value);
+      }, setAgentOrder: noop, settings: () => ({ zoom: 1 }),
       agents: () => [], panes: () => options.panes ?? [], machines: () => options.machines ?? [{ name: null, layout: "ready" }, { name: "remote", layout: "ready" }, { name: "build-2", layout: "ready" }], spaces: () => allSpaces,
-      run: (name, args) => { commands.push({ name, args }); return {}; }, exec, theme: () => ({}),
+      window: () => ({ platform: "macos" }), keys: () => [],
+      run: (name, args) => { commands.push({ name, args }); return {}; }, exec, hc, theme: () => ({}),
       appHome: () => "/fake/herdr-app", props: () => ({ overlay: "test-dialog", ...options.props }), closeOverlay: noop,
-      openOverlay: noop, nextCommand: async () => new Promise(() => {}),
+      openOverlay: options.openOverlay ?? noop, nextCommand: async () => new Promise(() => {}),
       knownAgents: async ({ on }) => {
         agentChecks.push(on ?? null);
         if (options.agentCheckFails) throw new Error("Agent machine unavailable");
@@ -116,7 +176,7 @@ async function harness(options = {}) {
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
   const link = async specifier => {
-    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js"].includes(specifier)) {
+    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js", "./machines.js", "./sticky.js", "./git.js", "./tags.js"].includes(specifier)) {
       const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
       await real.link(link);
       return real;
@@ -135,9 +195,9 @@ async function harness(options = {}) {
   await module.link(link);
   await module.evaluate();
   const mainStubs = {
-    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou"].map(name => [name, noop])),
-    "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf"].map(name => [name, noop])),
-    "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "fetchQueue", "fetchAgents", "fetchIssueDetail", "reassignIssue"].map(name => [name, noop])),
+    "./model.js": Object.fromEntries(["issueKey", "issueLabel", "issueHeadline", "issueHover", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou", "issueMenuItems", "spaceMenuItems"].map(name => [name, name === "taskContext" ? taskContext : noop])),
+    "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf", "laneSince", "elapsed", "linearMismatch"].map(name => [name, noop])),
+    "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "fetchQueue", "fetchAgents", "fetchIssueDetail", "reassignIssue", "fetchPullRequests", "rowPullRequest"].map(name => [name, noop])),
     "./queue.js": Object.fromEntries(["attentionOf", "sortQueue", "queueCounts", "crewRoster", "herdrActivity", "age", "queueStatus", "reassignBatch", "batchSummary", "crewContext", "reassignChoices", "requestGate"].map(name => [name, noop])),
     "./config.js": { normalizeConfig: noop },
   };
@@ -167,7 +227,7 @@ async function harness(options = {}) {
     launchTarget: Object.hasOwn(options, "launchTarget") ? options.launchTarget : { folder: sourceSpace.folder, machine: null },
     agentKey: "codex", title: { value: () => options.title ?? "Investigate new stars", set_value: noop },
     projSearch: { set_value: noop },
-    desc: { value: () => "Reproduce the missing scheduled research.", set_value: noop },
+    desc: { value: () => options.request ?? "Reproduce the missing scheduled research.", set_value: noop },
     form: { team: { id: "team-one" }, project: "project-one", state: "state-one", priority: 2, assignToMe: true },
     replaceRow: noop,
     records: () => [], publish: noop,
@@ -188,16 +248,16 @@ async function harness(options = {}) {
     Object.assign(client, { ws: workspace, on: "", workspaces: [{ id: workspace, name: "Workspace", urlKey: "example" }], lists: {} });
     client.create(cx, true);
   };
-  return { client, cx, flush, openCapture, storage, requests, commands, agentChecks, links, modes, validations, routingChecks, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
+  return { client, cx, flush, openCapture, storage, requests, commands, hcCalls, branchPreparations, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
 }
 
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
-  const h = await harness({ title: "   " });
+  const h = await harness({ request: "   " });
   h.client.submit(h.cx, true);
   await h.flush();
-  assert.match(h.client.err, /Give it a title/);
+  assert.match(h.client.err, /Write a request/);
   assert.equal(h.requests.length, 0);
-  h.client.title = { value: () => "Valid title" };
+  h.client.desc = { value: () => "Valid request" };
   h.client.submit(h.cx);
   await h.flush();
   assert.deepEqual(h.modes, [false]);
@@ -249,7 +309,7 @@ test("reopened worktree starts the selected agent with its ticket context", asyn
   await h.flush();
   const opened = h.commands.find(c => c.name === "space.new");
   assert.ok(opened, h.client.err);
-  assert.deepEqual(JSON.parse(JSON.stringify(opened.args.argv)), ["codex"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(opened.args.argv)), ["codex", "--yolo"]);
   assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
   assert.match(opened.args.task, /Work on Linear issue DEMO-3785/);
   assert.ok(opened.args.task.includes(ticket.url));
@@ -257,6 +317,126 @@ test("reopened worktree starts the selected agent with its ticket context", asyn
   assert.deepEqual(h.requests.map(r => r.request.op), ["check-start", "worktree", "job", "start"]);
   assert.equal(h.links.length, 1);
   assert.equal(h.client.err, "");
+});
+
+for (const machine of [null, "remote-build"]) {
+  for (const agent of [
+    { key: "codex", run: ["/opt/bin/codex", "--model", "chosen"], expected: ["/opt/bin/codex", "--yolo", "--model", "chosen"] },
+    { key: "codex", run: ["codex", "--yolo"], expected: ["codex", "--yolo"] },
+    { key: "codex", run: ["codex", "--dangerously-bypass-approvals-and-sandbox"], expected: ["codex", "--dangerously-bypass-approvals-and-sandbox"] },
+    { key: "claude", run: ["claude", "--model", "chosen"], expected: ["claude", "--dangerously-skip-permissions", "--model", "chosen"] },
+    { key: "claude", run: ["claude", "--dangerously-skip-permissions"], expected: ["claude", "--dangerously-skip-permissions"] },
+    { key: "cursor", run: ["cursor-agent", "--model", "chosen"], expected: ["cursor-agent", "--force", "--model", "chosen"] },
+    { key: "cursor", run: ["cursor-agent", "--yolo"], expected: ["cursor-agent", "--yolo"] },
+    { key: "cursor", run: ["cursor-agent", "--auto-review"], expected: ["cursor-agent", "--force"] },
+    { key: "gemini", run: ["gemini"], expected: ["gemini", "--approval-mode=yolo"] },
+    { key: "gemini", run: ["gemini", "--approval-mode", "plan", "--model", "chosen"], expected: ["gemini", "--approval-mode=yolo", "--model", "chosen"] },
+    { key: "gemini", run: ["gemini", "--approval-mode=auto_edit", "--yolo"], expected: ["gemini", "--approval-mode=yolo"] },
+    { key: "copilot", run: ["copilot"], expected: ["copilot", "--allow-all"] },
+    { key: "grok", run: ["grok", "--permission-mode", "default"], expected: ["grok", "--always-approve"] },
+    { key: "antigravity", run: ["agy"], expected: ["agy", "--dangerously-skip-permissions"] },
+    { key: "hermes", run: ["hermes"], expected: ["hermes", "--yolo"] },
+    { key: "qoder", run: ["qodercli"], expected: ["qodercli", "--yolo"] },
+    { key: "crush", run: ["crush"], expected: ["crush", "--yolo"] },
+    { key: "kiro", run: ["kiro-cli"], expected: ["kiro-cli", "chat", "--trust-all-tools"] },
+    { key: "kiro", run: ["kiro-cli", "chat", "--resume"], expected: ["kiro-cli", "chat", "--trust-all-tools", "--resume"] },
+    { key: "opencode", run: ["opencode", "--model", "chosen"], expected: ["env", 'OPENCODE_PERMISSION={"*":"allow"}', "opencode", "--model", "chosen"] },
+    ...["pi", "pig", "amp"].map(key => ({ key, run: [key], expected: [key] })),
+    { key: "other", run: ["other", "--custom"], expected: ["other", "--custom"] },
+  ]) test(`agent permissions on ${machine ?? "local"}: ${agent.run.join(" ")}`, async () => {
+    const original = [...agent.run];
+    const h = await harness({ agents: [{ ...agent, installed: true }],
+      launchTarget: { machine, folder: "/repos/sampleWorkspace" } });
+    h.client.agentKey = agent.key;
+    h.client.worktree(h.cx, true, { issue: ticket });
+    await h.flush();
+    const opened = h.commands.find(c => c.name === "space.new");
+    assert.ok(opened, h.client.err);
+    assert.deepEqual(Array.from(opened.args.argv), agent.expected);
+    assert.deepEqual(agent.run, original, "agent discovery arguments are not mutated");
+    assert.equal(opened.args.machine, machine ?? "");
+    assert.deepEqual(h.agentChecks, [machine]);
+    h.client.agentsChecked = true;
+    h.main.continueAgent.call(h.client, { space: { id: "linked-space", machine } }, ticket, agent, h.cx);
+    await h.flush();
+    const continued = h.commands.find(c => c.name === "tab.new");
+    assert.ok(continued, h.client.err);
+    assert.deepEqual(Array.from(continued.args.argv), agent.expected);
+    assert.equal(continued.args.space, "linked-space");
+    assert.match(continued.args.task, /Work on Linear issue/);
+    assert.deepEqual(h.agentChecks, [machine, machine]);
+    assert.deepEqual(agent.run, original);
+  });
+}
+
+// Run a Kimi launch's real shell command against a fake kimi that records its
+// arguments. No agent starts: the fake only writes what it was given.
+async function runKimiLaunch(argv, runKimi) {
+  const dir = await mkdtemp(join(tmpdir(), "kimi-launch-"));
+  try {
+    const log = join(dir, "calls");
+    await writeFile(join(dir, "kimi"), "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"$KIMI_LOG\"\nprintf '\\036' >> \"$KIMI_LOG\"\n");
+    await chmod(join(dir, "kimi"), 0o755);
+    const script = argv[2].replaceAll("'/fake-bin/kimi'", `'${dir}/kimi'`);
+    execFileSync(argv[0], [argv[1], script, ...argv.slice(3)], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, KIMI_LOG: log } });
+    const calls = (await readFile(log, "utf8")).split("\x1e").filter(Boolean).map(call => call.split("\0").slice(0, -1));
+    return calls;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+for (const machine of [null, "remote-build"]) {
+  for (const agent of [
+    { run: ["kimi"], once: [], resume: ["--auto", "--continue"] },
+    { run: ["kimi", "--yolo"], once: [], resume: ["--auto", "--continue"] },
+    { run: ["kimi", "--auto"], once: [], resume: ["--auto", "--continue"] },
+    { run: ["/fake-bin/kimi", "--model", "k2", "--plan"], once: ["--model", "k2"], resume: ["--auto", "--model", "k2", "--plan", "--continue"] },
+  ]) test(`kimi on ${machine ?? "local"} gets its first message without a positional prompt: ${agent.run.join(" ")}`, async () => {
+    const original = [...agent.run];
+    const h = await harness({ agents: [{ key: "kimi", name: "Kimi", installed: true, run: agent.run }],
+      launchTarget: { machine, folder: "/repos/sampleWorkspace" } });
+    h.client.agentKey = "kimi";
+    h.client.worktree(h.cx, true, { issue: ticket });
+    await h.flush();
+    const opened = h.commands.find(c => c.name === "space.new");
+    assert.ok(opened, h.client.err);
+    assert.equal(opened.args.machine, machine ?? "");
+    h.client.agentsChecked = true;
+    h.main.continueAgent.call(h.client, { space: { id: "linked-space", machine } }, ticket, { key: "kimi" }, h.cx);
+    await h.flush();
+    const continued = h.commands.find(c => c.name === "tab.new");
+    assert.ok(continued, h.client.err);
+    assert.equal(continued.args.space, "linked-space");
+    for (const launch of [opened.args, continued.args]) {
+      const argv = Array.from(launch.argv);
+      assert.equal(launch.task, undefined, "Herdr must not append the message as a Kimi argument");
+      assert.deepEqual([argv[0], argv[1], argv[3]], ["sh", "-c", "kimi"]);
+      const message = argv[4];
+      assert.match(message, /Work on Linear issue DEMO-3785/);
+      const calls = await runKimiLaunch(argv);
+      assert.deepEqual(calls, [[...agent.once, "-p", message], agent.resume]);
+    }
+    assert.deepEqual(agent.run, original, "agent discovery arguments are not mutated");
+  });
+}
+
+test("kimi messages with quotes, backticks and newlines reach prompt mode unchanged", async () => {
+  const h = await harness({ agents: [{ key: "kimi", name: "Kimi", installed: true, run: ["kimi"] }] });
+  const message = "Work on it: `ls` $HOME \"q\" 'single' $(id)\n```json\n{\"a\":1}\n```";
+  const { argv, task } = h.client.agentLaunch({ key: "kimi", run: ["kimi"] }, message);
+  assert.equal(task, undefined);
+  assert.deepEqual(await runKimiLaunch(argv), [["-p", message], ["--auto", "--continue"]]);
+});
+
+test("kimi already in prompt mode and other agents keep Herdr's message argument", async () => {
+  const h = await harness();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.client.agentLaunch({ key: "kimi", run: ["kimi", "-p", "work"] }, "msg"))),
+    { argv: ["kimi", "-p", "work"], task: "msg" });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.client.agentLaunch({ key: "codex", run: ["codex"] }, "msg"))),
+    { argv: ["codex", "--yolo"], task: "msg" });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.client.agentLaunch({ key: "kimi", run: ["kimi"] }, ""))),
+    { argv: ["kimi", "--auto"], task: "" });
 });
 
 test("existing space is selected without launching or prompting a duplicate agent", async () => {
@@ -348,10 +528,198 @@ test("missing target never inherits the focused computer or repository", async (
     const h = await harness({ launchTarget: null, spaces: [{ ...sourceSpace, machine: "focused-remote" }] });
     h.client[action](h.cx, true);
     await h.flush();
-    assert.match(h.client.err, /Choose a computer and an existing repository/);
+    assert.match(h.client.err, /Choose a computer/);
     assert.deepEqual(h.requests, []);
     assert.deepEqual(h.commands, []);
   }
+});
+
+test("Start without a chosen repository makes a new one on the chosen computer only after every check", async () => {
+  const h = await harness({ launchTarget: { machine: "build-2", folder: "" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.deepEqual(h.creations.map(c => [c.target.machine, c.title]), [["build-2", ticket.title]]);
+  assert.deepEqual(h.agentChecks, ["build-2"]);
+  const request = h.requests.find(r => r.request.op === "worktree");
+  assert.equal(request.on, "build-2");
+  assert.deepEqual(request.request.dirs, ["/home/build/code/new-work"]);
+  assert.equal(h.client.launchTarget.folder, "/home/build/code/new-work");
+  assert.equal(h.commands.find(c => c.name === "space.new").args.machine, "build-2");
+});
+
+test("Start on an existing ticket uses its project's repository, not a new one (CHA-4309)", async () => {
+  const project = { id: "project-herdr", name: "Eric's Herdr Linear" };
+  const issue = { ...ticket, title: "Sidebar rows: show the ticket title first, project second", project };
+  const real = { name: "erics-herdr-linear", folder: "/Users/me/code/erics-herdr-linear" };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "Row labels." }) });
+  Object.assign(h.client, { cur: issue, repositories: [{ name: "holonet", folder: "/Users/me/code/holonet" }, real], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, real.folder);
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, [real.folder]);
+});
+
+test("a sibling ticket's repository is used, ignoring a blank one Start made for another ticket (CHA-4309)", async () => {
+  const project = { id: "project-x", name: "Unrelated name" };
+  const issue = { ...ticket, project }, sibling = { id: "issue-two", identifier: "DEMO-1", title: "Sibling work", project };
+  const blankSibling = { id: "issue-three", identifier: "DEMO-2", title: "Blank started work", project };
+  const real = { name: "app", folder: "/Users/me/code/app" }, blank = { name: "blank-started-work", folder: "/Users/me/code/blank-started-work" };
+  const sharedStore = new Map([["linear-workspace.launch-targets", {
+    "workspace-one/issue-two": { folder: real.folder, name: "app", machine: null },
+    "workspace-one/issue-three": { folder: blank.folder, name: blank.name, machine: null } }]]);
+  const h = await harness({ sharedStore, launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "" }) });
+  Object.assign(h.client, { cur: issue, lists: { mine: { items: [issue, sibling, blankSibling] } }, repositories: [real, blank], repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, real.folder);
+});
+
+test("with no repository to infer, Start still makes a new one, and a chosen New repository stays (CHA-4245)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Brand new idea" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "Start from scratch." }) });
+  Object.assign(h.client, { cur: issue, repositories: [{ name: "holonet", folder: "/Users/me/code/holonet" }], repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.deepEqual(h.creations.map(c => c.title), [ticket.title]);
+});
+
+test("a hand-picked New repository survives the ticket's details reloading (CHA-4309)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Holonet" } }, other = { ...ticket, id: "issue-two", project: { id: "p", name: "Holonet" } };
+  const holonet = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue: h.client.cur, description: "" }) });
+  Object.assign(h.client, { cur: issue, repositories: [holonet], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+  // The picker's "New repository" row, then refresh (r), reload or a state change.
+  assert.equal(pickRepository(h.client, { folder: "", name: "" }, h.cx), true);
+  for (let i = 0; i < 2; i++) {
+    h.client.loadDetail(h.cx);
+    await h.flush();
+    assert.equal(h.client.launchTarget.folder, "", "an explicit New repository is not overridden");
+  }
+  h.client.worktree(h.cx, true, { issue });
+  await h.flush();
+  assert.deepEqual(h.creations.map(c => c.title), [ticket.title]);
+  // The pick belongs to that ticket: another ticket opened next still infers its repository.
+  Object.assign(h.client, { cur: other, launchTarget: { ...h.client.launchTarget, folder: "", name: "" } });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+});
+
+test("opening a second ticket re-infers its own repository instead of keeping the first one's (CHA-4309)", async () => {
+  const herdr = { name: "erics-herdr-linear", folder: "/Users/me/code/erics-herdr-linear" }, holonet = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const a = { ...ticket, id: "issue-a", title: "Sidebar rows", project: { id: "p-herdr", name: "Eric's Herdr Linear" } };
+  const b = { ...ticket, id: "issue-b", title: "Relay retries", project: { id: "p-holo", name: "Holonet" } };
+  const c = { ...ticket, id: "issue-c", title: "Brand new idea", project: { id: "p-new", name: "Something else" } };
+  const details = { [a.id]: { issue: a, description: "" }, [b.id]: { issue: b, description: "" }, [c.id]: { issue: c, description: "Start from scratch." } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: request => details[request.issue] });
+  Object.assign(h.client, { repositories: [herdr, holonet], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  const open = issue => h.openIssue.call(h.client, issue, h.cx); // the real openIssue; the harness stubs it
+  open(a);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, herdr.folder);
+  open(b);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder, "B names Holonet, so it does not run in A's repository");
+  h.client.worktree(h.cx, true, { issue: b });
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.requests.find(r => r.request.op === "worktree").request.dirs, [holonet.folder]);
+  // Nothing names a repository for C: A's or B's inferred one is not carried over.
+  open(c);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+});
+
+test("a repository picked by hand still carries over to the next ticket; only inferred ones are re-inferred (CHA-4309)", async () => {
+  const holonet = { name: "holonet", folder: "/Users/me/code/holonet" }, app = { name: "app", folder: "/Users/me/code/app" };
+  const a = { ...ticket, id: "issue-a", project: { id: "p-holo", name: "Holonet" } }, b = { ...ticket, id: "issue-b", project: { id: "p-x", name: "Unrelated" } };
+  const details = { [a.id]: { issue: a, description: "" }, [b.id]: { issue: b, description: "" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: request => details[request.issue] });
+  Object.assign(h.client, { repositories: [holonet, app], repoRoot: "/Users/me/code", repositoriesLoading: false });
+  const open = issue => h.openIssue.call(h.client, issue, h.cx);
+  open(a);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, holonet.folder);
+  assert.equal(pickRepository(h.client, app, h.cx), true);
+  open(b);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, app.folder);
+});
+
+test("repositories arriving after the ticket's details still infer its repository (CHA-4309)", async () => {
+  const issue = { ...ticket, project: { id: "p", name: "Holonet" } };
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, detailReply: () => ({ issue, description: "" }) });
+  Object.assign(h.client, { cur: issue, repositories: [], repositoriesLoading: true });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.folder, "");
+  Object.assign(h.client, { repositories: [{ name: "holonet", folder: "/Users/me/code/holonet" }], repositoriesLoading: false });
+  h.client.repositoriesLoaded(h.cx);
+  assert.equal(h.client.launchTarget.folder, "/Users/me/code/holonet");
+});
+
+test("a refused launch never makes a new repository", async () => {
+  for (const options of [{ routingError: "Override present" }, { agents: [] }, { agentCheckFails: true }]) {
+    const h = await harness({ launchTarget: { machine: null, folder: "" }, ...options });
+    h.client.worktree(h.cx, true, { issue: ticket });
+    await h.flush();
+    assert.notEqual(h.client.err, "");
+    assert.deepEqual(h.creations, []);
+    assert.equal(h.requests.some(r => r.request.op === "worktree"), false);
+  }
+});
+
+test("an unresolved saved target never becomes a new repository", async () => {
+  for (const action of ["submit", "worktree"]) {
+    const h = await harness({ launchTarget: { machine: "origin-computer", folder: "", blocked: true } });
+    h.client.repositoryError = "Saved computer origin-computer is unavailable here.";
+    h.client[action](h.cx, true);
+    await h.flush();
+    assert.match(h.client.err, /Saved computer origin-computer is unavailable/);
+    assert.deepEqual(h.creations, []);
+    assert.deepEqual(h.requests, []);
+  }
+});
+
+test("a failed new repository stops before the worktree and agent", async () => {
+  const h = await harness({ launchTarget: { machine: null, folder: "" }, creationError: "Could not create a new Git repository" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /Could not create a new Git repository/);
+  assert.equal(h.requests.some(r => r.request.op === "worktree"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+test("Create & start without a chosen repository records the new one on the ticket", async () => {
+  const h = await harness({ launchTarget: { machine: "build-2", folder: "" } });
+  h.client.submit(h.cx, true);
+  await h.flush();
+  assert.equal(h.creations.length, 1);
+  assert.equal(h.creations[0].title, "Reproduce the missing scheduled research.");
+  const create = h.requests.find(r => r.request.op === "create");
+  assert.match(create.request.new.description, /"folder":"\/home\/build\/code\/new-work"/);
+  assert.equal(h.client.createdLaunch?.execution.folder ?? h.validations.at(-1).folder, "/home/build/code/new-work");
+});
+
+test("plain Create without a chosen repository leaves the ticket unplaced and makes no repository", async () => {
+  const h = await harness({ launchTarget: { machine: null, folder: "" } });
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.deepEqual(h.validations, []);
+  const create = h.requests.find(r => r.request.op === "create");
+  assert.doesNotMatch(create.request.new.description, /ericsHerdrLinearExecutionTarget/);
 });
 
 test("ordinary Create persists its computer and repository for a reopened ticket", async () => {
@@ -507,7 +875,10 @@ test("malformed placement cannot leave an unrelated default launch target enable
   h.client.loadDetail(h.cx);
   await h.flush();
   assert.equal(h.client.launchTarget.folder, "");
-  assert.equal(h.client.agentsChecked, false);
+  assert.equal(h.client.launchTarget.blocked, true);
+  // The harness choice still shows; Start stays blocked by the target.
+  assert.equal(h.client.agentsChecked, true);
+  assert.deepEqual(h.client.agentChoices.map(a => a.key), ["codex"]);
   assert.match(h.client.repositoryError, /invalid JSON/);
   assert.equal(h.client.detail.issue.id, ticket.id);
 });
@@ -903,7 +1274,7 @@ test("quick capture restores multiline text and edited preview across reopening,
   h.client.captureDescription.set_value("Proposed check: create with no repository.");
   h.client.closeCapture(h.cx);
   await h.flush();
-  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
   reopened.openCapture();
   await reopened.flush();
   assert.equal(reopened.client.idea.value(), raw);
@@ -913,6 +1284,44 @@ test("quick capture restores multiline text and edited preview across reopening,
   reopened.openCapture("second-workspace");
   await reopened.flush();
   assert.equal(reopened.client.idea.value(), "");
+});
+
+test("capture survives a new native overlay with separate localStorage", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  const idea = "CHA-4216: save this idea across dialogs\nKeep the edited ticket too.";
+  h.client.idea.set_value(idea);
+  h.client.reviewCapture(h.cx);
+  h.client.title.set_value("Saved ticket preview");
+  h.client.captureDescription.set_value("My acceptance checks");
+  h.client.back(h.cx);
+  await h.flush();
+  // Herdr gives each overlay its own localStorage. Persisted shared state
+  // survives both a fresh overlay and a host restart.
+  const reopened = await harness({ ...captureOptions(),
+    sharedStore: new Map(JSON.parse(JSON.stringify([...h.sharedStore]))) });
+  reopened.openCapture();
+  await reopened.flush();
+  assert.equal(reopened.client.idea.value(), idea);
+  assert.equal(reopened.client.title.value(), "Saved ticket preview");
+  assert.equal(reopened.client.captureDescription.value(), "My acceptance checks");
+  assert.equal(reopened.client.form.review, true);
+  assert.equal(reopened.requests.some(x => x.request.op === "create"), false);
+});
+
+test("Save and close does not wait on an unrelated overlay storage flush", async () => {
+  let flushes = 0;
+  const h = await harness({ ...captureOptions(), props: { action: "capture" },
+    flushStorage: () => { flushes++; return new Promise(() => {}); } });
+  h.openCapture();
+  await h.flush();
+  h.client.idea.set_value("Keep this when native flush never settles");
+  h.client.back(h.cx);
+  // Allow native async work to start, without waiting forever on its promise.
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(h.client.form.leaving, true, "the persisted draft allows the dialog to close");
+  assert.equal(flushes, 0, "draft durability uses persisted host state");
 });
 
 test("capture create needs only ticket context and one click, preserves source, and does not launch", async () => {
@@ -937,7 +1346,10 @@ test("capture create needs only ticket context and one click, preserves source, 
   assert.deepEqual(h.validations, []);
   assert.deepEqual(h.routingChecks, []);
   assert.deepEqual(h.commands, []);
-  assert.deepEqual(h.agentChecks, []);
+  // The opened ticket lists this computer's agents (a read), but nothing launches.
+  assert.deepEqual(h.agentChecks, [null]);
+  assert.equal(h.client.launchTarget.blocked, true);
+  assert.equal(h.client.agentsChecked, true, "the agent row settles instead of checking forever");
   assert.deepEqual(h.modes, []);
   assert.equal(h.storage.has("linear.idea-draft.v1:workspace-one"), false);
 });
@@ -967,7 +1379,7 @@ test("uncertain create survives restart, avoids automatic OAuth retry, and requi
   await h.flush();
   assert.equal(h.requests.filter(x => x.request.op === "create").length, 1);
   assert.match(h.client.err, /not confirmed/);
-  const reopened = await harness({ ...captureOptions(), storage: h.storage, recent: [{ ...ticket, title: h.client.title.value() }] });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h), recent: [{ ...ticket, title: h.client.title.value() }] });
   reopened.openCapture();
   await reopened.flush();
   reopened.client.submitCapture(reopened.cx);
@@ -1022,7 +1434,7 @@ test("late AI suggestion cannot replace a human edit and failed AI preserves the
   assert.match(offline.client.err, /AI shaping unavailable/);
 });
 
-test("capture preserves drafts offline and refuses to publish on a failed local flush", async () => {
+test("capture preserves drafts offline and refuses to publish on a failed persisted draft write", async () => {
   const h = await harness({ ...captureOptions(), teamsReply: () => { throw new Error("Offline"); } });
   h.openCapture();
   h.client.idea.set_value("Save this while offline");
@@ -1030,16 +1442,18 @@ test("capture preserves drafts offline and refuses to publish on a failed local 
   assert.match(h.client.err, /Offline/);
   assert.equal(h.client.form.draft.idea, "Save this while offline");
 
-  const disk = await harness({ ...captureOptions(), flushStorage: async () => { throw new Error("Disk full"); } });
+  let failWrite = false;
+  const disk = await harness({ ...captureOptions(), failDraftWrite: () => failWrite });
   disk.openCapture();
   await disk.flush();
   disk.client.idea.set_value("Protect the draft");
   disk.client.reviewCapture(disk.cx);
+  failWrite = true;
   disk.client.submitCapture(disk.cx);
   await disk.flush();
   assert.equal(disk.requests.some(x => x.request.op === "create"), false);
-  assert.match(disk.client.err, /No ticket request was sent/);
-  assert.equal(disk.client.form.draft.uncertain, false);
+  assert.match(disk.client.err, /Disk full/);
+  assert.equal(Boolean(disk.client.form.draft.uncertain), false);
 });
 
 test("corrupt draft is preserved until explicitly discarded", async () => {
@@ -1063,7 +1477,7 @@ test("reshaping a changed source updates generated fields and retains reviewed e
   h.client.title.set_value("A custom title");
   h.client.form.review = false;
   h.client.idea.set_value("Second idea");
-  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
   reopened.openCapture();
   await reopened.flush();
   reopened.client.reviewCapture(reopened.cx);
@@ -1090,7 +1504,7 @@ test("confirmed create survives a local navigation failure and can be reopened w
   assert.match(h.client.err, /Linear created DEMO-3785/);
   assert.match(h.client.err, /https:\/\/linear.app/);
   assert.equal(h.requests.filter(x => x.request.op === "create").length, 1);
-  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  const reopened = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
   reopened.openCapture();
   await reopened.flush();
   const form = reopened.client.form;
@@ -1125,8 +1539,9 @@ test("a source edit refreshes an accepted AI shape but keeps a subsequent custom
 test("a stale unreadable draft dialog cannot discard another window's replacement", async () => {
   const key = "linear.idea-draft.v1:workspace-one";
   const storage = new Map([[key, "{bad"]]);
-  const first = await harness({ ...captureOptions(), storage });
-  const second = await harness({ ...captureOptions(), storage });
+  const sharedStore = new Map();
+  const first = await harness({ ...captureOptions(), storage, sharedStore });
+  const second = await harness({ ...captureOptions(), storage, sharedStore });
   first.openCapture();
   second.openCapture();
   second.client.closeCapture(second.cx, true);
@@ -1140,4 +1555,572 @@ test("a stale unreadable draft dialog cannot discard another window's replacemen
   await first.flush();
   assert.match(first.client.err, /another window/);
   assert.equal(storage.get(key), replacement);
+});
+
+
+test("New task creates directly from title and description without shaping or source text", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  assert.equal(h.client.form.review, true);
+  h.client.title.set_value("A simple task");
+  h.client.captureDescription.set_value("Keep this description exactly.");
+  h.client.submit(h.cx);
+  h.client.submit(h.cx);
+  await h.flush();
+  const creates = h.requests.filter(x => x.request.op === "create");
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].request.new.description, "Keep this description exactly.");
+  assert.deepEqual(h.commands, []);
+});
+
+test("New task saves title-only drafts and restores their selected repository", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo", name: "repo" };
+  h.client.title.set_value("Title only");
+  const reopened = await harness({ ...captureOptions(), storage: h.storage });
+  reopened.openCapture();
+  await reopened.flush();
+  assert.equal(reopened.client.title.value(), "Title only");
+  assert.equal(reopened.client.form.draft.execution.folder, "/remote/repo");
+});
+
+test("New task validates and persists a selected target while ordinary create never launches", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo", name: "repo" };
+  h.client.title.set_value("Use this framework again");
+  h.client.form.priority = 3;
+  h.client.form.assignToMe = false;
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.validations[0].machine, "remote");
+  const create = h.requests.find(x => x.request.op === "create").request.new;
+  assert.match(create.description, /"computerId":"core-remote"/);
+  assert.deepEqual(h.routingChecks, []);
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.client.taskDefaults().context.priority, 3);
+  assert.equal(h.client.taskDefaults().context.assignToMe, false);
+  assert.equal(h.client.taskDefaults().lastRepository.folder, "/remote/repo");
+});
+
+test("New task validation failure keeps an editable draft and sends no create request", async () => {
+  const h = await harness({ ...captureOptions(), validationError: "Repository is offline" });
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo" };
+  h.client.title.set_value("Recover this task");
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.match(h.client.err, /Repository is offline/);
+  assert.equal(h.requests.some(x => x.request.op === "create"), false);
+  assert.equal(h.client.form.draft.uncertain, false);
+  assert.equal(h.client.title.value(), "Recover this task");
+});
+
+test("New task Create & start uses the validated snapshot through the subclass bridge", async () => {
+  const h = await harness({ ...captureOptions(), agents: [selectedAgent] });
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo" };
+  h.client.agentChoices = [selectedAgent];
+  h.client.agentKey = "codex";
+  h.client.agentsChecked = true;
+  h.client.title.set_value("Start explicitly");
+  h.client.afterCreate = function (issue, cx, start) {
+    h.modes.push(start);
+    if (start) h.main.worktree.call(this, cx, true, { issue });
+  };
+  h.client.submit(h.cx, true);
+  h.client.launchTarget = { machine: null, folder: "/wrong/repo" };
+  await h.flush();
+  assert.deepEqual(h.modes, [true]);
+  assert.equal(h.routingChecks[0].target.folder, "/remote/repo");
+  assert.equal(h.requests.find(x => x.request.op === "worktree").on, "remote");
+  assert.equal(h.requests.filter(x => x.request.op === "create").length, 1);
+});
+
+
+test("next New task restores compatible options from the previous successful task", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  h.client.title.set_value("First task");
+  h.client.form.state = "started";
+  h.client.form.priority = 2;
+  h.client.form.assignToMe = false;
+  h.client.submit(h.cx);
+  await h.flush();
+  const next = await harness({ ...captureOptions(), sharedStore: serializedStore(h) });
+  next.openCapture();
+  await next.flush();
+  assert.equal(next.client.title.value(), "");
+  assert.equal(next.client.form.team.id, "team-one");
+  assert.equal(next.client.form.state, "started");
+  assert.equal(next.client.form.priority, 2);
+  assert.equal(next.client.form.assignToMe, false);
+});
+
+test("late previous-task placement cannot overwrite a new explicit choice", async () => {
+  const response = delay();
+  const h = await harness({ ...captureOptions(), detailReply: () => response.promise });
+  h.openCapture();
+  await h.flush();
+  h.client.targetGeneration = 1;
+  const issue = { ...ticket, project: { id: "project-one" } };
+  h.client.form.project = "project-one";
+  const choices = [];
+  h.client.chooseComputer = (...args) => choices.push(args);
+  h.client.restoreTaskRepository(issue, h.client.form, h.cx);
+  const pending = h.flush();
+  await new Promise(setImmediate);
+  h.client.targetGeneration += 1;
+  response.resolve({ issue, description: '```json\n{"ericsHerdrLinearExecutionTarget":{"version":1,"computerId":"core-local","computerName":"origin","folder":"/repos/previous"}}\n```' });
+  await pending;
+  assert.equal(choices.length, 0);
+});
+
+test("previous-task canonical placement prefills the same project without a create or launch", async () => {
+  const h = await harness({ ...captureOptions(), description: '```json\n{"ericsHerdrLinearExecutionTarget":{"version":1,"computerId":"core-local","computerName":"origin","folder":"/repos/previous"}}\n```' });
+  h.openCapture();
+  await h.flush();
+  const issue = { ...ticket, project: { id: "project-one" } };
+  h.client.form.project = "project-one";
+  const choices = [];
+  h.client.chooseComputer = (machine, cx, target) => choices.push({ machine, target });
+  h.client.restoreTaskRepository(issue, h.client.form, h.cx);
+  await h.flush();
+  assert.equal(choices[0].machine, null);
+  assert.equal(choices[0].target.folder, "/repos/previous");
+  assert.equal(h.requests.some(x => x.request.op === "create"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+
+test("Create & start sends the submitted body before the new ticket detail arrives", async () => {
+  const detail = delay();
+  const h = await harness({ ...captureOptions(), agents: [selectedAgent], detailReply: () => detail.promise });
+  h.openCapture();
+  await h.flush();
+  h.client.launchTarget = { machine: "remote", folder: "/remote/repo" };
+  h.client.agentChoices = [selectedAgent]; h.client.agentKey = "codex"; h.client.agentsChecked = true;
+  h.client.title.set_value("Start with full context");
+  h.client.captureDescription.set_value("The agent must receive these acceptance checks.");
+  h.client.taskFor = h.main.taskFor;
+  h.client.worktree = h.main.worktree;
+  h.client.afterCreate = h.main.afterCreate;
+  h.client.openIssue = (issue, cx) => h.main.openIssue.call(h.client, issue, cx);
+  h.client.submit(h.cx, true);
+  const pending = h.flush();
+  await new Promise(setImmediate);
+  const launch = h.commands.find(x => x.name === "space.new");
+  assert.ok(launch);
+  assert.match(launch.args.task, /The agent must receive these acceptance checks/);
+  assert.match(launch.args.task, /DEMO-3785/);
+  detail.resolve({ issue: ticket, description: "Loaded later" });
+  await pending;
+});
+
+test("ordinary creation derives a short title and preserves the full multiline request", async () => {
+  const request = "  Fix   the new task flow\n\nKeep all of these details.  ";
+  const h = await harness({ request });
+  h.client.submit(h.cx);
+  await h.flush();
+  const created = h.requests.find(x => x.request.op === "create").request.new;
+  assert.equal(created.title, "Fix the new task flow");
+  assert.ok(created.description.startsWith(request + "\n\n"));
+  assert.equal(h.commands.length, 0);
+
+  const long = await harness({ request: "😀".repeat(110) + "\nDetails" });
+  long.client.submit(long.cx, true);
+  await long.flush();
+  const next = long.requests.find(x => x.request.op === "create").request.new;
+  assert.equal(next.title, "😀".repeat(97) + "...");
+  assert.deepEqual(long.modes, [true]);
+});
+
+test("last issue options survive a new dialog and workspace isolation", async () => {
+  const first = await harness();
+  first.client.form = { ...first.client.form, team: teams[1], project: null, state: "two-active", priority: 3, assignToMe: false };
+  first.client.rememberProject(null);
+  first.client.rememberTaskOptions();
+  const sharedStore = serializedStore(first);
+  const fresh = await harness({ sharedStore, teams, states: [{ id: "two-active", type: "started" }] });
+  setProjects(fresh);
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.team.id, "team-two");
+  assert.equal(fresh.client.form.state, "two-active");
+  assert.equal(fresh.client.form.priority, 3);
+  assert.equal(fresh.client.form.assignToMe, false);
+  assert.equal(fresh.client.form.project, null);
+  fresh.client.ws = "workspace-two";
+  fresh.client.create(fresh.cx);
+  await fresh.flush();
+  assert.equal(fresh.client.form.priority, 0);
+  assert.equal(fresh.client.form.assignToMe, true);
+  assert.equal(fresh.client.form.team.id, "team-one");
+});
+
+test("explicit project overrides an incompatible saved team and stale status", async () => {
+  for (const stale of ["removed", "completed", "canceled"]) {
+    const sharedStore = new Map([[defaultsKey, { "workspace-one": { issue: {
+      team: "team-two", states: { "team-one": "old-status" }, priority: 2, assignToMe: false,
+    } } }]]);
+    const h = await harness({ sharedStore, teams, states: [
+      { id: "backlog", type: "backlog" }, ...(stale === "removed" ? [] : [{ id: "old-status", type: stale }]),
+    ] });
+    setProjects(h);
+    h.client.create(h.cx, false, "project-one");
+    await h.flush();
+    assert.equal(h.client.form.team.id, "team-one");
+    assert.equal(h.client.form.state, "backlog");
+  }
+});
+
+test("unified task defaults are shared while demo choices stay isolated", async () => {
+  const h = await harness();
+  h.client.rememberTaskOptions();
+  h.client.form.capture = true;
+  h.client.form.priority = 4;
+  h.client.rememberTaskOptions();
+  assert.equal(h.client.taskDefaults().issue.priority, 4);
+  const before = JSON.stringify([...h.sharedStore]);
+  h.client.form.capture = false;
+  h.client.form.priority = 1;
+  h.client.demo = true;
+  h.client.rememberTaskOptions();
+  assert.equal(JSON.stringify([...h.sharedStore]), before);
+});
+
+
+test("creation waits for saved status validation and blocks on failed status reads", async () => {
+  const states = delay();
+  const h = await harness({ teams, statesReply: () => states.promise });
+  h.client.create(h.cx);
+  const flushing = h.flush();
+  await new Promise(setImmediate);
+  h.client.desc = { value: () => "A new request" };
+  h.client.submit(h.cx, true);
+  assert.match(h.client.err, /loading team statuses/);
+  assert.equal(h.requests.some(x => x.request.op === "create"), false);
+  states.resolve({ states: [{ id: "ready", type: "unstarted" }] });
+  await flushing;
+  assert.equal(h.client.form.state, "ready");
+  h.client.submit(h.cx);
+  await h.flush();
+  assert.equal(h.requests.find(x => x.request.op === "create").request.new.state, "ready");
+
+  const failed = await harness({ teams, statesReply: () => { throw new Error("offline"); } });
+  failed.client.create(failed.cx);
+  await failed.flush();
+  failed.client.desc = { value: () => "Retain request" };
+  failed.client.submit(failed.cx);
+  await failed.flush();
+  assert.match(failed.client.err, /Could not load team statuses/);
+  assert.equal(failed.requests.some(x => x.request.op === "create"), false);
+});
+
+test("no-project tasks retain their own last computer and repository", async () => {
+  const h = await harness();
+  h.client.screen = "create";
+  h.client.form.project = null;
+  h.client.rememberRepository({ machine: "remote", folder: "/remote/general" });
+  h.client.form.project = "project-one";
+  h.client.rememberRepository({ machine: null, folder: "/local/one" });
+  h.client.form.project = null;
+  assert.equal(h.client.defaultTaskMachine(), "remote");
+  assert.equal(h.client.mappedRepository("remote"), "/remote/general");
+  h.client.form.project = "project-one";
+  assert.equal(h.client.defaultTaskMachine(), null);
+  assert.equal(h.client.mappedRepository(null), "/local/one");
+});
+
+
+test("unified New task derives its title from a single multiline request", async () => {
+  const h = await harness(captureOptions());
+  h.openCapture();
+  await h.flush();
+  const request = "  Fix   task defaults\n\nPreserve this whole request.  ";
+  h.client.captureDescription.set_value(request);
+  h.client.submit(h.cx);
+  await h.flush();
+  const created = h.requests.find(x => x.request.op === "create").request.new;
+  assert.equal(created.title, "Fix task defaults");
+  assert.equal(created.description, request);
+  assert.deepEqual(h.commands, []);
+});
+
+
+test("CHA-4220: a legacy raw idea reopens and creates directly without waiting on native flush", async () => {
+  const idea = "Save captured ideas\nKeep the original text.";
+  const storage = new Map([["linear.idea-draft.v1:workspace-one", JSON.stringify({
+    version: 1, workspace: "workspace-one", draft: {
+      id: "legacy-idea", revision: 1, idea, title: "", description: "", review: false,
+      team: "team-one", project: null, state: "backlog", priority: 0, assignToMe: true, uncertain: false,
+    },
+  })]]);
+  let flushes = 0;
+  const h = await harness({ ...captureOptions(), storage,
+    flushStorage: () => { flushes++; return new Promise(() => {}); } });
+  h.openCapture();
+  await h.flush();
+  assert.equal(h.client.form.review, true);
+  assert.equal(h.client.title.value(), "Save captured ideas");
+  assert.equal(h.client.captureDescription.value(), idea);
+  h.client.submitCapture(h.cx);
+  h.client.submitCapture(h.cx);
+  await h.flush();
+  const creates = h.requests.filter(x => x.request.op === "create");
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].request.new.title, "Save captured ideas");
+  assert.ok(creates[0].request.new.description.includes("## Source idea\n\n" + idea));
+  assert.equal(flushes, 0);
+  assert.deepEqual(h.commands, []);
+  assert.deepEqual(h.validations, []);
+});
+
+
+for (const machine of ["remote", null]) test(`CHA-4248: managed worktree reaches space.new on ${machine ?? "explicit local"} when detached exec workers never start`, async () => {
+  const folder = "/repos/selected repository";
+  const h = await harness({ requireManagedWorker: true, launchTarget: { machine, folder },
+    spaces: [{ ...sourceSpace, machine: "other-focused-computer" }] });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "", "a connected target must launch even if exec-owned detached workers cannot start");
+  const runs = h.hcCalls.filter(args => args[0] === "run");
+  assert.equal(runs.length, 1);
+  const args = runs[0];
+  for (const flag of ["--bg", "--json", "--rm", "--no-parent", "--no-notify", "--outlive-parent"])
+    assert.ok(args.includes(flag), `managed work must use ${flag}`);
+  if (machine) assert.equal(args[args.indexOf("--on") + 1], machine);
+  else assert.equal(args.includes("--on"), false, "explicit local never inherits the focused remote computer");
+  assert.equal(args[args.indexOf("--cwd") + 1], folder);
+  const request = h.requests.find(x => x.request.op === "worktree");
+  assert.equal(request.on, machine);
+  assert.match(request.request.job, /^[0-9a-f]{16}$/);
+  assert.equal(request.request.bg, true);
+  assert.ok(h.requests.some(x => x.request.op === "job"));
+  assert.ok(h.requests.filter(x => x.request.op === "job").every(x => x.on === machine), "poll the same target that owns the worker");
+  assert.deepEqual(request.request.dirs, [folder]);
+  assert.equal(args[args.indexOf("--label") + 1], `linear.job=${request.request.job}`);
+  assert.deepEqual(args.slice(args.indexOf("--") + 1, args.indexOf("--") + 3), ["sh", "-c"]);
+  assert.match(args[args.indexOf("--") + 3], /app-jobs/);
+  assert.match(args[args.indexOf("--") + 3], /mkdir/);
+  assert.equal(args.at(-3), "herdr-linear-job");
+  assert.equal(args.at(-2), "/fake/herdr-linear");
+  const opened = h.commands.find(x => x.name === "space.new");
+  assert.ok(opened, "the prepared worktree is handed to the selected computer");
+  assert.equal(opened.args.machine, machine ?? "");
+  assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
+  const address = machine ? `${machine}/managed-worker` : "managed-worker";
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", address]]);
+});
+
+for (const [label, machine, reply] of [
+  ["missing address", "remote", { code: 0, stdout: "{}", stderr: "" }],
+  ["malformed response", "remote", { code: 0, stdout: "not JSON", stderr: "" }],
+  ["wrong remote host", "remote", { code: 0, stdout: '{"address":"other/managed-worker"}', stderr: "" }],
+  ["remote reply without host", "remote", { code: 0, stdout: '{"address":"managed-worker"}', stderr: "" }],
+  ["remote reply for explicit local", null, { code: 0, stdout: '{"address":"remote/managed-worker"}', stderr: "" }],
+  ["nonzero start result", "remote", { code: 1, stdout: "", stderr: "managed launch failed" }],
+]) test(`CHA-4248: ${label} blocks launch without starting on another computer`, async () => {
+  const h = await harness({ requireManagedWorker: true, launchTarget: { machine, folder: "/repos/selected" }, hcRunResult: reply });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1);
+  assert.ok(h.client.err, "an unconfirmed or misrouted worker must produce an actionable launch error");
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.requests.some(x => x.request.op === "start"), false, "failed placement must not transition the issue");
+  assert.equal(h.hcCalls.some(args => args[0] === "wait"), false, "never address an unconfirmed or wrong-host terminal");
+});
+
+test("CHA-4248: failed managed backend work cleans up its owned worker without launching", async () => {
+  const h = await harness({ requireManagedWorker: true, launchTarget: { machine: "remote", folder: "/repos/selected" },
+    backendJobError: "worktree fixture failed" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /worktree fixture failed/);
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.requests.some(x => x.request.op === "start"), false);
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
+});
+
+
+test("CHA-4248: a managed worker can acknowledge before its backend job marker is ready", async () => {
+  const h = await harness({ requireManagedWorker: true, jobMissingPolls: 2,
+    launchTarget: { machine: "remote", folder: "/repos/selected" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "", "initially missing marker is retried without abandoning or respawning the worker");
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1);
+  assert.equal(h.requests.filter(x => x.request.op === "job").length, 3);
+  const opened = h.commands.find(x => x.name === "space.new");
+  assert.ok(opened);
+  assert.equal(opened.args.machine, "remote");
+  assert.equal(opened.args.folder, "/repos/worktrees/demo-3785");
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
+});
+
+
+test("CHA-4248: an acknowledged worker that never reports startup fails within the readiness grace", async () => {
+  const h = await harness({ requireManagedWorker: true, jobMissingPolls: 1000, clockStepMs: 4000,
+    launchTarget: { machine: "remote", folder: "/repos/selected" } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /worktree worker on remote did not report startup/);
+  const polls = h.requests.filter(x => x.request.op === "job");
+  assert.ok(polls.length > 0 && polls.length < 5, "startup must fail after its short grace, not poll until the five-minute worktree limit");
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1, "readiness timeout never respawns work");
+  assert.deepEqual(h.commands, []);
+  assert.equal(h.requests.some(x => x.request.op === "start"), false);
+  assert.deepEqual(h.hcCalls.filter(args => args[0] === "wait"), [["wait", "--json", "--timeout", "5", "remote/managed-worker"]]);
+  assert.equal(h.client.busy, "");
+});
+
+
+for (const machine of ["remote", null]) test(`CHA-4248: a fresh no-origin repository prepares its issue branch before launching on ${machine ?? "explicit local"}`, async () => {
+  const folder = "/repos/newly initialized";
+  const h = await harness({ requireLocalBranch: true, launchTarget: { machine, folder } });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "", "a new committed repository must not fail against the backend's nonexistent origin/main default");
+  assert.equal(h.branchPreparations.length, 1);
+  assert.equal(h.branchPreparations[0].target.machine, machine);
+  assert.equal(h.branchPreparations[0].target.folder, folder);
+  assert.equal(h.branchPreparations[0].branch, ticket.branch);
+  assert.equal(h.branchPreparations[0].base, "");
+  assert.equal(h.hcCalls.filter(args => args[0] === "run").length, 1);
+  const opened = h.commands.find(x => x.name === "space.new");
+  assert.ok(opened);
+  assert.equal(opened.args.machine, machine ?? "");
+});
+
+test("CHA-4248: branch preparation failure stops before worker creation and issue transition", async () => {
+  const h = await harness({ launchTarget: { machine: "remote", folder: "/repos/newly initialized" },
+    branchPreparationError: "Could not prepare the local issue branch" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.match(h.client.err, /Could not prepare the local issue branch/);
+  assert.equal(h.branchPreparations.length, 1);
+  assert.deepEqual(h.hcCalls, []);
+  assert.equal(h.requests.some(x => ["worktree", "start"].includes(x.request.op)), false);
+  assert.deepEqual(h.commands, []);
+});
+
+test("CHA-4248: configured backend base is passed unchanged to branch preparation", async () => {
+  const h = await harness({ launchTarget: { machine: "remote", folder: "/repos/chosen" }, routingBase: "release/stable" });
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.equal(h.client.err, "");
+  assert.equal(h.branchPreparations.length, 1);
+  assert.equal(h.branchPreparations[0].base, "release/stable");
+  assert.ok(h.commands.some(x => x.name === "space.new"));
+});
+
+test("right-clicking an issue opens the issue menu for that issue, and nothing without a link", async () => {
+  const overlays = [];
+  const h = await harness({ openOverlay: spec => { overlays.push(spec); return "menu-overlay"; } });
+  let stopped = 0;
+  const cx = { stop_propagation: () => { stopped += 1; } };
+  assert.equal(h.client.issueMenu(ticket, cx), "menu-overlay");
+  assert.equal(stopped, 1, "the right-click must not also reach the row or window drag");
+  assert.equal(overlays.length, 1);
+  assert.equal(overlays[0].mod, "linear-board");
+  assert.equal(overlays[0].kind, "popup");
+  assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ role: "issue-menu",
+    issue: { id: ticket.id ?? null, identifier: ticket.identifier, title: ticket.title, url: ticket.url, teamKey: ticket.teamKey ?? ticket.team?.key ?? null }, demo: false }));
+  // CHA-4318: an issue with a Linear id gets room for Pin and Tags.
+  assert.equal(overlays[0].height, ticket.id ? 187 : 122);
+  assert.equal(h.client.issueMenu({ ...ticket, url: "" }, cx), null);
+  assert.equal(overlays.length, 1);
+});
+
+test("an unavailable saved computer still lists agents but keeps Start blocked", async () => {
+  const description = "```json\n" + JSON.stringify({ ericsHerdrLinearExecutionTarget: { version: 1,
+    computerId: "gone-core", computerName: "gone-computer", folder: "/gone/code/project" } }) + "\n```";
+  const h = await harness({ description, registry: [], launchTarget: { machine: null, folder: "/wrong/default" } });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.blocked, true);
+  assert.equal(h.client.launchTarget.folder, "");
+  assert.match(h.client.repositoryError, /gone-computer/);
+  assert.equal(h.client.agentsChecked, true);
+  assert.deepEqual(h.client.agentChoices.map(a => a.key), ["codex"]);
+  // The unknown computer is not a Herdr machine: its agents are read on this one.
+  assert.deepEqual(h.agentChecks, [null]);
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.equal(h.requests.some(r => r.request.op === "worktree"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+test("a late blocked-target agent read never replaces an explicit computer choice", async () => {
+  const h = await harness({ launchTarget: { machine: null, folder: "" } });
+  h.client.blockLaunchTarget("Blocked", h.cx);
+  const generation = h.client.targetGeneration;
+  const read = h.client.agentsWhileBlocked(h.cx, generation);
+  h.client.targetGeneration += 1;
+  h.client.launchTarget = { machine: "remote", folder: "/remote/code/project" };
+  h.client.agentChoices = [{ key: "remote-agent", installed: true }];
+  await read;
+  assert.deepEqual(h.client.agentChoices.map(a => a.key), ["remote-agent"]);
+});
+
+test("sidebar words search Linear; a key still finds by key; other copies never search text", async () => {
+  const replies = [];
+  const h = await harness({ apiReply: async body => {
+    replies.push(body);
+    if (body.query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one", name: "Workspace", urlKey: "example" }, viewer: { id: "me" } } };
+    assert.match(body.query, /TaskSearch/);
+    return { data: { searchIssues: { nodes: [{ id: "issue-9", identifier: "DEMO-9", title: "Pick the harness", branchName: "demo-9",
+      url: "https://linear.app/example/issue/DEMO-9", priority: 0, state: { id: "s", name: "Todo", type: "unstarted", color: "#999", position: 0 },
+      team: { id: "team-one", key: "DEMO" }, project: null, assignee: null }] } } };
+  } });
+  const now = { ...h.cx, timer: { after: (_ms, fn) => fn(now), every: () => {} } };
+  Object.assign(h.client, { role: "sidebar", tab: "mine", drilled: null, on: null, api: null });
+  h.client.filter = "harness";
+  h.client.lookUp(now);
+  await h.flush();
+  assert.equal(h.client.found.query, "harness");
+  assert.deepEqual([...h.client.found.issues.map(i => i.identifier)], ["DEMO-9"]);
+  assert.equal(replies.at(-1).variables.term, "harness");
+  h.client.filter = "h";
+  h.client.lookUp(now);
+  assert.equal(h.client.found, null, "one letter is not searched");
+  h.client.role = "projects";
+  h.client.filter = "harness";
+  h.client.lookUp(now);
+  assert.equal(h.client.found, null, "only the sidebar searches words");
+});
+
+test("without the API key the sidebar says why Linear search is missing", async () => {
+  const h = await harness({ statusReply: { workspaces: [{ id: "workspace-one", name: "Workspace", urlKey: "example" }] } });
+  const now = { ...h.cx, timer: { after: (_ms, fn) => fn(now), every: () => {} } };
+  Object.assign(h.client, { role: "sidebar", tab: "mine", drilled: null, on: "", api: null });
+  h.client.filter = "harness";
+  h.client.lookUp(now);
+  await h.flush();
+  assert.equal(h.client.found.query, "harness");
+  assert.equal(h.client.found.issues.length, 0);
+  assert.match(h.client.found.error, /API key/);
+});
+
+test("sidebar Linear matches leave out tickets already shown as spaces and stale searches", async () => {
+  const { main } = await harness();
+  {
+    const view = { filter: "harness", found: { query: "harness", issues: [{ id: "a" }, { id: "b" }] } };
+    const records = [{ issue: { id: "a" } }, { issue: null }];
+    assert.deepEqual([...main.linearMatches.call(view, records).issues.map(i => i.id)], ["b"]);
+    view.filter = "harness two";
+    const stale = main.linearMatches.call(view, records);
+    assert.equal(stale.issues.length, 0);
+    assert.equal(stale.searching, true);
+    view.filter = "";
+    assert.equal(main.linearMatches.call(view, records).searching, false);
+  }
 });

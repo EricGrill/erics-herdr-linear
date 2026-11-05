@@ -39,23 +39,24 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
   const effect = name => (...args) => { effects.push({ name, args }); };
   const boundaries = {
     "gpui-kit": { div: () => native("div"), svg: () => native("svg"), image: () => native("image") },
-    "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {},
+    "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, InputState: {}, Popup: {},
       TextView: { markdown: (id, body) => native("markdown").id(id).child(body) } },
     "./client.js": { default: class {
       rememberProject(id, workspace) { effects.push({ name: "rememberProject", id, workspace }); }
     } },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": {
-      spaces: () => [], panes: () => [], agents: () => [], machines: () => [],
+      spaces: () => [], panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
       shared: key => state.get(key), setShared: (key, value) => { effects.push({ name: "setShared", key }); state.set(key, value); },
       theme: () => new Proxy({}, { get: () => "#777777" }), props: () => ({ role: "crew" }),
       setAgentOrder: effect("setAgentOrder"), run: effect("run"), exec: effect("exec"),
-      openOverlay: effect("openOverlay"), closeOverlay: effect("closeOverlay"), knownAgents: () => [], appHome: () => "/fake",
+      openOverlay: effect("openOverlay"), closeOverlay: effect("closeOverlay"), knownAgents: () => [], settings: () => ({ zoom: 1 }), appHome: () => "/fake",
     },
     "./enrich.js": {
       indexEnrichment: values => ({ byId: new Map(values.map(r => [r.id, r])), byIdentifier: new Map(values.map(r => [r.identifier, r])) }),
       fetchAgents: async () => ({ agents: [yoda, leia], complete: true, error: null }),
       fetchQueue: queue, fetchIssueDetail: detail,
+      fetchPullRequests: async () => ({ pulls: {}, error: null }), rowPullRequest: () => null,
       reassignIssue: args => { writes.push(args); return write(args); },
       // Deliberately stale: freshly fetched individual queues must own their counts.
       fetchEnrichment: enrichment ?? (async () => ({ rows, error: null, fetchedAt: 100, partial: false })),
