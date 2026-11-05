@@ -18,5 +18,9 @@
       "awaiting review",
       "ready for review"
     ]
+  },
+  "cleanup": {
+    "autoClose": true,
+    "graceMinutes": 10
   }
 }

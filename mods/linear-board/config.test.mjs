@@ -30,7 +30,14 @@ test("invalid config values are rejected instead of quietly enabling personal de
     { enrichment: { envKey: "BAD;NAME" } }, { enrichment: { doppler: {} } },
     { enrichment: { doppler: { project: "one", config: "dev", keyNames: [] } } },
     { enrichment: { doppler: { project: "one", config: "dev", keyNames: ["--bad"] } } },
-    { attention: { labels: "needs-me" } }, { attention: { states: [""] } }]) {
+    { attention: { labels: "needs-me" } }, { attention: { states: [""] } },
+    { cleanup: "on" }, { cleanup: { autoClose: "yes" } }, { cleanup: { graceMinutes: -1 } }, { cleanup: { graceMinutes: "10" } }]) {
     assert.throws(() => normalizeConfig(input));
   }
+});
+
+test("auto-close is on with a ten-minute grace period unless the machine config says otherwise", () => {
+  assert.deepEqual(normalizeConfig().cleanup, { autoClose: true, graceMinutes: 10 });
+  assert.deepEqual(normalizeConfig({ cleanup: { autoClose: false } }).cleanup, { autoClose: false, graceMinutes: 10 });
+  assert.deepEqual(normalizeConfig({ cleanup: { graceMinutes: 0 } }).cleanup, { autoClose: true, graceMinutes: 0 });
 });
