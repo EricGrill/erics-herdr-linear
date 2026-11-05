@@ -20,7 +20,12 @@ export const ATTENTION_LABELS = new Set(DEFAULT_ATTENTION_LABELS);
 export const ATTENTION_STATES = new Set(DEFAULT_ATTENTION_STATES);
 
 /** Labels that are routing or bookkeeping rather than something to show as a chip. */
-const QUIET_LABEL = /^(?:agent:|repo:|closed-|parked-|QA — )/i;
+export const QUIET_LABEL = /^(?:agent:|repo:|closed-|parked-|QA — )/i;
+
+/** The Linear label that pins an issue's space to the top of the sidebar (see tags.js).
+ *  It is shown as the PINNED section, never as a chip. */
+export const PIN_LABEL = "Pinned";
+export const isPinLabel = name => String(name ?? "").trim().toLowerCase() === PIN_LABEL.toLowerCase();
 
 /** "Homelab · Network & DNS" -> { group: "Homelab", leaf: "Network & DNS" }.
  *  A name without the separator is its own leaf under no group. Only the first
@@ -48,7 +53,7 @@ export function issueNeedsYou(issue, attention = {}) {
 
 /** The chips worth drawing on an issue row, routing labels dropped. */
 export function visibleLabels(issue) {
-  return (issue?.labels ?? []).filter(l => !QUIET_LABEL.test(String(l)));
+  return (issue?.labels ?? []).filter(l => !QUIET_LABEL.test(String(l)) && !isPinLabel(l));
 }
 
 /** The agent a Linear issue is delegated to, or null. Assignee is deliberately not a

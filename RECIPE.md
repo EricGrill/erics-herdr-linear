@@ -21,6 +21,8 @@ those already shown as spaces. Word search uses the configured Linear API key; t
 sign-in only finds issues by key. New task sits beside the
 number of matching spaces. Below it, non-empty groups appear in this order:
 
+0. Pinned, for spaces whose Linear issue has the `Pinned` label. Each keeps its own
+   state icon and line, and is not repeated in the groups below.
 1. Needs you, using the theme's blocked color.
 2. Done, using its done color.
 3. Working, using its working color and a native spinning work icon.
@@ -28,7 +30,9 @@ number of matching spaces. Below it, non-empty groups appear in this order:
 
 Each space row is **49 px** tall. Its first line shows the issue identifier and title, or
 the space name if unlinked; a tooltip provides the full text. The second line shows its
-state and machine. An ellipsis opens issue details; an unlinked row has an attach action.
+state and machine, then up to two of the issue's Linear tags as chips in their Linear
+colors. A 3 px stripe at the left edge takes the first tag's color (untagged rows keep the
+gap, so rows stay aligned). An ellipsis opens issue details; an unlinked row has an attach action.
 The active space gets the theme's selected surface. The list scrolls as one full-height
 area rather than squeezing agents or another list below it.
 

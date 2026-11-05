@@ -23,16 +23,22 @@ const overlays = [], closed = [], commands = [];
 let currentProps = {};
 let liveSpaces = [];
 const sharedState = {};
+// Herdr's exec, answering GraphQL from a test's own function. Unset, nothing answers.
+let execImpl = async () => ({ code: 1, stdout: "", stderr: "no Linear in tests" });
+const inputs = [];
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
-  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: {}, Popup: {}, TextView: {} },
+  "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: { new: () => native("input") },
+    InputState: { new: options => { const state = { options, text: "", handlers: {}, focused: false, on(name, fn) { state.handlers[name] = fn; },
+      value: () => state.text, set_value(v) { state.text = v; }, focus() { state.focused = true; } }; inputs.push(state); return state; } },
+    Popup: {}, TextView: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
     spaces: () => liveSpaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [], shared: key => sharedState[key] ?? null,
     theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
-    setShared: noop, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
-    closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
+    setShared: (key, value) => { sharedState[key] = value; }, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
+    closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: (...args) => execImpl(...args),
   },
 };
 const cache = new Map();
@@ -194,7 +200,7 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
     assert.equal(overlays[0].mod, "linear-board");
     assert.equal(overlays[0].kind, "popup");
     assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ role: "issue-menu",
-      issue: { identifier: "DEMO-42", title: "Fix a bug", url }, space: { id: "space-7", folder: "/work/demo-42", machine: null } }));
+      issue: { id: "one", identifier: "DEMO-42", title: "Fix a bug", url, teamKey: null }, space: { id: "space-7", folder: "/work/demo-42", machine: null } }));
   }
 
   currentProps = { role: "issue-menu", overlay: "menu-9", ...overlays[0].props };
@@ -203,14 +209,14 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
     menu.init({}, { focus_handle: () => ({ focus: noop }), spawn: noop });
     menu.menuGit = "linked";
     const view = menu.render({});
-    assert.match(text(view), /Open in Linear app.*Open in browser.*Copy link.*Rename.*New worktree.*Open worktree.*Remove worktree.*Close/);
+    assert.match(text(view), /Open in Linear app.*Open in browser.*Copy link.*Pin to top.*Tags….*Rename.*New worktree.*Open worktree.*Remove worktree.*Close/);
     const effects = [];
     const cx = { open_url: u => effects.push(["open", u]), write_to_clipboard: noop };
     commands.length = 0; overlays.length = 0; closed.length = 0;
     menu.issueMenuChoose(0, cx);
-    menu.issueMenuChoose(3, cx);
-    menu.issueMenuChoose(4, cx);
-    menu.issueMenuChoose(7, cx);
+    menu.issueMenuChoose(5, cx);
+    menu.issueMenuChoose(6, cx);
+    menu.issueMenuChoose(9, cx);
     assert.deepEqual(effects, [["open", "linear://example/issue/DEMO-42"]]);
     assert.equal(JSON.stringify(commands), JSON.stringify([["space.rename", { id: "space-7" }], ["space.close", { id: "space-7" }]]));
     assert.equal(overlays.length, 1);
@@ -332,4 +338,145 @@ test("sidebar rows show time in state, hide a matching Linear status and list th
   try {
     assert.deepEqual(board.visibleSpaces().map(r => r.space.id), ["t", "w"], "the space that started working most recently comes first");
   } finally { board.records = saved; board.enrichment = savedEnrich; }
+});
+
+// ---- CHA-4318: pins, tags and colors are Linear labels ---------------------------------
+
+const TAGS = "linear-board.tags";
+const same = (actual, expected, message) => assert.deepStrictEqual(JSON.parse(JSON.stringify(actual)), expected, message);
+const graphql = args => JSON.parse(String(args[1]).split("<<'HERDR_BOARD_QUERY'\n")[1].split("\nHERDR_BOARD_QUERY")[0]);
+const reply = data => ({ code: 0, stdout: JSON.stringify({ data }), stderr: "" });
+const pinned = { id: "pin", name: "Pinned", color: "#F2C94C" }, bug = { id: "bug", name: "Bug", color: "#EB5757" };
+
+test("CHA-4318: a tagged row is drawn in its tag's Linear color with its tags as chips", () => {
+  sharedState[TAGS] = { tags: { "DEMO-42": { labels: ["agent:claude", "Pinned", "Bug", "Frontend", "Backend"], colors: { Bug: "#EB5757" } } } };
+  try {
+    const row = board.workRow(record, "tagged");
+    const stripe = nodes(row).find(node => node.attributes.id?.[0] === "tagged-color");
+    assert.deepEqual(stripe.attributes.bg, ["#EB5757"]);
+    assert.match(stripe.attributes.tooltip[0], /Linear tag “Bug”/);
+    const chips = nodes(row).filter(node => /^tagged-tag-/.test(node.attributes.id?.[0] ?? ""));
+    assert.deepEqual(chips.map(text), ["Bug", "Frontend", "+1"], "two tags and a count; no routing label or pin chip");
+    assert.equal(chips[0].attributes.text_color[0], "#EB5757");
+    assert.match(chips[0].attributes.tooltip[0], /Bug, Frontend, Backend/);
+    delete sharedState[TAGS];
+    const plainRow = board.workRow(record, "plain");
+    const empty = nodes(plainRow).find(node => node.attributes.id?.[0] === "plain-color");
+    assert.ok(empty && !empty.attributes.bg, "an untagged row keeps the gap so rows stay aligned");
+  } finally { delete sharedState[TAGS]; }
+});
+
+test("CHA-4318: pinned spaces lead the sidebar and keep their own state line", () => {
+  const space = (id, name) => ({ id, name, machine: null, tabs: [] });
+  const one = { ...record, issue: { ...issue, id: "a", identifier: "DEMO-1" }, agents: [], status: "working", space: space("a", "Alpha") };
+  const two = { ...record, issue: { ...issue, id: "b", identifier: "DEMO-2" }, agents: [], status: "idle", space: space("b", "Beta") };
+  const saved = board.records, savedEnrich = board.enrichment;
+  board.records = () => [one, two];
+  board.enrichment = () => ({ byIdentifier: new Map() });
+  board.input = {};
+  sharedState[TAGS] = { tags: { "DEMO-2": { labels: ["Pinned"], colors: {} } } };
+  try {
+    const records = board.visibleSpaces();
+    same(records.map(r => [r.space.id, r.pinned]), [["a", false], ["b", true]]);
+    const body = text(board.sidebar());
+    assert.match(body, /PINNED\|1.*DEMO-2.*Idle.*WORKING\|1.*DEMO-1/, "pinned first, still showing Idle");
+    assert.doesNotMatch(body, /IDLE/, "a pinned space is not listed twice");
+    board.filter = "pinned";
+    same(board.visibleSpaces().map(r => r.space.id), [], "the pin is not a searchable tag");
+    sharedState[TAGS] = { tags: { "DEMO-1": { labels: ["Frontend"], colors: {} } } };
+    board.filter = "front";
+    same(board.visibleSpaces().map(r => r.space.id), ["a"], "search finds a space by its tags");
+  } finally { board.records = saved; board.enrichment = savedEnrich; board.filter = ""; delete sharedState[TAGS]; }
+});
+
+test("CHA-4318: Pin to top writes the Linear label, waits for Linear and updates every copy", async () => {
+  const url = "https://linear.app/example/issue/DEMO-42";
+  let labels = [];
+  const sent = [];
+  execImpl = async (_cmd, args) => {
+    const body = graphql(args);
+    sent.push(body.query.match(/(issueLabels|issueLabelCreate|issueAddLabel|issueRemoveLabel|issue)\(/)[1]);
+    if (/issueLabels\(/.test(body.query)) return reply({ issueLabels: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [pinned] } });
+    if (/issueAddLabel/.test(body.query)) { labels = [pinned]; return reply({ issueAddLabel: { success: true } }); }
+    return reply({ issue: { id: "one", identifier: "DEMO-42", labels: { nodes: labels } } });
+  };
+  currentProps = { role: "issue-menu", overlay: "menu-1", issue: { id: "one", identifier: "DEMO-42", title: "Fix a bug", url, teamKey: "DEMO" } };
+  const pending = [];
+  const cx = { focus_handle: () => ({ focus: noop }), spawn: fn => pending.push(fn(cx)), notify: noop, write_to_clipboard: noop, open_url: noop };
+  try {
+    closed.length = 0;
+    const menu = new Board();
+    menu.init({}, cx);
+    const items = menu.issueMenuItems();
+    same(items.map(i => i.label), ["Open in Linear app", "Open in browser", "Copy link", "Pin to top", "Tags…"]);
+    menu.issueMenuChoose(3, cx);
+    assert.match(text(menu.render({})), /Pinning…/);
+    assert.deepEqual(closed, [], "the menu stays open until Linear answers");
+    await Promise.all(pending);
+    assert.deepEqual(sent, ["issueLabels", "issue", "issueAddLabel", "issue"]);
+    assert.deepEqual(closed, ["menu-1"]);
+    same(sharedState[TAGS].tags["DEMO-42"].labels, ["Pinned"], "every copy of the mod sees the pin at once");
+    assert.deepEqual(menu.issueMenuItems().map(i => i.label)[3], "Unpin");
+
+    // A refusal is shown in the menu, which stays open.
+    execImpl = async (_cmd, args) => /issueRemoveLabel/.test(graphql(args).query)
+      ? reply({ issueRemoveLabel: { success: false } }) : reply({ issue: { id: "one", identifier: "DEMO-42", labels: { nodes: [pinned] } } });
+    closed.length = 0; pending.length = 0;
+    menu.issueMenuChoose(3, cx);
+    await Promise.all(pending);
+    assert.deepEqual(closed, []);
+    assert.match(text(menu.render({})), /Linear did not accept the change/);
+  } finally { currentProps = {}; delete sharedState[TAGS]; delete sharedState["linear-board.enrich"]; execImpl = async () => ({ code: 1, stdout: "", stderr: "" }); }
+});
+
+test("CHA-4318: Tags… lists Linear labels, toggles one at a time and can create a tag", async () => {
+  let labels = [bug];
+  const writes = [];
+  execImpl = async (_cmd, args) => {
+    const body = graphql(args);
+    if (/issueLabels\(/.test(body.query)) return reply({ issueLabels: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      bug, { id: "fe", name: "Frontend", color: "#4CB782", team: { key: "DEMO" } }, { id: "r", name: "repo:demo" }, pinned] } });
+    if (/issueLabelCreate/.test(body.query)) { writes.push(["create", body.variables.input.name]); return reply({ issueLabelCreate: { success: true, issueLabel: { id: "new", name: body.variables.input.name, color: body.variables.input.color } } }); }
+    if (/issueAddLabel/.test(body.query)) { writes.push(["add", body.variables.label]); labels = [...labels, { id: body.variables.label, name: body.variables.label === "new" ? "Later" : "Frontend", color: null }]; return reply({ issueAddLabel: { success: true } }); }
+    if (/issueRemoveLabel/.test(body.query)) { writes.push(["remove", body.variables.label]); labels = labels.filter(l => l.id !== body.variables.label); return reply({ issueRemoveLabel: { success: true } }); }
+    return reply({ issue: { id: "one", identifier: "DEMO-42", labels: { nodes: labels } } });
+  };
+  const url = "https://linear.app/example/issue/DEMO-42";
+  currentProps = { role: "issue-menu", overlay: "menu-2", issue: { id: "one", identifier: "DEMO-42", title: "Fix a bug", url, teamKey: "DEMO" } };
+  const pending = [];
+  const cx = { focus_handle: () => ({ focus: noop }), spawn: fn => pending.push(fn(cx)), notify: noop, write_to_clipboard: noop, open_url: noop };
+  try {
+    const menu = new Board();
+    menu.init({}, cx);
+    overlays.length = 0; closed.length = 0;
+    menu.issueMenuChoose(4, cx);
+    assert.equal(overlays[0].props.role, "issue-tags");
+    assert.deepEqual(closed, ["menu-2"]);
+
+    currentProps = { ...overlays[0].props, overlay: "tags-1" };
+    const picker = new Board();
+    picker.init({}, cx);
+    assert.ok(inputs.at(-1).focused, "typing goes straight to the search field");
+    await Promise.all(pending.splice(0));
+    assert.match(text(picker.render({})), /✓.*Bug.*Frontend/, "the issue's own tag first, checked; no routing label or pin");
+    assert.doesNotMatch(text(picker.render({})), /repo:demo|Pinned/);
+
+    picker.tagToggle(picker.tagRows().find(l => l.name === "Frontend"), cx);
+    await Promise.all(pending.splice(0));
+    picker.tagToggle(picker.tagRows().find(l => l.name === "Bug"), cx);
+    await Promise.all(pending.splice(0));
+    assert.deepEqual(writes, [["add", "fe"], ["remove", "bug"]], "one label per write; nothing else is replaced");
+    same(sharedState[TAGS].tags["DEMO-42"].labels, ["Frontend"]);
+
+    const search = inputs.at(-1);
+    search.text = "Later";
+    search.handlers.change({}, cx);
+    assert.match(text(picker.render({})), /Create tag “Later”/);
+    search.handlers.submit({}, cx);
+    await Promise.all(pending.splice(0));
+    assert.deepEqual(writes.slice(2), [["create", "Later"], ["add", "new"]]);
+    same(sharedState[TAGS].tags["DEMO-42"].labels, ["Frontend", "Later"]);
+    assert.equal(search.text, "", "the field clears after creating");
+    assert.equal(picker.tagError, "");
+  } finally { currentProps = {}; delete sharedState[TAGS]; delete sharedState["linear-board.enrich"]; execImpl = async () => ({ code: 1, stdout: "", stderr: "" }); }
 });
