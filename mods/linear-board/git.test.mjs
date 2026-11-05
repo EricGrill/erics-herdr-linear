@@ -22,20 +22,40 @@ origin/main
  3 files changed, 40 insertions(+), 2 deletions(-)
 `;
 
-test("git state parses branch, upstream ahead/behind, uncommitted files and the diff since base", () => {
+test("git state parses branch, ahead/behind against main, uncommitted files and the diff since base", () => {
   assert.deepEqual(parseGitState(STATUS), {
     branch: "r2d2/CHA-4305-header-git-state", upstream: "origin/r2d2/CHA-4305-header-git-state", base: "origin/main",
-    ahead: 2, behind: 1, changed: 3, added: 40, removed: 2,
+    against: "origin/main", ahead: 5, behind: 0, changed: 3, added: 40, removed: 2,
   });
 });
 
-test("without an upstream, ahead/behind counts against the base branch", () => {
-  const out = STATUS.replace(/# branch.upstream .*\n# branch.ab .*\n/, "");
-  const git = parseGitState(out);
-  assert.equal(git.upstream, null);
-  assert.equal(git.ahead, 5);
-  assert.equal(git.behind, 0);
+test("ahead/behind counts against main even when the branch has its own upstream", () => {
+  const git = parseGitState(STATUS);
+  assert.equal(aheadBehind(git), "↑5", "not the upstream's ↑2 ↓1");
   assert.equal(branchHover(git), "r2d2/CHA-4305-header-git-state (against origin/main)");
+  const noUpstream = parseGitState(STATUS.replace(/# branch.upstream .*\n# branch.ab .*\n/, ""));
+  assert.equal(noUpstream.upstream, null);
+  assert.equal(branchHover(noUpstream), "r2d2/CHA-4305-header-git-state (against origin/main)");
+});
+
+test("a deleted remote branch is never named in the hover", () => {
+  // git still prints the upstream's name, but no ahead/behind for it, once it is gone.
+  const gone = parseGitState(STATUS.replace(/# branch.ab .*\n/, ""));
+  assert.equal(gone.upstream, "origin/r2d2/CHA-4305-header-git-state");
+  assert.equal(gone.against, "origin/main");
+  assert.equal(branchHover(gone), "r2d2/CHA-4305-header-git-state (against origin/main)");
+  // Gone and no default branch either: nothing was counted, so the hover names nothing.
+  const nothing = parseGitState(STATUS.replace(/# branch.ab .*\n/, "").replace(/--base[\s\S]*$/, ""));
+  assert.equal(nothing.ahead, null);
+  assert.equal(nothing.against, null);
+  assert.equal(branchHover(nothing), "r2d2/CHA-4305-header-git-state");
+});
+
+test("without a default branch, ahead/behind falls back to the upstream", () => {
+  const git = parseGitState(STATUS.replace(/--base[\s\S]*$/, ""));
+  assert.equal(git.base, null);
+  assert.deepEqual([git.ahead, git.behind, git.against], [2, 1, "origin/r2d2/CHA-4305-header-git-state"]);
+  assert.equal(branchHover(git), "r2d2/CHA-4305-header-git-state (against origin/r2d2/CHA-4305-header-git-state)");
 });
 
 test("detached heads, missing bases and non-git output degrade to nulls", () => {
@@ -103,7 +123,7 @@ test("reads go to the space's machine and never throw", async () => {
   const calls = [];
   const exec = async (command, args, options) => { calls.push({ command, args, options }); return { code: 0, stdout: STATUS, stderr: "" }; };
   const git = await readGitState(exec, "/home/build/code/repo", "build-2");
-  assert.equal(git.ahead, 2);
+  assert.equal(git.ahead, 5);
   assert.deepEqual(calls[0].options, { cwd: "/home/build/code/repo", on: "build-2" });
   assert.equal(calls[0].command, "sh");
   assert.equal(await readGitState(exec, ""), null);
@@ -117,8 +137,19 @@ test("reads go to the space's machine and never throw", async () => {
   assert.deepEqual(prCalls[0].options, { cwd: "/repo", on: "remote" });
 });
 
+test("a read that never answers times out as null, so the next cycle can try again", async () => {
+  const hung = () => new Promise(() => {});
+  const started = Date.now();
+  assert.equal(await readGitState(hung, "/repo", "remote", 30), null);
+  assert.equal(await readPr(hung, "/repo", "remote", 30), null);
+  assert.ok(Date.now() - started < 2000);
+  // A read that answers in time is unaffected by the limit.
+  const quick = async () => ({ code: 0, stdout: STATUS, stderr: "" });
+  assert.equal((await readGitState(quick, "/repo", null, 1000)).ahead, 5);
+});
+
 const hasGit = spawnSync("git", ["--version"]).status === 0;
-test("the git script reads a real worktree: upstream ahead/behind, uncommitted and lines since base", { skip: !hasGit }, () => {
+test("the git script reads a real worktree: ahead/behind main, uncommitted and lines since base", { skip: !hasGit }, () => {
   const dir = mkdtempSync(join(tmpdir(), "board-git-"));
   try {
     const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" });
@@ -130,18 +161,27 @@ test("the git script reads a real worktree: upstream ahead/behind, uncommitted a
     git(work, "add", "a.txt");
     git(work, "commit", "-q", "-m", "base");
     git(work, "push", "-q", "-u", "origin", "main");
-    git(work, "checkout", "-q", "-b", "feature", "--track", "origin/main");
+    git(work, "checkout", "-q", "-b", "feature");
     writeFileSync(join(work, "a.txt"), "one\ntwo\nthree\n");
     git(work, "commit", "-q", "-am", "work");
+    // Pushed, so level with its own upstream; main then moves on without it.
+    git(work, "push", "-q", "-u", "origin", "feature");
+    git(work, "checkout", "-q", "main");
+    writeFileSync(join(work, "c.txt"), "main\n");
+    git(work, "add", "c.txt");
+    git(work, "commit", "-q", "-m", "main moves");
+    git(work, "push", "-q", "origin", "main");
+    git(work, "checkout", "-q", "feature");
     writeFileSync(join(work, "a.txt"), "one\ntwo\n");
     writeFileSync(join(work, "b.txt"), "new\n");
     const out = execFileSync("sh", ["-c", GIT_SCRIPT], { cwd: work, encoding: "utf8" });
     const state = parseGitState(out);
     assert.equal(state.branch, "feature");
-    assert.equal(state.upstream, "origin/main");
+    assert.equal(state.upstream, "origin/feature");
     assert.equal(state.base, "origin/main");
+    assert.equal(state.against, "origin/main");
     assert.equal(state.ahead, 1);
-    assert.equal(state.behind, 0);
+    assert.equal(state.behind, 1, "behind main, though level with its own upstream");
     assert.equal(state.changed, 2, "one modified file and one untracked file");
     assert.deepEqual({ added: state.added, removed: state.removed }, { added: 1, removed: 0 });
     const outside = spawnSync("sh", ["-c", GIT_SCRIPT], { cwd: dir, encoding: "utf8" });
