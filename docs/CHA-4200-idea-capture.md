@@ -15,7 +15,7 @@ Primary action after review: **Create ticket**. Separate secondary action: **Sta
 1. **Quick capture and drafts:** highest-value first slice. Capture immediately without repository discovery or an installed agent. Save raw text with a suggested first-line title even if shaping is unavailable. Keep the existing New task path and repository validation intact.
 2. **Assisted ticket shaping:** turn a short thought into a reviewable ticket. User-triggered only. Suggest title, problem, outcome and testable checks; show assumptions separately. The approved implementation uses the bounded provider contract recorded below. Never run the thought as a shell command or start a worktree merely to shape it.
 3. **Screenshot plus one sentence:** explicitly select/paste an image and explain the problem. Link portable uploaded evidence to the ticket. Deferred to [CHA-4202](https://linear.app/chainbytes/issue/CHA-4202). The native feedback image helpers are frame-only; availability in this mod is unproven.
-4. **Capture from anywhere:** user-invoked global entry and optional OS dictation feeding the same draft. Deferred to [CHA-4203](https://linear.app/chainbytes/issue/CHA-4203). Verify shortcut support and preserve existing shortcuts before assigning a key.
+4. **Capture from anywhere:** user-invoked global entry and optional OS dictation feeding the same draft. Deferred to [CHA-4203](https://linear.app/chainbytes/issue/CHA-4203); discovery in [CHA-4203-global-capture.md](CHA-4203-global-capture.md). Verify shortcut support and preserve existing shortcuts before assigning a key.
 
 ## Sample ticket
 
