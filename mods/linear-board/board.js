@@ -176,3 +176,49 @@ export function machineGroups(records = [], machines = []) {
     b.records.length - a.records.length
     || String(a.name ?? "").localeCompare(String(b.name ?? "")));
 }
+
+const stamps = (tabs, key) => (tabs ?? []).map(t => Number(t?.[key])).filter(n => Number.isFinite(n) && n > 0);
+
+/** When a sidebar row entered its group, and where that time came from.
+ *  Herdr's own clock wins: a working space counts from the earliest tab that has been
+ *  working since (`working_since`), anything else from the tab that last changed state
+ *  (`changed_at`). Herdr has neither for a space nothing has happened in since the app
+ *  started, so then the ticket's last Linear update stands in. */
+export function laneSince(record, lane) {
+  const tabs = record?.space?.tabs;
+  const working = lane === "working" ? stamps(tabs, "working_since") : [];
+  if (working.length) return { at: Math.min(...working), source: "herdr" };
+  const changed = stamps(tabs, "changed_at");
+  if (changed.length) return { at: Math.max(...changed), source: "herdr" };
+  const updated = Date.parse(record?.issue?.updatedAt ?? "");
+  if (Number.isFinite(updated)) return { at: updated, source: "linear" };
+  return { at: null, source: null };
+}
+
+/** "4m", "3h", "2d"; "<1m" under a minute; "" with no time. */
+export function elapsed(at, now = Date.now()) {
+  if (!Number.isFinite(at)) return "";
+  const s = Math.max(0, Math.floor((now - at) / 1000));
+  if (s < 60) return "<1m";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** The Linear status worth printing next to a sidebar group, or "" when it says what the
+ *  group already says. Working matches a started ticket; Done matches a completed ticket or
+ *  one waiting for review; Needs you matches a started or needs-you ticket; Idle matches any
+ *  ticket that is still open. Linear status stays separate from agent activity: a finished
+ *  agent on a ticket that is still In Progress is shown, not hidden or "fixed". */
+export function linearMismatch(lane, issue, attention = {}) {
+  const name = issue?.state?.name;
+  if (!name) return "";
+  const type = String(issue.state.type ?? "").toLowerCase();
+  const needs = issueNeedsYou(issue, attention);
+  const matches = lane === "working" ? type === "started" && !needs
+    : lane === "done" ? type === "completed" || needs
+    : lane === "blocked" ? needs || type === "started"
+    : type !== "completed" && type !== "canceled";
+  if (matches) return "";
+  return lane === "done" && type === "started" ? `still ${name}` : `Linear: ${name}`;
+}

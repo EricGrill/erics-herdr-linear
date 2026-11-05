@@ -25,6 +25,7 @@ const QUERY = `query BoardEnrichment($after: String) {
     nodes {
       id
       identifier
+      updatedAt
       delegate { id name displayName avatarUrl active app isAssignable }
       assignee { displayName }
       state { name type }
@@ -78,6 +79,7 @@ export function parseEnrichment(text) {
   const rows = page.nodes.map(node => ({
     id: node?.id ?? null,
     identifier: String(node?.identifier ?? ""),
+    updatedAt: node?.updatedAt ? String(node.updatedAt) : null,
     delegate: node?.delegate ? {
       id: node.delegate.id ? String(node.delegate.id) : null,
       name: String(node.delegate.name ?? node.delegate.displayName ?? ""),
