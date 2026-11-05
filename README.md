@@ -16,6 +16,11 @@ the sidebar-footer version in `layouts/erics-linear.json` matches.
 
 - Puts work needing attention before finished, working, and idle spaces.
 - Shows each space's Linear ticket and machine. Click a space to return to its terminal.
+- Gives each machine its own colored dot, the same after every restart, and says when a
+  remote machine is offline or reconnecting, on its rows and under Add machine.
+- Keeps the current group's header (Needs you, Done, Working, Idle) pinned while you scroll.
+- Shows the Needs you count beside Erics Linear in the window header, even with the
+  sidebar collapsed. It hides at zero.
 - Right-click a space for its menu: with a Linear ticket, Open in Linear app, Open in
   browser and Copy link come first, then Rename, New/Open worktree, Close. Without a ticket,
   Herdr's own space menu. Right-click a tab for Rename, New tab, Close. Closing a space does

@@ -21,6 +21,7 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const overlays = [], closed = [], commands = [];
 let currentProps = {};
+let knownMachines = [];
 let liveSpaces = [];
 const sharedState = {};
 // Herdr's exec, answering GraphQL from a test's own function. Unset, nothing answers.
@@ -35,10 +36,10 @@ const boundaries = {
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
-    spaces: () => liveSpaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [], shared: key => sharedState[key] ?? null,
-    theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
+    spaces: () => liveSpaces, panes: () => [], agents: () => [], machines: () => knownMachines, window: () => null, keys: () => [], shared: key => sharedState[key] ?? null,
+    theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000", ansi4: "#0000ff", ansi5: "#ff00ff", ansi6: "#00ffff" }),
     setShared: (key, value) => { sharedState[key] = value; }, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
-    closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: (...args) => execImpl(...args),
+    closeOverlay: id => { closed.push(id); }, knownAgents: noop, settings: () => ({ zoom: 1 }), pickFolder: noop, appHome: () => "/fake", exec: (...args) => execImpl(...args),
   },
 };
 const cache = new Map();
@@ -226,6 +227,63 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
   } finally { currentProps = {}; }
 });
 
+test("a space row shows its machine's dot, and says when the machine is offline or reconnecting", () => {
+  knownMachines = [{ name: null, layout: "ready" }, { name: "darth", layout: "unavailable" }, { name: "maul", layout: "loading" }];
+  try {
+    const on = name => ({ ...record, space: { ...record.space, machine: name } });
+    const dot = row => nodes(row).find(n => n.attributes.size?.[0] === 7 && n.attributes.rounded?.[0] === 7);
+    const local = board.workRow(on(null), "home-local");
+    assert.ok(dot(local).attributes.bg, "an online machine is a filled dot");
+    assert.match(text(local), /\|local$|\|local\|/);
+    const offline = board.workRow(on("darth"), "home-darth");
+    assert.match(text(offline), /darth · offline/);
+    assert.ok(dot(offline).attributes.border_1 && !dot(offline).attributes.bg, "an offline machine is an outline");
+    assert.match(text(board.workRow(on("maul"), "home-maul")), /maul · connecting…/);
+    assert.notEqual(dot(local).attributes.bg[0], dot(board.workRow(on("maul"), "home-maul")).attributes.bg[0]);
+  } finally { knownMachines = []; }
+});
+
+test("the sidebar pins the current group's header while scrolling and publishes the needs-you count", () => {
+  const saved = { records: board.records, enrichment: board.enrichment, attentionRules: board.attentionRules, homeFilters: board.homeFilters };
+  const make = (n, status) => Array.from({ length: n }, (_, i) => ({ ...record, agents: [], status,
+    issue: { ...issue, id: `${status}-${i}`, identifier: `DEMO-${status}-${i}` }, space: { id: `${status}-${i}`, name: `${status} ${i}`, machine: null } }));
+  board.records = () => [...make(2, "blocked"), ...make(6, "working")];
+  board.enrichment = () => ({ byIdentifier: new Map(), rows: [] });
+  board.attentionRules = () => ({});
+  board.homeFilters = () => ({ team: [], status: [], project: [], crew: [] });
+  try {
+    delete sharedState["erics-linear.needs-you"];
+    let view = board.sidebar();
+    assert.equal(sharedState["erics-linear.needs-you"], 2);
+    const list = () => nodes(view).find(n => n.attributes.id?.[0] === "spaces-by-status");
+    const pinned = () => nodes(view).find(n => n.attributes.id?.[0] === "pinned-group");
+    assert.equal(pinned(), undefined, "nothing pinned at the top");
+    let notified = 0;
+    const cx = { notify: () => { notified++; } };
+    list().attributes.on_size_change[0]({ width: 280, height: 200 }, cx);
+    view = board.sidebar();
+    list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: -260 } }, cx);
+    view = board.sidebar();
+    assert.ok(notified >= 2);
+    assert.equal(board.homeScroll, 260);
+    assert.match(text(pinned()), /WORKING\|6/);
+    // Linear search results below the groups are measured, and can be scrolled to.
+    nodes(view).find(n => n.attributes.id?.[0] === "spaces-column").attributes.on_size_change[0]({ width: 280, height: 1000 }, cx);
+    view = board.sidebar();
+    list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: -10000 } }, cx);
+    view = board.sidebar();
+    assert.equal(board.homeScroll, 800);
+    assert.equal(pinned(), undefined, "no group header covers the search results");
+    list().attributes.on_scroll_wheel[0]({ delta: { x: 0, y: 10000 } }, cx);
+    view = board.sidebar();
+    assert.equal(board.homeScroll, 0);
+    assert.equal(pinned(), undefined);
+  } finally {
+    Object.assign(board, saved);
+    board.homeScroll = 0; board.homeViewport = 0; board.homeContent = 0;
+  }
+});
+
 test("status bar shows machine, ahead/behind, uncommitted and running time, with the branch only in hover text", () => {
   const branch = "r2d2/CHA-4305-header-git-state";
   const space = { id: "remote/space-1", name: "Example", machine: "build-2", folder: "/home/build/code/repo", branch, active: true,
@@ -322,10 +380,14 @@ test("sidebar rows show time in state, hide a matching Linear status and list th
   const todo = { issue: { ...progress, state: { name: "Todo", type: "unstarted" } }, programs: [], agents: [], status: "working", space: space("t", "Todo one", { working_since: now - 30000 }) };
   const idle = { issue: { ...progress, updatedAt: new Date(now - 3 * 86400000).toISOString() }, programs: [], agents: [], status: "idle", space: space("i", "Idle one", {}) };
   const line = (r, lane) => text(nodes(board.workRow(r, `age-${r.space.id}`, lane)).find(node => node.attributes.text_size?.[0] === 11));
-  assert.equal(line(working, "working"), "Working 4m · Sample project · snoke");
-  assert.equal(line(finished, "done"), "Agent finished 12m ago · Sample project · still In Progress · local");
-  assert.equal(line(todo, "working"), "Working <1m · Sample project · Linear: Todo · local");
-  assert.equal(line(idle, "idle"), "Idle 3d · Sample project · local");
+  // The machine is its own tag beside the line, with its colored dot (CHA-4306).
+  const machineTag = (r, lane) => text(nodes(board.workRow(r, `age-${r.space.id}`, lane)).find(node => node.attributes.id?.[0] === `age-${r.space.id}-machine`));
+  assert.equal(line(working, "working"), "Working 4m · Sample project");
+  assert.match(machineTag(working, "working"), /snoke · offline$/, "a machine Herdr does not list is offline");
+  assert.equal(line(finished, "done"), "Agent finished 12m ago · Sample project · still In Progress");
+  assert.equal(line(todo, "working"), "Working <1m · Sample project · Linear: Todo");
+  assert.equal(line(idle, "idle"), "Idle 3d · Sample project");
+  assert.match(machineTag(idle, "idle"), /local$/);
   for (const row of [working, finished, idle].map((r, i) => board.workRow(r, `age-${i}`, ["working", "done", "idle"][i]))) {
     assert.doesNotMatch(text(row), /Linear: In Progress/);
   }
@@ -387,6 +449,22 @@ test("CHA-4318: pinned spaces lead the sidebar and keep their own state line", (
     board.filter = "front";
     same(board.visibleSpaces().map(r => r.space.id), ["a"], "search finds a space by its tags");
   } finally { board.records = saved; board.enrichment = savedEnrich; board.filter = ""; delete sharedState[TAGS]; }
+});
+
+test("CHA-4306: a pinned space that needs you still counts in the header's Needs you badge", () => {
+  const space = (id, name) => ({ id, name, machine: null, tabs: [] });
+  const one = { ...record, issue: { ...issue, id: "a", identifier: "DEMO-1" }, agents: [], status: "blocked", space: space("a", "Alpha") };
+  const two = { ...record, issue: { ...issue, id: "b", identifier: "DEMO-2" }, agents: [], status: "blocked", space: space("b", "Beta") };
+  const saved = board.records, savedEnrich = board.enrichment;
+  board.records = () => [one, two];
+  board.enrichment = () => ({ byIdentifier: new Map() });
+  board.input = {};
+  sharedState[TAGS] = { tags: { "DEMO-2": { labels: ["Pinned"], colors: {} } } };
+  try {
+    const body = text(board.sidebar());
+    assert.match(body, /PINNED\|1.*NEEDS YOU\|1/, "the pinned one is listed under PINNED");
+    assert.equal(sharedState["erics-linear.needs-you"], 2, "but both still need you");
+  } finally { board.records = saved; board.enrichment = savedEnrich; delete sharedState[TAGS]; delete sharedState["erics-linear.needs-you"]; }
 });
 
 test("CHA-4318: Pin to top writes the Linear label, waits for Linear and updates every copy", async () => {

@@ -50,7 +50,7 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
       shared: key => state.get(key), setShared: (key, value) => { effects.push({ name: "setShared", key }); state.set(key, value); },
       theme: () => new Proxy({}, { get: () => "#777777" }), props: () => ({ role: "crew" }),
       setAgentOrder: effect("setAgentOrder"), run: effect("run"), exec: effect("exec"),
-      openOverlay: effect("openOverlay"), closeOverlay: effect("closeOverlay"), knownAgents: () => [], appHome: () => "/fake",
+      openOverlay: effect("openOverlay"), closeOverlay: effect("closeOverlay"), knownAgents: () => [], settings: () => ({ zoom: 1 }), appHome: () => "/fake",
     },
     "./enrich.js": {
       indexEnrichment: values => ({ byId: new Map(values.map(r => [r.id, r])), byIdentifier: new Map(values.map(r => [r.identifier, r])) }),
