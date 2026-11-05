@@ -60,9 +60,9 @@ board.records = () => [record];
 const nodes = node => typeof node === "object" && node !== null ? [node, ...node.nodes.flatMap(nodes)] : [];
 const text = node => typeof node === "string" ? node : (node?.nodes ?? []).map(text).join("|");
 
-test("sidebar, compact and project rows show the project after the issue key and the actual harness", () => {
+test("sidebar, compact and project rows show the project and the actual harness", () => {
   for (const row of [board.workRow(record, "home"), board.spaceRow(record, "strip"), board.issueRow(issue, "search")]) {
-    assert.match(text(row), /DEMO-42 \(Sample project\)/);
+    assert.match(text(row), /Sample project/);
     const glyph = nodes(row).find(node => node.asset === program.icon);
     assert.equal(glyph.type, "svg");
     const wrapper = nodes(row).find(node => node.nodes.includes(glyph));
@@ -71,6 +71,33 @@ test("sidebar, compact and project rows show the project after the issue key and
     assert.deepEqual(wrapper.attributes.accessibility_label, ["Codex"]);
   }
   assert.ok(nodes(board.workRow(record, "home")).some(node => node.attributes.tooltip?.[0] === "DEMO-42 (Sample project) · Fix a bug"));
+});
+
+test("CHA-4302: space rows lead with the key and title, then show the project as a chip", () => {
+  const long = { ...record, issue: { ...issue, title: "Give every deploy the next patch version automatically", project: { name: "Eric's Herdr Linear" } } };
+  for (const row of [board.workRow(long, "home"), board.spaceRow(long, "strip")]) {
+    const parts = text(row).split("|");
+    const heading = parts.findIndex(part => part === "DEMO-42 · Give every deploy the next patch version automatically");
+    const project = parts.findIndex(part => part === "Eric's Herdr Linear");
+    assert.ok(heading >= 0, "the title follows the key on the first line");
+    assert.ok(project > heading, "the project comes after the title");
+    assert.ok(!parts.some(part => part.includes("DEMO-42 (")), "the project no longer sits between the key and the title");
+    const tooltips = nodes(row).map(node => node.attributes.tooltip?.[0]).filter(Boolean);
+    assert.ok(tooltips.includes("DEMO-42 (Eric's Herdr Linear) · Give every deploy the next patch version automatically"), "hover shows the full title and project");
+    const chip = nodes(row).find(node => node.attributes.accessibility_label?.[0] === "Project: Eric's Herdr Linear");
+    assert.ok(chip.attributes.max_w, "the chip is capped so the title keeps its room");
+    assert.ok(nodes(chip).some(node => node.attributes.truncate), "a long project name truncates inside the chip");
+  }
+  const unprojected = { ...record, issue: { ...issue, project: null } };
+  assert.match(text(board.workRow(unprojected, "home")), /DEMO-42 · Fix a bug\|No project/);
+});
+
+test("CHA-4302: spaces without a ticket keep their space name and get no project chip", () => {
+  const bare = { ...record, issue: null };
+  for (const row of [board.workRow(bare, "home"), board.spaceRow(bare, "strip")]) {
+    assert.equal(text(row).split("|").filter(Boolean)[0], "Example");
+    assert.ok(!nodes(row).some(node => String(node.attributes.accessibility_label?.[0] ?? "").startsWith("Project:")));
+  }
 });
 
 test("enrichment fills an absent project but preserves an explicitly unassigned project", () => {

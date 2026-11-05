@@ -7,7 +7,7 @@ import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
 import { tint, icon, stateIcon, MONO } from "./look.js";
-import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
+import { issueKey, issueLabel, issueHeading, issueHover, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
@@ -626,8 +626,10 @@ export default class LinearWorkspace extends LinearClient {
       .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx, record.issue, record.folder))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
-        .child(div().truncate().text_size(11).text_color(color).child(`${label}${is?.state?.name ? ` · Linear: ${is.state.name}` : !is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`)))
+        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeading(is) : record.space.name))
+        .child(h_flex().min_w(0).gap(5).items_center()
+          .when(Boolean(is), el => el.child(this.projectChip(is, `${id}-project`, 120)))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(color).child(`${label}${is?.state?.name ? ` · Linear: ${is.state.name}` : !is ? " · no ticket" : ""} · ${record.space.machine ?? "local"}`))))
       .children(this.harnessIcons([record]))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -647,6 +649,15 @@ export default class LinearWorkspace extends LinearClient {
     });
   }
   /** A small pill. Used for the delegate, the machine and each visible Linear label. */
+  /** The ticket's project as a small chip after the title (CHA-4185, CHA-4302). It gives
+   *  way before the title does: it truncates at maxWidth and the hover shows it in full. */
+  projectChip(is, id, maxWidth) {
+    const t = theme(), name = is?.project?.name?.trim() || "No project";
+    return div().id(id).flex_shrink(1).min_w(0).max_w(maxWidth).px(5).h(16).flex().items_center().rounded(4)
+      .bg(tint(t.dim, 0.14)).text_size(10).text_color(is?.project?.name?.trim() ? t.muted : t.dim)
+      .tooltip(issueHover(is)).accessibility_label(`Project: ${name}`)
+      .child(div().min_w(0).truncate().child(name));
+  }
   chip(id, text, color, { faded = false, click = null } = {}) {
     const t = theme();
     return div().id(id).flex_none().px(5).h(16).flex().items_center().rounded(4)
@@ -1014,7 +1025,8 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(record.needs ? "need" : record.status === "working" ? "work" : "idle", color, 11)
         .when(record.status === "working", el => el.spin(1100)))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
-        .tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? issueLabel(is) : record.space.name))
+        .tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeading(is) : record.space.name))
+      .when(Boolean(is), el => el.child(this.projectChip(is, `${id}-project`, 84)))
       .children(this.harnessIcons([record]))
       .child(div().flex_none().text_size(10).text_color(color)
         .child(record.needs ? (record.status === "blocked" ? "needs you" : "ready") : record.status === "working" ? "working" : ""));

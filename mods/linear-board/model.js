@@ -34,6 +34,18 @@ export function issueLabel(issue) {
   return `${issue.identifier}${project ? ` (${project})` : ""}`;
 }
 
+/** Row heading: the key, then as much of the title as fits. The project goes elsewhere. */
+export function issueHeading(issue) {
+  const title = issue?.title?.trim();
+  return `${issue.identifier}${title ? ` · ${title}` : ""}`;
+}
+
+/** Hover text: the key, project and full title, so a truncated row can still be read. */
+export function issueHover(issue) {
+  const title = issue?.title?.trim();
+  return `${issueLabel(issue)}${title ? ` · ${title}` : ""}`;
+}
+
 export function workRecords({ allSpaces, allPanes, allAgents, issues, links, workspace }) {
   return allSpaces.map(space => {
     const ownAgents = allAgents.filter(a => a.space === space.id);

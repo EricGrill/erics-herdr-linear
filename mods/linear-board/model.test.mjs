@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { issueKey, issueLabel, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems, spaceMenuItems } from "./model.js";
+import { issueKey, issueLabel, issueHeading, issueHover, folderOf, sameFolder, matchIssue, workRecords, issueNeedsYou, projectGroups, taskContext, linearAppUrl, issueMenuItems, spaceMenuItems } from "./model.js";
 
 const issue = (id = "one", identifier = "DEMO-3785", extra = {}) => ({
   id, identifier, title: "Research new stars", url: `https://linear.app/example/issue/${identifier}`,
@@ -20,6 +20,14 @@ test("issue labels put the project immediately after the identifier without empt
   for (const project of [undefined, null, { name: "" }, { name: "  " }]) {
     assert.equal(issueLabel(issue("one", "DEMO-3785", { project })), "DEMO-3785");
   }
+});
+
+test("CHA-4302: row headings put the title right after the key; hover adds the project", () => {
+  const is = { identifier: "DEMO-7", title: "Fix the thing", project: { name: "RepoRadar" } };
+  assert.equal(issueHeading(is), "DEMO-7 · Fix the thing");
+  assert.equal(issueHover(is), "DEMO-7 (RepoRadar) · Fix the thing");
+  assert.equal(issueHeading({ identifier: "DEMO-7", title: "  " }), "DEMO-7");
+  assert.equal(issueHover({ identifier: "DEMO-7", project: null }), "DEMO-7");
 });
 
 test("open harnesses come from this space's live agents and terminal panes only", () => {
