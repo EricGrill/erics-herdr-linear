@@ -31,7 +31,11 @@ the sidebar-footer version in `layouts/erics-linear.json` matches.
   to a ticket without moving its files or changing its branch.
 - Lets you choose the execution computer, then an existing Git repository under that
   computer's `~/code`, instead of using a local-only folder picker.
-- Retains Herdr's terminal tabs, pane controls, Files, Changes, and status bar.
+- Retains Herdr's terminal tabs, pane controls, Files and Changes.
+- The issue header reads status · priority · delegate or assignee · pull request and
+  checks · lines added/removed. The status bar shows the machine, commits ahead/behind,
+  uncommitted changes and how long the agent has been working, for local and remote
+  worktrees alike; the branch is in its hover text. Fields with no value are left out.
 
 The grouping is a view of work, not a workflow automation. Finishing an agent run does
 not mark a Linear ticket Done. Commands typed directly into a terminal can still start

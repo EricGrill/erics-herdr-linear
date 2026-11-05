@@ -21,6 +21,7 @@ const context = vm.createContext({ console });
 const noop = () => {};
 const overlays = [], closed = [], commands = [];
 let currentProps = {};
+let liveSpaces = [];
 const sharedState = {};
 const boundaries = {
   "gpui-kit": { div: () => native("div"), svg: path => native("svg", path), image: path => native("image", path) },
@@ -28,7 +29,7 @@ const boundaries = {
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
-    spaces: () => [], panes: () => [], agents: () => [], machines: () => [], shared: key => sharedState[key] ?? null,
+    spaces: () => liveSpaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [], shared: key => sharedState[key] ?? null,
     theme: () => ({ foreground: "#111111", muted: "#666666", dim: "#888888", blocked: "#cc0000" }),
     setShared: noop, setAgentOrder: noop, run: (name, args) => { commands.push([name, args]); }, props: () => currentProps, openOverlay: options => { overlays.push(options); return "overlay"; },
     closeOverlay: id => { closed.push(id); }, knownAgents: noop, pickFolder: noop, appHome: () => "/fake", exec: noop,
@@ -61,9 +62,25 @@ board.records = () => [record];
 const nodes = node => typeof node === "object" && node !== null ? [node, ...node.nodes.flatMap(nodes)] : [];
 const text = node => typeof node === "string" ? node : (node?.nodes ?? []).map(text).join("|");
 
-test("sidebar, compact and project rows show the project after the issue key and the actual harness", () => {
+test("sidebar and compact space rows lead with the key and title, then the project", () => {
+  for (const row of [board.workRow(record, "home"), board.spaceRow(record, "strip")]) {
+    const shown = text(row);
+    assert.ok(shown.includes("|DEMO-42 · Fix a bug|"), `title on line 1: ${shown}`);
+    assert.ok(shown.indexOf("Sample project") > shown.indexOf("Fix a bug"), "project after the title");
+    assert.doesNotMatch(shown, /DEMO-42 \(Sample project\)/);
+    assert.ok(nodes(row).some(node => node.attributes.tooltip?.[0] === "DEMO-42 · Fix a bug (Sample project)"), "hover shows the full title and project");
+  }
+  const bare = { ...record, issue: { id: "two", identifier: "DEMO-7", title: "No home", project: null } };
+  for (const row of [board.workRow(bare, "home"), board.spaceRow(bare, "strip")]) {
+    assert.match(text(row), /DEMO-7 · No home/);
+    assert.doesNotMatch(text(row), /\(\)|undefined|null/);
+  }
+});
+
+test("sidebar, compact and project rows show the issue key, project and the actual harness", () => {
   for (const row of [board.workRow(record, "home"), board.spaceRow(record, "strip"), board.issueRow(issue, "search")]) {
-    assert.match(text(row), /DEMO-42 \(Sample project\)/);
+    assert.match(text(row), /DEMO-42/);
+    assert.match(text(row), /Sample project/);
     const glyph = nodes(row).find(node => node.asset === program.icon);
     assert.equal(glyph.type, "svg");
     const wrapper = nodes(row).find(node => node.nodes.includes(glyph));
@@ -71,7 +88,6 @@ test("sidebar, compact and project rows show the project after the issue key and
     assert.deepEqual(wrapper.attributes.tooltip, ["Codex"]);
     assert.deepEqual(wrapper.attributes.accessibility_label, ["Codex"]);
   }
-  assert.ok(nodes(board.workRow(record, "home")).some(node => node.attributes.tooltip?.[0] === "DEMO-42 (Sample project) · Fix a bug"));
 });
 
 test("enrichment fills an absent project but preserves an explicitly unassigned project", () => {
@@ -204,6 +220,30 @@ test("right-clicking a space with a ticket puts Open in Linear app in that space
   } finally { currentProps = {}; }
 });
 
+test("status bar shows machine, ahead/behind, uncommitted and running time, with the branch only in hover text", () => {
+  const branch = "r2d2/CHA-4305-header-git-state";
+  const space = { id: "remote/space-1", name: "Example", machine: "build-2", folder: "/home/build/code/repo", branch, active: true,
+    tabs: [{ id: "tab-1", working_since: Date.now() - 12 * 60_000 }] };
+  liveSpaces = [space];
+  sharedState["linear-board.git"] = { key: `build-2\u0000remote/space-1\u0000/home/build/code/repo`,
+    git: { branch, upstream: "origin/main", ahead: 2, behind: 1, changed: 3, added: 40, removed: 2 }, pr: { number: 36, state: "OPEN", checks: "passing" } };
+  try {
+    const bar = board.statusBar();
+    const shown = text(bar);
+    assert.match(shown, /build-2/);
+    assert.match(shown, /↑2 ↓1/);
+    assert.match(shown, /3 uncommitted/);
+    assert.match(shown, /working 12m/);
+    assert.doesNotMatch(shown, new RegExp(branch), "the branch is not repeated in the bar");
+    assert.ok(nodes(bar).some(n => n.attributes.tooltip?.[0] === `${branch} (against origin/main)`));
+    // A different folder's read is never shown for this space.
+    sharedState["linear-board.git"] = { key: "elsewhere", git: { ahead: 9, behind: 9, changed: 9 } };
+    const other = text(board.statusBar());
+    assert.doesNotMatch(other, /↑9|9 uncommitted/);
+    assert.doesNotMatch(other, /undefined|null/);
+  } finally { liveSpaces = []; delete sharedState["linear-board.git"]; }
+});
+
 test("CHA-4304: sidebar rows hide the Claude icon but keep other agents and the … menu", () => {
   const claude = { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: true };
   const row = board.workRow({ ...record, programs: [claude] }, "claude-row");
@@ -276,10 +316,10 @@ test("sidebar rows show time in state, hide a matching Linear status and list th
   const todo = { issue: { ...progress, state: { name: "Todo", type: "unstarted" } }, programs: [], agents: [], status: "working", space: space("t", "Todo one", { working_since: now - 30000 }) };
   const idle = { issue: { ...progress, updatedAt: new Date(now - 3 * 86400000).toISOString() }, programs: [], agents: [], status: "idle", space: space("i", "Idle one", {}) };
   const line = (r, lane) => text(nodes(board.workRow(r, `age-${r.space.id}`, lane)).find(node => node.attributes.text_size?.[0] === 11));
-  assert.equal(line(working, "working"), "Working 4m · snoke");
-  assert.equal(line(finished, "done"), "Agent finished 12m ago · still In Progress · local");
-  assert.equal(line(todo, "working"), "Working <1m · Linear: Todo · local");
-  assert.equal(line(idle, "idle"), "Idle 3d · local");
+  assert.equal(line(working, "working"), "Working 4m · Sample project · snoke");
+  assert.equal(line(finished, "done"), "Agent finished 12m ago · Sample project · still In Progress · local");
+  assert.equal(line(todo, "working"), "Working <1m · Sample project · Linear: Todo · local");
+  assert.equal(line(idle, "idle"), "Idle 3d · Sample project · local");
   for (const row of [working, finished, idle].map((r, i) => board.workRow(r, `age-${i}`, ["working", "done", "idle"][i]))) {
     assert.doesNotMatch(text(row), /Linear: In Progress/);
   }

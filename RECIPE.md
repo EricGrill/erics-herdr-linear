@@ -33,7 +33,7 @@ The active space gets the theme's selected surface. The list scrolls as one full
 area rather than squeezing agents or another list below it.
 
 The right column has a **44 px** issue-context header, a **42 px** tab bar, the active
-tab's terminal/mod panes, and a **28 px** status bar. The work area has **8 px** padding
+tab's terminal/mod panes, and a **28 px** status bar (`linear-board` role `status`). The work area has **8 px** padding
 and gaps. Pane frames have **10 px** corners, **1 px** theme borders, an accent focus
 border, and a **30 px** always-visible pane header. Files and Changes live in a hidden
 side-panel stack that starts at **368 px**, with a **280–900 px** range.
@@ -126,7 +126,7 @@ Custom modules:
   enough room for its scrollable list; it must not inherit compact sidebar rendering
   simply because the actual sidebar is narrow.
 
-Reuse the installed `pane`, `files`, `changes`, and `workspace-status` mods and the app's
+Reuse the installed `pane`, `files`, and `changes` mods and the app's
 icons. Native GPUI builders (`div`, `h_flex`, `v_flex`, retained inputs, scroll areas) draw
 the interface. `theme`, `spaces`, `panes`, `agents`, `terminals`, `machines`, `shared`, and
 `setShared` provide data. `space.select`, `agent.focus`, `pane.focus`, `tab.new`, panel
