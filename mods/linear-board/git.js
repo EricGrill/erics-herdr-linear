@@ -7,9 +7,9 @@
 const READ = "git --no-optional-locks -c core.fsmonitor=false -c diff.autoRefreshIndex=false";
 
 // One shell, one round-trip to a remote machine. Sections are split by marker lines:
-// status (porcelain v2 with branch headers), the base the branch grew from, the
-// ahead/behind against that base (used when the branch has no upstream) and the diff
-// size since the base, uncommitted edits included.
+// status (porcelain v2 with branch headers), the repo's default branch (the base), the
+// ahead/behind against that base and the diff size since the base, uncommitted edits
+// included.
 export const GIT_SCRIPT = `${READ} status --porcelain=v2 --branch || exit 3
 echo "--base"
 base=$(${READ} symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
@@ -25,6 +25,9 @@ mb=$(${READ} merge-base HEAD "$base" 2>/dev/null) && ${READ} diff --shortstat "$
 exit 0`;
 
 const PR_FIELDS = "number,url,state,isDraft,statusCheckRollup";
+// A read that hasn't answered by then counts as no answer, so a hung git or gh (say, on
+// an unreachable machine) can't stop the next cycle from trying again.
+export const READ_TIMEOUT_MS = 20000;
 
 const count = text => { const n = Number(text); return Number.isFinite(n) ? n : 0; };
 
@@ -48,28 +51,30 @@ export function parseShortstat(text) {
   return { added: count(added?.[1] ?? 0), removed: count(removed?.[1] ?? 0) };
 }
 
-/** GIT_SCRIPT's output → { branch, upstream, base, ahead, behind, changed, added, removed }.
- *  Pure, so it is tested without a repository. Null when it isn't a git status at all. */
+/** GIT_SCRIPT's output → { branch, upstream, base, against, ahead, behind, changed, added,
+ *  removed }. Ahead/behind counts against the repo's default branch (`base`); the
+ *  branch's own upstream is used only when there is no base. `against` names the one
+ *  actually used, or is null. Pure, so it is tested without a repository. Null when it
+ *  isn't a git status at all. */
 export function parseGitState(stdout) {
   const s = sections(stdout);
   if (!s.status.some(l => l.startsWith("# branch."))) return null;
-  let branch = null, upstream = null, ahead = null, behind = null, changed = 0;
+  let branch = null, upstream = null, ahead = null, behind = null, against = null, changed = 0;
   for (const line of s.status) {
     if (line.startsWith("# branch.head ")) { const h = line.slice(14).trim(); branch = h === "(detached)" ? null : h; }
     else if (line.startsWith("# branch.upstream ")) upstream = line.slice(18).trim() || null;
     else if (line.startsWith("# branch.ab ")) {
       const m = /\+(\d+) -(\d+)/.exec(line);
-      if (m) { ahead = count(m[1]); behind = count(m[2]); }
+      if (m) { ahead = count(m[1]); behind = count(m[2]); against = upstream; }
     } else if (/^[12u?] /.test(line)) changed++;
   }
   const base = s.base[0]?.trim() || null;
-  // Without an upstream, count against the branch it grew from instead.
-  if (ahead === null && base) {
-    const m = /^(\d+)\s+(\d+)$/.exec(s.ab[0]?.trim() ?? "");
-    if (m) { ahead = count(m[1]); behind = count(m[2]); }
-  }
+  // Count against the default branch, so a pushed agent branch still shows how far it
+  // is from main; keep the upstream's count only when the base can't be counted.
+  const m = base ? /^(\d+)\s+(\d+)$/.exec(s.ab[0]?.trim() ?? "") : null;
+  if (m) { ahead = count(m[1]); behind = count(m[2]); against = base; }
   const diff = parseShortstat(s.diff.join(" "));
-  return { branch, upstream, base, ahead, behind, changed,
+  return { branch, upstream, base, against, ahead, behind, changed,
     added: diff?.added ?? null, removed: diff?.removed ?? null };
 }
 
@@ -98,22 +103,30 @@ export function parsePr(text) {
     draft: json.isDraft === true, checks: checksOf(json.statusCheckRollup) };
 }
 
-/** Reads the git state of `folder` on machine `on`. Never throws: null when it can't. */
-export async function readGitState(exec, folder, on = null) {
+/** `promise`, or null if it hasn't settled within `ms`. */
+function within(promise, ms) {
+  let timer;
+  const late = new Promise(resolve => { timer = setTimeout(() => resolve(null), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/** Reads the git state of `folder` on machine `on`. Never throws: null when it can't,
+ *  including when it takes longer than `timeout` ms. */
+export async function readGitState(exec, folder, on = null, timeout = READ_TIMEOUT_MS) {
   if (!folder) return null;
   try {
-    const r = await exec("sh", ["-c", GIT_SCRIPT], { cwd: folder, on: on ?? null });
-    return r.code === 0 ? parseGitState(r.stdout) : null;
+    const r = await within(exec("sh", ["-c", GIT_SCRIPT], { cwd: folder, on: on ?? null }), timeout);
+    return r?.code === 0 ? parseGitState(r.stdout) : null;
   } catch { return null; }
 }
 
 /** The pull request for the folder's branch, via GitHub's CLI there. Null when there is
- *  none, or gh is missing or signed out on that machine. */
-export async function readPr(exec, folder, on = null) {
+ *  none, gh is missing or signed out on that machine, or it takes longer than `timeout`. */
+export async function readPr(exec, folder, on = null, timeout = READ_TIMEOUT_MS) {
   if (!folder) return null;
   try {
-    const r = await exec("gh", ["pr", "view", "--json", PR_FIELDS], { cwd: folder, on: on ?? null });
-    return r.code === 0 ? parsePr(r.stdout) : null;
+    const r = await within(exec("gh", ["pr", "view", "--json", PR_FIELDS], { cwd: folder, on: on ?? null }), timeout);
+    return r?.code === 0 ? parsePr(r.stdout) : null;
   } catch { return null; }
 }
 
@@ -155,7 +168,8 @@ export function workingSince(space) {
   return times.length ? Math.min(...times) : null;
 }
 
-/** "12m", "3h", "<1m"; matches the board's other durations. */
+/** "<1m", "12m", "3h 5m", "1d 2h". Finer than look.js `duration()` (which stops at
+ *  whole hours), since this is a clock for a run that is still going. */
 export function runningFor(since, now = Date.now()) {
   if (!since) return null;
   const m = Math.floor(Math.max(0, now - since) / 60000);
@@ -165,10 +179,11 @@ export function runningFor(since, now = Date.now()) {
   return h < 24 ? `${h}h ${m % 60}m` : `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-/** The status bar's hover text: the full branch and what ahead/behind is counted against. */
+/** The status bar's hover text: the full branch and what ahead/behind was actually
+ *  counted against (never a ref the count didn't use). */
 export function branchHover(git, fallbackBranch = null) {
   const branch = git?.branch ?? fallbackBranch;
   if (!branch) return null;
-  const against = git?.upstream ?? git?.base;
+  const against = git?.ahead != null || git?.behind != null ? git?.against ?? null : null;
   return against ? `${branch} (against ${against})` : branch;
 }

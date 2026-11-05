@@ -232,7 +232,7 @@ test("status bar shows machine, ahead/behind, uncommitted and running time, with
     tabs: [{ id: "tab-1", working_since: Date.now() - 12 * 60_000 }] };
   liveSpaces = [space];
   sharedState["linear-board.git"] = { key: `build-2\u0000remote/space-1\u0000/home/build/code/repo`,
-    git: { branch, upstream: "origin/main", ahead: 2, behind: 1, changed: 3, added: 40, removed: 2 }, pr: { number: 36, state: "OPEN", checks: "passing" } };
+    git: { branch, upstream: "origin/feature", base: "origin/main", against: "origin/main", ahead: 2, behind: 1, changed: 3, added: 40, removed: 2 }, pr: { number: 36, state: "OPEN", checks: "passing" } };
   try {
     const bar = board.statusBar();
     const shown = text(bar);
