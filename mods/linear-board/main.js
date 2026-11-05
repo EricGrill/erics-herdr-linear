@@ -533,8 +533,10 @@ export default class LinearWorkspace extends LinearClient {
   }
   enter(cx) {
     if (this.role === "sidebar") {
-      const record = this.visibleSpaces()[0];
+      const records = this.visibleSpaces(), record = records[0];
+      const is = !record && this.linearMatches(records).issues[0];
       if (record) this.selectWork(record);
+      else if (is) this.visit(is);
     } else if (this.role === "projects") {
       const is = this.found?.issues?.[0] ?? this.allIssues().find(i => this.matches(i));
       if (is) this.visit(is);
@@ -836,8 +838,17 @@ export default class LinearWorkspace extends LinearClient {
       || a.space.name.localeCompare(b.space.name));
   }
 
+  /** Linear's matches for the sidebar's words, without the tickets already shown as spaces. */
+  linearMatches(records = this.visibleSpaces()) {
+    const q = (this.filter ?? "").trim();
+    if (!q || this.found?.query !== q) return { issues: [], searching: q.length >= 2, error: "" };
+    const shown = new Set(records.map(r => r.issue?.id).filter(Boolean));
+    return { issues: this.found.issues.filter(is => !shown.has(is.id)), searching: false, error: this.found.error ?? "" };
+  }
+
   sidebar() {
     const t = theme(), records = this.visibleSpaces(), filters = this.homeFilters(), count = filterCount(filters);
+    const linear = this.linearMatches(records);
     const choices = this.filterChoices(filters);
     const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
       `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
@@ -873,7 +884,13 @@ export default class LinearWorkspace extends LinearClient {
         .children(groups.filter(group => group.records.length).flatMap(group => [
           this.section(group.name, group.records.length, group.color),
           ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, group.status)),
-        ])))
+        ]))
+        .when(linear.issues.length > 0, el => el
+          .child(this.section("LINEAR TICKETS", linear.issues.length))
+          .children(linear.issues.map(is => this.issueRow(is, "search"))))
+        .when(linear.searching, el => el.child(div().py(6).text_size(11).text_color(t.muted).child("Searching Linear…")))
+        .when(Boolean(linear.error), el => el.child(div().py(6).text_size(11).text_color(t.blocked).truncate()
+          .child(`Linear search: ${linear.error}`))))
       .when(Boolean(this.signedOut), el => el.child(this.button("sign-in", "Sign in to Linear", cx => this.signIn(cx))))
       .when(Boolean(this.err), el => el.child(div().py(3).text_size(11).text_color(t.blocked).truncate().child(this.err)));
   }

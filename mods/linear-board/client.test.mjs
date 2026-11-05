@@ -94,6 +94,8 @@ async function harness(options = {}) {
     }
     else if (request.op === "detail") result = options.detailReply ? await options.detailReply(request) : options.detailError ? { error: options.detailError } : { issue: ticket, description: options.description ?? "" };
     else if (request.op === "start") result = options.failStart ? { error: "Issue could not be started" } : { note: "Issue started" };
+    // herdr-linear v0.14.2 has no text search; this is its real reply.
+    else if (request.op === "search") result = { error: 'no op "search"' };
     else throw new Error(`Unexpected backend operation ${request.op}`);
     return { code: result.error ? 1 : 0, stdout: JSON.stringify(result), stderr: "" };
   };
@@ -741,7 +743,10 @@ test("malformed placement cannot leave an unrelated default launch target enable
   h.client.loadDetail(h.cx);
   await h.flush();
   assert.equal(h.client.launchTarget.folder, "");
-  assert.equal(h.client.agentsChecked, false);
+  assert.equal(h.client.launchTarget.blocked, true);
+  // The harness choice still shows; Start stays blocked by the target.
+  assert.equal(h.client.agentsChecked, true);
+  assert.deepEqual(h.client.agentChoices.map(a => a.key), ["codex"]);
   assert.match(h.client.repositoryError, /invalid JSON/);
   assert.equal(h.client.detail.issue.id, ticket.id);
 });
@@ -1209,7 +1214,10 @@ test("capture create needs only ticket context and one click, preserves source, 
   assert.deepEqual(h.validations, []);
   assert.deepEqual(h.routingChecks, []);
   assert.deepEqual(h.commands, []);
-  assert.deepEqual(h.agentChecks, []);
+  // The opened ticket lists this computer's agents (a read), but nothing launches.
+  assert.deepEqual(h.agentChecks, [null]);
+  assert.equal(h.client.launchTarget.blocked, true);
+  assert.equal(h.client.agentsChecked, true, "the agent row settles instead of checking forever");
   assert.deepEqual(h.modes, []);
   assert.equal(h.storage.has("linear.idea-draft.v1:workspace-one"), false);
 });
@@ -1895,4 +1903,90 @@ test("right-clicking an issue opens the issue menu for that issue, and nothing w
     issue: { identifier: ticket.identifier, title: ticket.title, url: ticket.url }, demo: false }));
   assert.equal(h.client.issueMenu({ ...ticket, url: "" }, cx), null);
   assert.equal(overlays.length, 1);
+});
+
+test("an unavailable saved computer still lists agents but keeps Start blocked", async () => {
+  const description = "```json\n" + JSON.stringify({ ericsHerdrLinearExecutionTarget: { version: 1,
+    computerId: "gone-core", computerName: "gone-computer", folder: "/gone/code/project" } }) + "\n```";
+  const h = await harness({ description, registry: [], launchTarget: { machine: null, folder: "/wrong/default" } });
+  h.client.loadDetail(h.cx);
+  await h.flush();
+  assert.equal(h.client.launchTarget.blocked, true);
+  assert.equal(h.client.launchTarget.folder, "");
+  assert.match(h.client.repositoryError, /gone-computer/);
+  assert.equal(h.client.agentsChecked, true);
+  assert.deepEqual(h.client.agentChoices.map(a => a.key), ["codex"]);
+  // The unknown computer is not a Herdr machine: its agents are read on this one.
+  assert.deepEqual(h.agentChecks, [null]);
+  h.client.worktree(h.cx, true, { issue: ticket });
+  await h.flush();
+  assert.deepEqual(h.creations, []);
+  assert.equal(h.requests.some(r => r.request.op === "worktree"), false);
+  assert.deepEqual(h.commands, []);
+});
+
+test("a late blocked-target agent read never replaces an explicit computer choice", async () => {
+  const h = await harness({ launchTarget: { machine: null, folder: "" } });
+  h.client.blockLaunchTarget("Blocked", h.cx);
+  const generation = h.client.targetGeneration;
+  const read = h.client.agentsWhileBlocked(h.cx, generation);
+  h.client.targetGeneration += 1;
+  h.client.launchTarget = { machine: "remote", folder: "/remote/code/project" };
+  h.client.agentChoices = [{ key: "remote-agent", installed: true }];
+  await read;
+  assert.deepEqual(h.client.agentChoices.map(a => a.key), ["remote-agent"]);
+});
+
+test("sidebar words search Linear; a key still finds by key; other copies never search text", async () => {
+  const replies = [];
+  const h = await harness({ apiReply: async body => {
+    replies.push(body);
+    if (body.query.includes("TaskIdentity")) return { data: { organization: { id: "workspace-one", name: "Workspace", urlKey: "example" }, viewer: { id: "me" } } };
+    assert.match(body.query, /TaskSearch/);
+    return { data: { searchIssues: { nodes: [{ id: "issue-9", identifier: "DEMO-9", title: "Pick the harness", branchName: "demo-9",
+      url: "https://linear.app/example/issue/DEMO-9", priority: 0, state: { id: "s", name: "Todo", type: "unstarted", color: "#999", position: 0 },
+      team: { id: "team-one", key: "DEMO" }, project: null, assignee: null }] } } };
+  } });
+  const now = { ...h.cx, timer: { after: (_ms, fn) => fn(now), every: () => {} } };
+  Object.assign(h.client, { role: "sidebar", tab: "mine", drilled: null, on: null, api: null });
+  h.client.filter = "harness";
+  h.client.lookUp(now);
+  await h.flush();
+  assert.equal(h.client.found.query, "harness");
+  assert.deepEqual([...h.client.found.issues.map(i => i.identifier)], ["DEMO-9"]);
+  assert.equal(replies.at(-1).variables.term, "harness");
+  h.client.filter = "h";
+  h.client.lookUp(now);
+  assert.equal(h.client.found, null, "one letter is not searched");
+  h.client.role = "projects";
+  h.client.filter = "harness";
+  h.client.lookUp(now);
+  assert.equal(h.client.found, null, "only the sidebar searches words");
+});
+
+test("without the API key the sidebar says why Linear search is missing", async () => {
+  const h = await harness({ statusReply: { workspaces: [{ id: "workspace-one", name: "Workspace", urlKey: "example" }] } });
+  const now = { ...h.cx, timer: { after: (_ms, fn) => fn(now), every: () => {} } };
+  Object.assign(h.client, { role: "sidebar", tab: "mine", drilled: null, on: "", api: null });
+  h.client.filter = "harness";
+  h.client.lookUp(now);
+  await h.flush();
+  assert.equal(h.client.found.query, "harness");
+  assert.equal(h.client.found.issues.length, 0);
+  assert.match(h.client.found.error, /API key/);
+});
+
+test("sidebar Linear matches leave out tickets already shown as spaces and stale searches", async () => {
+  const { main } = await harness();
+  {
+    const view = { filter: "harness", found: { query: "harness", issues: [{ id: "a" }, { id: "b" }] } };
+    const records = [{ issue: { id: "a" } }, { issue: null }];
+    assert.deepEqual([...main.linearMatches.call(view, records).issues.map(i => i.id)], ["b"]);
+    view.filter = "harness two";
+    const stale = main.linearMatches.call(view, records);
+    assert.equal(stale.issues.length, 0);
+    assert.equal(stale.searching, true);
+    view.filter = "";
+    assert.equal(main.linearMatches.call(view, records).searching, false);
+  }
 });
