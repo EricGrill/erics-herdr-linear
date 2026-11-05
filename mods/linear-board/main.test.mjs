@@ -343,6 +343,7 @@ async function harness(options = {}) {
     "gpui-base": { v_flex: () => element("column"), h_flex: () => element("row"), Input: { new: () => element("input") }, Popup: {}, TextView: {} },
     "herdr": {
       spaces: () => allSpaces, panes: () => [], agents: () => allAgents, machines: () => [],
+      window: () => ({ platform: "macos" }), keys: () => [],
       theme: () => new Proxy({}, { get: () => "#123456" }),
       shared: key => state.get(key),
       setShared: (key, value) => { writes.push({ key, value }); state.set(key, value); },
@@ -353,7 +354,7 @@ async function harness(options = {}) {
     },
     "fs/promises": { readFile: forbidden("readFile"), writeFile: forbidden("writeFile") },
     "./client.js": { default: BaseClient },
-    "./look.js": { tint: color => color, icon: () => element("icon"), stateIcon: () => "state", MONO: "mono" },
+    "./look.js": { tint: color => color, icon: () => element("icon"), stateIcon: () => "state", priorityIcon: () => "prio", MONO: "mono" },
   };
   const modules = new Map();
   async function load(url) {

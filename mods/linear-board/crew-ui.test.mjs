@@ -46,7 +46,7 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
     } },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": {
-      spaces: () => [], panes: () => [], agents: () => [], machines: () => [],
+      spaces: () => [], panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
       shared: key => state.get(key), setShared: (key, value) => { effects.push({ name: "setShared", key }); state.set(key, value); },
       theme: () => new Proxy({}, { get: () => "#777777" }), props: () => ({ role: "crew" }),
       setAgentOrder: effect("setAgentOrder"), run: effect("run"), exec: effect("exec"),
@@ -56,6 +56,7 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
       indexEnrichment: values => ({ byId: new Map(values.map(r => [r.id, r])), byIdentifier: new Map(values.map(r => [r.identifier, r])) }),
       fetchAgents: async () => ({ agents: [yoda, leia], complete: true, error: null }),
       fetchQueue: queue, fetchIssueDetail: detail,
+      fetchPullRequests: async () => ({ pulls: {}, error: null }), rowPullRequest: () => null,
       reassignIssue: args => { writes.push(args); return write(args); },
       // Deliberately stale: freshly fetched individual queues must own their counts.
       fetchEnrichment: enrichment ?? (async () => ({ rows, error: null, fetchedAt: 100, partial: false })),

@@ -2,19 +2,20 @@
 // Modified for Eric's Herdr Linear: spaces-first layout, configurable enrichment and attention rules.
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, Popup, TextView } from "gpui-base";
-import { spaces, panes, agents, machines, theme, settings, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec } from "herdr";
+import { spaces, panes, agents, machines, theme, settings, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec, window, keys } from "herdr";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, selectRepository as selectTargetRepository } from "./repository.js";
-import { tint, icon, stateIcon, MONO } from "./look.js";
-import { issueKey, issueLabel, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
+import { tint, icon, stateIcon, priorityIcon, MONO } from "./look.js";
+import { issueKey, issueLabel, issueHeadline, issueHover, folderOf, matchIssue, workRecords, taskContext, issueMenuItems, spaceMenuItems } from "./model.js";
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf, laneSince, elapsed, linearMismatch } from "./board.js";
-import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue } from "./enrich.js";
+import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue, fetchPullRequests, rowPullRequest } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
   crewContext, reassignChoices, requestGate } from "./queue.js";
 import { normalizeConfig } from "./config.js";
 import { machineColor, machineLabel, machineState, stateWord } from "./machines.js";
 import { stackLayout, clampScroll, pinnedHeader, thumb } from "./sticky.js";
+import { readGitState, readPr, headerParts, aheadBehind, uncommitted, workingSince, runningFor, branchHover } from "./git.js";
 import { FILTER_FIELDS, normalizeFilters, toggleFilter, filterCount, matchesFilters, filterOptions } from "./filters.js";
 
 // Shared with the linear-workspace layout on purpose: an issue/space link made in one
@@ -25,6 +26,9 @@ const PREFS = "linear-workspace.agents", ACTIVE = "linear-workspace.workspace";
 // other copy, so only one of them talks to Linear.
 const ENRICH = "linear-board.enrich", FILTER = "linear-board.filters", TEAMS = "linear-board.teams";
 const ENRICH_REQUEST = "linear-board.enrich-request";
+// Pull requests linked to the issues open in spaces, by issue key. Kept apart from ENRICH
+// so a Crew re-read of the enrichment never wipes them.
+const PULLS = "linear-board.pulls";
 const CONFIG = "erics-linear.config";
 // How many open spaces need you, for the window header to show while the sidebar is a rail.
 const NEEDS = "erics-linear.needs-you";
@@ -35,6 +39,11 @@ const AGE_TICK_MS = 30000;
 // Crew checks this often whether the sidebar has published its Linear connection, and
 // retries a failed agent list no sooner than CREW_RETRY_MS after the last attempt.
 const CREW_TICK_MS = 2000, CREW_RETRY_MS = 30000;
+// The status bar reads the active workspace's git state and publishes it for the header.
+// It looks every GIT_TICK_MS; a re-read is due after GIT_MS (PR_MS for GitHub), or at once
+// when the active workspace or its folder changes.
+const GIT = "linear-board.git";
+const GIT_TICK_MS = 5000, GIT_MS = 15000, PR_MS = 60000;
 
 // Roles that render from shared state alone and never load a Linear list themselves.
 const PASSIVE = ["header", "launcher", "spaces", "issue", "agent", "crew", "filters"];
@@ -42,6 +51,7 @@ const PASSIVE = ["header", "launcher", "spaces", "issue", "agent", "crew", "filt
 const activeWorkspace = () => shared(ACTIVE) ?? "";
 const sharedIssues = () => shared(DATA)?.[activeWorkspace()]?.issues ?? [];
 const sharedEnrich = () => shared(ENRICH) ?? { rows: [], error: null, fetchedAt: null, partial: false };
+const sharedPulls = () => shared(PULLS)?.pulls ?? {};
 
 // Sidebar and Crew share one publication order, including reads started before a move.
 function enrichmentRequest() {
@@ -50,6 +60,8 @@ function enrichmentRequest() {
   return () => shared(ENRICH_REQUEST) === version;
 }
 
+const isClaude = program => /claude/i.test(`${program?.key ?? ""} ${program?.name ?? ""}`);
+
 /** Records for a copy of the mod that has no lists of its own. */
 function sharedRecords(extraIssues = []) {
   return workRecords({
@@ -57,6 +69,26 @@ function sharedRecords(extraIssues = []) {
     issues: [...new Map([...extraIssues, ...sharedIssues()].map(i => [i.identifier, i])).values()],
     links: shared(LINKS) ?? [], workspace: activeWorkspace(),
   });
+}
+
+/** The command palette's key as actually bound (as Herdr's own status bar shows it). */
+function paletteHint() {
+  const mac = window()?.platform === "macos";
+  const mod = { cmd: mac ? "⌘" : "Ctrl+", ctrl: mac ? "⌃" : "Ctrl+", shift: mac ? "⇧" : "Shift+", alt: mac ? "⌥" : "Alt+", option: mac ? "⌥" : "Alt+" };
+  const b = (keys() ?? []).find(k => k.section === "global" && k.action === "app.palette");
+  const parts = b && b.keys.endsWith("--") ? [...b.keys.slice(0, -2).split("-"), "-"] : b?.keys.split("-");
+  const key = parts && parts.map(p => mod[p.toLowerCase()] ?? p.toUpperCase()).join("");
+  return key ? `${key}  commands` : "commands";
+}
+
+/** Which workspace a git read belongs to: its id, machine and folder. */
+function gitKey(space, folder) {
+  return space && folder ? `${space.machine ?? ""}\u0000${space.id}\u0000${folder}` : "";
+}
+/** The published git state, if it is for this space's current folder. */
+function gitFor(space) {
+  const saved = shared(GIT);
+  return space && saved?.key === gitKey(space, folderOf(space, panes())) ? saved : null;
 }
 
 function currentSource() {
@@ -93,6 +125,7 @@ export default class LinearWorkspace extends LinearClient {
     this.docked = this.role !== "dialog";
     if (this.role === "crew") return void this.crewInit(cx);
     if (this.role === "issue-menu") return void this.issueMenuInit(cx);
+    if (this.role === "status") return void this.statusInit(cx);
     if (PASSIVE.includes(this.role)) {
       // These copies re-render on shared state and on the live space/agent lists; the
       // strip is the only one that needs a clock, to settle its own height.
@@ -148,12 +181,22 @@ export default class LinearWorkspace extends LinearClient {
         } else {
           setShared(ENRICH, { rows: result.rows, error: result.error, fetchedAt: result.fetchedAt, partial: result.partial, on: this.on || null });
         }
+        await this.loadPulls(config, current);
       } catch (error) {
         if (!current()) return;
         setShared(ENRICH, { ...sharedEnrich(), error: `Layout config: ${error?.message ?? error}`, on: this.on || null });
       } finally { this.enriching = false; cx.notify(); resolve(); }
     }));
     return this.enrichPromise;
+  }
+
+  /** Pull requests for the issues open in spaces. A failed read keeps the last good one. */
+  async loadPulls(config, current = () => true) {
+    const ids = this.records().map(r => r.issue?.id).filter(Boolean);
+    const result = await fetchPullRequests({ on: this.on || null, config, ids });
+    if (!current()) return;
+    if (result.error) setShared(PULLS, { ...(shared(PULLS) ?? {}), error: result.error });
+    else setShared(PULLS, { pulls: result.pulls, error: null, fetchedAt: Date.now() });
   }
 
   loadTeams(cx) {
@@ -187,6 +230,7 @@ export default class LinearWorkspace extends LinearClient {
     const extra = lookup.byIdentifier?.get(String(issue.identifier).toUpperCase());
     if (!extra) return issue;
     return { ...issue, delegate: extra.delegate, labels: extra.labels, state: issue.state ?? extra.state,
+      priority: Number.isInteger(issue.priority) ? issue.priority : extra.priority,
       teamKey: issue.teamKey ?? extra.teamKey, updatedAt: issue.updatedAt ?? extra.updatedAt ?? null, project: issue.project === undefined ? extra.project : issue.project };
   }
 
@@ -635,21 +679,22 @@ export default class LinearWorkspace extends LinearClient {
     const age = elapsed(since.at, now);
     const when = !age ? "" : lane === "done" ? ` ${age === "<1m" ? "just now" : `${age} ago`}` : ` ${age}`;
     const mismatch = is ? linearMismatch(lane, is, this.attentionRules()) : "";
-    const status = [`${label}${when}`, mismatch || (!is ? "no ticket" : "")].filter(Boolean).join(" · ");
+    const status = [`${label}${when}`, is?.project?.name?.trim(), mismatch || (!is ? "no ticket" : "")].filter(Boolean).join(" · ");
     const source = since.source === "herdr" ? `In this state since ${new Date(since.at).toLocaleString()} (Herdr)`
       : since.source === "linear" ? `Herdr has no state change for this space yet; age is from the ticket's last Linear update, ${new Date(since.at).toLocaleString()}`
       : "No state-change time yet";
+    const badges = this.rowBadges(record, is ? this.enrich(is) : null, id);
     return h_flex().id(id).min_w(0).h(49).flex_none().px(8).gap(8).items_center().rounded(6)
       .bg(record.space.active ? t.selected : t.chrome).hover(s => s.bg(t.hover)).cursor_pointer()
       .on_click(() => this.selectWork(record))
       .on_mouse_down("right", (_e, cx) => this.spaceMenu(record.space, cx, record.issue, record.folder))
       .child(icon(lane === "blocked" ? "need" : lane === "working" ? "work" : lane === "done" ? "check" : "idle", color, 13).when(lane === "working", el => el.spin(1100)))
       .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? `${issueLabel(is)} · ${is.title}` : record.space.name))
+        .child(div().truncate().text_size(12.5).text_color(t.foreground).tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeadline(is) : record.space.name))
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(color).tooltip(source).child(status))
           .child(this.machineTag(record.space.machine ?? null, `${id}-machine`))))
-      .children(this.harnessIcons([record]))
+      .when(badges.length > 0, el => el.child(h_flex().id(`${id}-badges`).flex_none().gap(4).items_center().children(badges)))
       .child(div().id(`${id}-details`).w(22).h(26).flex_none().flex().items_center().justify_center().rounded(4).text_color(t.muted).hover(s => s.bg(t.raised))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => {
@@ -658,9 +703,41 @@ export default class LinearWorkspace extends LinearClient {
           else dialog({ action: "attach", attachSpace: { id: record.space.id, name: record.space.name, folder: record.folder, machine: record.space.machine ?? null } });
         }).child(is ? "…" : "+"));
   }
-  harnessIcons(records) {
+  /** The right side of a sidebar row: the agent when it isn't Claude, an Urgent or High
+   *  priority, and the linked pull request's state. Each explains itself on hover. */
+  rowBadges(record, is, id) {
+    const t = theme(), badges = [];
+    badges.push(...this.harnessIcons([record], { skipClaude: true }));
+    if (is && (is.priority === 1 || is.priority === 2)) {
+      const name = is.priority === 1 ? "Urgent" : "High";
+      badges.push(div().id(`${id}-priority`).w(13).h(13).flex_none().tooltip(`Priority: ${name}`).accessibility_label(`Priority: ${name}`)
+        .child(icon(priorityIcon(is.priority), is.priority === 1 ? t.blocked : t.muted, 13)));
+    }
+    const pr = is ? rowPullRequest(sharedPulls()[String(is.identifier).toUpperCase()]) : null;
+    if (pr) badges.push(this.pullBadge(pr, `${id}-pr`));
+    return badges;
+  }
+  pullBadge(pr, id) {
+    const t = theme();
+    const look = {
+      failing: [t.blocked, "failing", "checks failing"],
+      ready: [t.done ?? t.muted, "ready", pr.checks === "passing" ? "checks passed, ready to merge" : "approved, ready to merge"],
+      open: [t.working ?? t.muted, "open", pr.checks === "pending" ? "open, checks running" : "open"],
+      draft: [t.dim, "draft", "draft"],
+      merged: [t.dim, "merged", "merged"],
+    }[pr.state];
+    const [color, word, why] = look;
+    const hover = `Pull request #${pr.number} ${why}: ${pr.title}. Click to open it.`;
+    return h_flex().id(id).flex_none().h(16).px(4).gap(3).items_center().rounded(4)
+      .bg(tint(color, 0.14)).text_size(10).text_color(color).cursor_pointer().hover(s => s.opacity(0.8))
+      .tooltip(hover).accessibility_label(hover)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); cx.open_url(pr.url); })
+      .child(icon("pr", color, 10)).child(word);
+  }
+  harnessIcons(records, { skipClaude = false } = {}) {
     const programs = new Map(records.flatMap(r => r.programs ?? []).map(p => [p.key, p]));
-    return [...programs.values()].map(p => {
+    return [...programs.values()].filter(p => !skipClaude || !isClaude(p)).map(p => {
       const glyph = p.icon ? (p.tint ? svg(p.icon).text_color(theme().muted) : image(p.icon))
         : icon("work", theme().muted, 13);
       return div().w(13).h(13).flex_none().tooltip(p.name).accessibility_label(p.name)
@@ -1017,15 +1094,68 @@ export default class LinearWorkspace extends LinearClient {
   header() {
     const t = theme(), ws = shared(ACTIVE), data = shared(DATA)?.[ws], s = spaces().find(s => s.active);
     const is = s && matchIssue(s, data?.issues ?? [], shared(LINKS) ?? [], ws, panes());
+    const git = gitFor(s);
     return h_flex().id("issue-context").size_full().min_w(0).px(12).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .when(Boolean(s), el => el.on_mouse_down("right", (_e, cx) => this.spaceMenu(s, cx, is, folderOf(s, panes()))))
       .child(icon(is ? stateIcon(is.state) : "need", is ? t.muted : t.blocked, 13))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(div().truncate().text_size(12.5).text_color(t.foreground).child(is ? `${is.identifier} · ${is.title}` : "This workspace has no Linear ticket"))
-        .child(div().truncate().text_size(11).text_color(t.muted).child(is ? `${is.state?.name ?? ""} · ${is.project?.name ?? "No project"} · ${s?.machine ?? "local"}` : `${s?.name ?? "Select a workspace"} · attach an existing issue or create one`)))
+        .child(div().truncate().text_size(11).text_color(t.muted).child(is ? headerParts(this.enrich(is), git?.git, git?.pr).join(" · ") : `${s?.name ?? "Select a workspace"} · attach an existing issue or create one`)))
       .when(Boolean(is), el => el.child(this.button("issue-details", "Issue details", () => dialog({ issue: { key: is.identifier, workspaceKey: data?.workspace?.urlKey } }))))
       .when(Boolean(s && !is), el => el.child(this.button("attach-ticket", "Attach issue", () => dialog({ action: "attach", attachSpace: currentSource() }), { primary: true })));
   }
+  // ---- Status bar: machine · ahead/behind · uncommitted · agent running time ------------
+
+  statusInit(cx) {
+    this.gitReads = { git: null, pr: null };
+    // Deferred like applyFilter: publishing shared state mid-frame re-enters sibling copies.
+    cx.spawn(async cx => { this.gitTick(cx); cx.notify(); });
+    cx.timer.every(GIT_TICK_MS, cx => { this.gitTick(cx); cx.notify(); });
+  }
+
+  /** Re-reads git (and GitHub) for the active workspace when due, then publishes it. A
+   *  read that finishes after the workspace changed is dropped, not shown on another. */
+  gitTick(cx, now = Date.now()) {
+    const s = spaces().find(s => s.active), folder = s ? folderOf(s, panes()) : "";
+    const key = gitKey(s, folder);
+    if (!key) return;
+    if (shared(GIT)?.key !== key) setShared(GIT, { key, git: null, gitAt: 0, pr: null, prAt: 0 });
+    const current = shared(GIT), on = s.machine ?? null;
+    const read = (kind, at, every, load) => {
+      if (this.gitReads[kind] === key || now - at < every) return;
+      this.gitReads[kind] = key;
+      cx.spawn(async cx => {
+        const value = await load(exec, folder, on);
+        if (this.gitReads[kind] === key) this.gitReads[kind] = null;
+        const latest = shared(GIT);
+        if (latest?.key === key) setShared(GIT, { ...latest, [kind]: value, [`${kind}At`]: Date.now() });
+        cx.notify();
+      });
+    };
+    read("git", current.gitAt, GIT_MS, readGitState);
+    read("pr", current.prAt, PR_MS, readPr);
+  }
+
+  statusBar() {
+    const t = theme(), s = spaces().find(s => s.active), list = agents();
+    const needs = list.filter(a => a.status === "blocked").length;
+    const git = gitFor(s)?.git ?? null;
+    const label = (id, name, text, hover = null) => h_flex().id(id).gap(6).items_center()
+      .when(Boolean(hover), el => el.tooltip(hover)).child(icon(name, t.dim, 13)).child(text);
+    const hover = branchHover(git, s?.branch ?? null);
+    const ab = aheadBehind(git), dirty = uncommitted(git), running = runningFor(workingSince(s));
+    return h_flex().id("workspace-status").size_full().px(14).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border)
+      .text_size(11.8).text_color(t.muted)
+      .child(label("status-machine", s?.machine ? "server" : "laptop", s?.machine ?? "This computer", hover))
+      .when(Boolean(ab), el => el.child(label("status-ahead-behind", "branch", ab, hover)))
+      .when(Boolean(dirty), el => el.child(label("status-uncommitted", "worktree", dirty)))
+      .when(Boolean(running), el => el.child(label("status-running", "work", `working ${running}`)))
+      .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
+        .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
+      .child(div().flex_1())
+      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(paletteHint()));
+  }
+
   launcher() {
     const t = theme(), ws = shared(ACTIVE), data = shared(DATA)?.[ws], s = spaces().find(s => s.active);
     const is = s && matchIssue(s, data?.issues ?? [], shared(LINKS) ?? [], ws, panes());
@@ -1115,7 +1245,10 @@ export default class LinearWorkspace extends LinearClient {
       .child(icon(record.needs ? "need" : record.status === "working" ? "work" : "idle", color, 11)
         .when(record.status === "working", el => el.spin(1100)))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.foreground)
-        .tooltip(is ? `${issueLabel(is)} · ${is.title}` : record.space.name).child(is ? issueLabel(is) : record.space.name))
+        .tooltip(is ? issueHover(is) : record.space.name).child(is ? issueHeadline(is) : record.space.name))
+      .when(Boolean(is?.project?.name?.trim()), el => el.child(div().flex_none().max_w(84).truncate().px(4).rounded(4)
+        .bg(tint(t.muted, 0.12)).text_size(9.5).text_color(t.muted)
+        .tooltip(is.project.name.trim()).child(is.project.name.trim())))
       .children(this.harnessIcons([record]))
       .child(div().flex_none().text_size(10).text_color(color)
         .child(record.needs ? (record.status === "blocked" ? "needs you" : "ready") : record.status === "working" ? "working" : ""));
@@ -1680,6 +1813,7 @@ export default class LinearWorkspace extends LinearClient {
   render(cx) {
     if (this.role === "issue-menu") return this.issueMenuView();
     if (this.role === "header") return this.header();
+    if (this.role === "status") return this.statusBar();
     if (this.role === "launcher") return this.launcher();
     if (this.role === "spaces") return this.liveStrip();
     if (this.role === "issue") return this.issuePanel();

@@ -42,7 +42,7 @@
             "mod": "erics-linear-chrome",
             "props": {
               "footer": true,
-              "version": "0.1.5"
+              "version": "0.1.8"
             }
           },
           "size": {
@@ -180,7 +180,10 @@
           "id": "status",
           "type": "block",
           "content": {
-            "mod": "workspace-status"
+            "mod": "linear-board",
+            "props": {
+              "role": "status"
+            }
           },
           "size": {
             "px": 28

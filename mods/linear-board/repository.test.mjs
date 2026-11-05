@@ -55,6 +55,33 @@ test("discovers only existing Git repos in target HOME/code, preserves spaces an
   await assert.rejects(h.validateRepository({ machine: "remote", folder: join(root, "missing") }), /does not exist/);
 });
 
+test("discovery marks blank repositories that Start made, not real ones (CHA-4309)", async t => {
+  const home = await fixture(t), root = join(home, "code");
+  await mkdir(root);
+  const git = (repo, ...args) => run("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", ...args]);
+  const blank = join(root, "blank-ticket"), files = join(root, "with-files"), remote = join(root, "with-remote"), history = join(root, "with-history");
+  for (const repo of [blank, files, remote, history]) { await run("git", ["init", "-q", repo]); }
+  await git(blank, "commit", "-q", "--allow-empty", "-m", "Initial commit");
+  await git(blank, "branch", "work/ticket");
+  await writeFile(join(files, "README.md"), "real\n");
+  await git(files, "add", "README.md"); await git(files, "commit", "-q", "-m", "readme");
+  await git(remote, "commit", "-q", "--allow-empty", "-m", "Initial commit");
+  await git(remote, "remote", "add", "origin", "https://example.invalid/repo.git");
+  await git(history, "commit", "-q", "--allow-empty", "-m", "one"); await git(history, "commit", "-q", "--allow-empty", "-m", "two");
+  const h = await harness({ home });
+  const found = Object.fromEntries((await h.discoverRepositories(null)).repositories.map(r => [r.name, r]));
+  assert.deepEqual({ ...found["blank-ticket"] }, { folder: blank, name: "blank-ticket", blank: true });
+  for (const name of ["with-files", "with-remote", "with-history"]) assert.equal(found[name].blank, undefined, name);
+});
+
+test("a blank repository is never inferred, even when the project or a sibling points at it (CHA-4309)", async () => {
+  const h = await harness();
+  const real = { name: "erics-herdr-linear", folder: "/c/erics-herdr-linear" };
+  const blank = { name: "barnyard-decide-and-authorize-gps-metadata-remed", folder: "/c/barnyard-decide-and-authorize-gps-metadata-remed", blank: true };
+  assert.equal(h.inferRepository([real, blank], { projectFolder: blank.folder, siblings: [{ folder: blank.folder, title: "Search Linear too" }], projectName: "Eric's Herdr Linear" }), real);
+  assert.equal(h.inferRepository([blank], { projectFolder: blank.folder, text: "`barnyard-decide-and-authorize-gps-metadata-remed`" }), null);
+});
+
 test("missing code root and empty root are distinct, neither creates directories", async t => {
   const home = await fixture(t), h = await harness({ home });
   await assert.rejects(h.discoverRepositories(null), /Repository root is missing/);
@@ -62,6 +89,48 @@ test("missing code root and empty root are distinct, neither creates directories
   await mkdir(join(home, "code"));
   assert.equal((await h.discoverRepositories(null)).repositories.length, 0);
   assert.ok(h.calls.every(c => c.config.on === null));
+});
+
+test("an existing ticket's repository is inferred from its project, siblings or text, never guessed (CHA-4309)", async () => {
+  const h = await harness();
+  const real = { name: "erics-herdr-linear", folder: "/Users/me/code/erics-herdr-linear" };
+  const blank = { name: "sidebar-rows-show-the-ticket-title-first-project", folder: "/Users/me/code/sidebar-rows-show-the-ticket-title-first-project" };
+  const other = { name: "holonet", folder: "/Users/me/code/holonet" };
+  const repos = [real, blank, other];
+  // 1. The project's remembered repository wins, when it is on this computer.
+  assert.equal(h.inferRepository(repos, { projectFolder: other.folder, projectName: "Eric's Herdr Linear" }), other);
+  assert.equal(h.inferRepository(repos, { projectFolder: "/gone", projectName: "Eric's Herdr Linear" }), real);
+  // 2. Sibling tickets vote; a blank repository Start made for a sibling is no evidence.
+  const sibling = (folder, title = "Another ticket") => ({ folder, title });
+  assert.equal(h.inferRepository(repos, { siblings: [sibling(real.folder), sibling(real.folder), sibling(other.folder)] }), real);
+  assert.equal(h.inferRepository(repos, { siblings: [sibling(blank.folder, "Sidebar rows: show the ticket title first, project second")] }), null);
+  assert.equal(h.inferRepository(repos, { siblings: [sibling(`${blank.folder}`, "Sidebar rows: show the ticket title first, project second"), sibling(other.folder)] }), other);
+  assert.equal(h.inferRepository(repos, { siblings: [sibling(real.folder), sibling(other.folder)] }), null, "a tie is not a choice");
+  assert.equal(h.inferRepository(repos, { siblings: [sibling("/elsewhere/repo")] }), null);
+  // 3. The ticket's text names one repository: a ~/code path or a GitHub link.
+  assert.equal(h.inferRepository(repos, { text: "The real code lives in `~/code/erics-herdr-linear`." }), real);
+  assert.equal(h.inferRepository(repos, { text: "Repo: [https://github.com/EricGrill/erics-herdr-linear](<https://github.com/EricGrill/erics-herdr-linear>)" }), real);
+  assert.equal(h.inferRepository(repos, { text: "See /Users/me/code/holonet/docs." }), other);
+  assert.equal(h.inferRepository(repos, { text: "It lives in ~/code/holonet." }), other, "a sentence's full stop is not part of the name");
+  assert.equal(h.inferRepository(repos, { text: "Touches ~/code/holonet and ~/code/erics-herdr-linear." }), null, "two named repositories are ambiguous");
+  // A backticked word is not a repository reference, even when a repository has that name.
+  const app = { name: "app", folder: "/Users/me/code/app" }, config = { name: "config", folder: "/Users/me/code/config" };
+  assert.equal(h.inferRepository([app, config, other], { text: "Rename `app` in the `config` file, then run `holonet`." }), null);
+  assert.equal(h.inferRepository([app, other], { text: "The `app` key is wrong." }), null);
+  assert.equal(h.inferRepository(repos, { text: "holonet is a word here, not a repository reference" }), null);
+  // 4. The project's name, ignoring case and punctuation.
+  assert.equal(h.inferRepository(repos, { projectName: "Eric's Herdr Linear" }), real);
+  assert.equal(h.inferRepository(repos, { projectName: "Pawgress" }), null);
+  // Nothing to go on: Start makes a new repository (CHA-4245).
+  assert.equal(h.inferRepository(repos, {}), null);
+  assert.equal(h.inferRepository([], { projectName: "Eric's Herdr Linear", text: "~/code/erics-herdr-linear" }), null);
+});
+
+test("a repository Start made for a ticket is recognised by its title slug", async () => {
+  const h = await harness();
+  assert.equal(h.madeForTicket("/Users/me/code/research-newly-starred-repos", "Research newly starred repos"), true);
+  assert.equal(h.madeForTicket("/Users/me/code/research-newly-starred-repos-2", "Research newly starred repos"), true);
+  assert.equal(h.madeForTicket("/Users/me/code/erics-herdr-linear", "Research newly starred repos"), false);
 });
 
 test("unavailable/unknown computers never run local commands", async () => {
