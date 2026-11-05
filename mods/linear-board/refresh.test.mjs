@@ -33,7 +33,7 @@ async function harness(count = 1) {
   const dummy = () => {};
   const boundaries = {
     "gpui-kit": { div: native, svg: native, image: native },
-    "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, Popup: {}, TextView: {} },
+    "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, InputState: {}, Popup: {}, TextView: {} },
     "./client.js": { default: Client },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],

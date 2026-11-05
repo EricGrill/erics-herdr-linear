@@ -176,7 +176,7 @@ async function harness(options = {}) {
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
   const link = async specifier => {
-    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js", "./machines.js", "./sticky.js", "./git.js"].includes(specifier)) {
+    if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js", "./machines.js", "./sticky.js", "./git.js", "./tags.js"].includes(specifier)) {
       const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
       await real.link(link);
       return real;
@@ -2032,7 +2032,9 @@ test("right-clicking an issue opens the issue menu for that issue, and nothing w
   assert.equal(overlays[0].mod, "linear-board");
   assert.equal(overlays[0].kind, "popup");
   assert.equal(JSON.stringify(overlays[0].props), JSON.stringify({ role: "issue-menu",
-    issue: { identifier: ticket.identifier, title: ticket.title, url: ticket.url }, demo: false }));
+    issue: { id: ticket.id ?? null, identifier: ticket.identifier, title: ticket.title, url: ticket.url, teamKey: ticket.teamKey ?? ticket.team?.key ?? null }, demo: false }));
+  // CHA-4318: an issue with a Linear id gets room for Pin and Tags.
+  assert.equal(overlays[0].height, ticket.id ? 187 : 122);
   assert.equal(h.client.issueMenu({ ...ticket, url: "" }, cx), null);
   assert.equal(overlays.length, 1);
 });

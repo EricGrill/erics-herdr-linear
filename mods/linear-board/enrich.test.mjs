@@ -99,7 +99,7 @@ test("a delegated issue parses into usable rows", async () => {
     node("DEMO-3589", {
       delegate: { id: "agent-spock", name: "Spock", displayName: "spock", avatarUrl: "https://public.linear.app/a.png" },
       state: { name: "Needs Human", type: "started" },
-      labels: { nodes: [{ name: "agent:stalled" }, { name: "needs-eric" }] },
+      labels: { nodes: [{ name: "agent:stalled" }, { name: "needs-eric", color: "#EB5757" }] },
     }),
   ]));
   assert.equal(parsed.error, null);
@@ -116,6 +116,7 @@ test("a delegated issue parses into usable rows", async () => {
     project: { id: "p1", name: "Helper Project" },
     teamKey: "DEMO",
     labels: ["agent:stalled", "needs-eric"],
+    labelColors: { "needs-eric": "#EB5757" },
   }]);
 });
 
