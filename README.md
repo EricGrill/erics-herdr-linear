@@ -19,6 +19,16 @@ the sidebar-footer version in `layouts/erics-linear.json` matches.
 - Gives each machine its own colored dot, the same after every restart, and says when a
   remote machine is offline or reconnecting, on its rows and under Add machine.
 - Keeps the current group's header (Needs you, Done, Working, Idle) pinned while you scroll.
+- **By status / By project** switches the sidebar between state groups and one group per
+  Linear project (projects that need you first, spaces without a project last). Click any
+  group header to collapse it; the choice and collapsed groups are remembered.
+- **Clean up (N)** appears when spaces are finished: their ticket is Done or Canceled in
+  Linear, or their pull request merged. It lists each with what its checkout holds and
+  closes the picked ones at once, optionally removing clean worktree checkouts with
+  `git worktree remove` (never forced, so uncommitted edits block it; the branch is kept).
+- Auto-close: a space whose ticket has been Done or Canceled for 10 minutes closes by
+  itself, unless it is the space you are in, pinned, has an agent working or waiting, or
+  has uncommitted edits. Only the space closes; its ticket, folder and branch stay.
 - Shows the Needs you count beside Erics Linear in the window header, even with the
   sidebar collapsed. It hides at zero.
 - Right-click a space for its menu: with a Linear ticket, Open in Linear app, Open in
@@ -255,6 +265,20 @@ You can replace either list in the same machine-local configuration:
 
 These arrays replace their defaults. An empty array disables that category. Done rows
 distinguish **Agent finished** from **Done in Linear**, so the two sources remain clear.
+
+## Cleanup rules
+
+Auto-close is on by default. Turn it off, or change the grace period, in the same
+machine-local configuration:
+
+```json
+{
+  "cleanup": { "autoClose": false, "graceMinutes": 10 }
+}
+```
+
+A merged pull request alone never auto-closes a space; it only puts the space in Clean up.
+Pin a space to keep it open after its ticket is done.
 
 ## Shortcuts
 

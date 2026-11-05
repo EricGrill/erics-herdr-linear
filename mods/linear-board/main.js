@@ -16,6 +16,8 @@ import { normalizeConfig } from "./config.js";
 import { machineColor, machineLabel, machineState, stateWord } from "./machines.js";
 import { stackLayout, clampScroll, pinnedHeader, thumb } from "./sticky.js";
 import { readGitState, readPr, headerParts, aheadBehind, uncommitted, workingSince, runningFor, branchHover } from "./git.js";
+import { finishedReason, ticketFinished, cleanupCandidates, keepOpenReason, autoCloseDue, gitSummary, removable, REMOVE_WORKTREE } from "./cleanup.js";
+import { sidebarGroups, toggleCollapsed } from "./groups.js";
 import { isPinned, rowTags, rowColor, tagMenuItems, fetchIssueTags, fetchCatalog, pickable, canCreate, tagName,
   setTag, setPinned, createTag, labelState, withLabels, fetchIssueLabels } from "./tags.js";
 import { FILTER_FIELDS, normalizeFilters, toggleFilter, filterCount, matchesFilters, filterOptions } from "./filters.js";
@@ -171,8 +173,13 @@ export default class LinearWorkspace extends LinearClient {
     this.tab = "mine";
     if (this.role === "sidebar") {
       cx.timer.every(10000, cx => this.resolveSpaces(cx));
-      // Row ages ("Working 4m") move with the clock, not only when a space changes.
-      cx.timer.every(AGE_TICK_MS, cx => cx.notify());
+      // Row ages ("Working 4m") move with the clock, not only when a space changes. The same
+      // tick closes spaces whose ticket has been finished for the grace period.
+      cx.timer.every(AGE_TICK_MS, cx => { cx.notify(); this.autoClose(cx); });
+      try {
+        this.groupMode = localStorage.getItem("groupMode") === "project" ? "project" : "status";
+        this.collapsed = JSON.parse(localStorage.getItem("collapsedGroups") ?? "{}") ?? {};
+      } catch { this.groupMode = "status"; this.collapsed = {}; }
       this.startEnrich(cx);
       cx.timer.every(ENRICH_MS, cx => this.startEnrich(cx));
       this.loadTeams(cx);
@@ -1017,6 +1024,170 @@ export default class LinearWorkspace extends LinearClient {
       || a.space.name.localeCompare(b.space.name));
   }
 
+  // ---- Grouping, Clean up and auto-close --------------------------------------------------
+
+  setGroupMode(mode, cx) {
+    this.groupMode = mode === "project" ? "project" : "status";
+    this.homeScroll = 0;
+    try { localStorage.setItem("groupMode", this.groupMode); } catch { /* kept for this session only */ }
+    cx.notify();
+  }
+  toggleGroup(key, cx) {
+    this.collapsed = toggleCollapsed(this.collapsed, key);
+    try { localStorage.setItem("collapsedGroups", JSON.stringify(this.collapsed)); } catch { /* kept for this session only */ }
+    cx.notify();
+  }
+
+  /** Open spaces whose ticket is Done or Canceled, or whose pull request merged. Before
+   *  search and filters: a filter does not make a space less finished. */
+  finishedSpaces() {
+    return cleanupCandidates(this.laned(), is => rowPullRequest(sharedPulls()[String(is.identifier).toUpperCase()]));
+  }
+
+  /** Closes spaces whose ticket has been Done or Canceled in Linear for the grace period,
+   *  unless one is open now, pinned, has an agent working or waiting, or has uncommitted
+   *  edits. Only the space closes: its ticket, folder and branch stay as they are. */
+  autoClose(cx) {
+    const rules = shared(CONFIG)?.cleanup ?? normalizeConfig().cleanup;
+    if (!rules.autoClose || this.demo || this.signedOut || this.autoClosing || !this.ws) return;
+    const { due, seen } = autoCloseDue(this.finishedSpaces(), this.finishedSeen ?? {}, Date.now(), rules.graceMinutes * 60000);
+    this.finishedSeen = seen;
+    // Everything but git is known now; git is read only for spaces that pass the rest.
+    const ready = due.filter(c => !keepOpenReason(c.record, null));
+    if (!ready.length) return;
+    this.autoClosing = true;
+    cx.spawn(async cx => {
+      const closed = [];
+      try {
+        for (const c of ready) {
+          const git = await readGitState(exec, c.record.folder, c.record.space.machine ?? null);
+          // Re-read the space: it may have been closed, reopened or focused meanwhile.
+          const live = this.laned().find(r => r.space.id === c.record.space.id);
+          if (!live || !ticketFinished(finishedReason(live.issue)) || keepOpenReason(live, git)) continue;
+          run("space.close", { id: live.space.id, confirmed: true });
+          closed.push(live.issue?.identifier ?? live.space.name);
+        }
+      } finally {
+        this.autoClosing = false;
+        if (closed.length) {
+          this.note = `Closed ${closed.length} finished space${closed.length === 1 ? "" : "s"}: ${closed.join(", ")}`;
+          this.noteAt = Date.now();
+          cx.notify();
+        }
+      }
+    });
+  }
+
+  /** Shows Clean up in the sidebar and reads each finished space's checkout. */
+  openCleanup(cx) {
+    const candidates = this.finishedSpaces();
+    this.cleanupOpen = true;
+    this.cleanupGit = {};
+    this.cleanupPicked = {};
+    this.cleanupRemove ??= true;
+    cx.notify();
+    cx.spawn(async cx => {
+      await Promise.all(candidates.map(async ({ record }) => {
+        const on = record.space.machine ?? null;
+        const [git, kind] = await Promise.all([
+          readGitState(exec, record.folder, on),
+          record.folder ? checkoutKind(record.folder, on).catch(() => null) : null,
+        ]);
+        if (!this.cleanupOpen) return;
+        this.cleanupGit = { ...this.cleanupGit, [record.space.id]: { git, kind } };
+        cx.notify();
+      }));
+    });
+  }
+
+  /** Clean up's rows: each finished space, why it is finished, what its checkout holds and
+   *  whether it is picked. A space that must stay open shows why and cannot be picked. */
+  cleanupRows() {
+    return this.finishedSpaces().map(c => {
+      const id = c.record.space.id, read = this.cleanupGit?.[id];
+      const keep = keepOpenReason(c.record, read ? read.git : undefined);
+      return { ...c, id, git: read?.git, kind: read?.kind ?? null, keep, picked: !keep && (this.cleanupPicked?.[id] ?? true) };
+    });
+  }
+
+  runCleanup(cx) {
+    const rows = this.cleanupRows().filter(r => r.picked), removeWorktrees = this.cleanupRemove;
+    if (!rows.length || this.cleanupBusy) return;
+    this.cleanupBusy = true;
+    cx.notify();
+    cx.spawn(async cx => {
+      let closed = 0, removed = 0;
+      const failed = [];
+      try {
+        for (const r of rows) {
+          if (!spaces().some(s => s.id === r.id)) continue;
+          run("space.close", { id: r.id, confirmed: true });
+          closed++;
+          if (!removeWorktrees || !removable(r.git, r.kind)) continue;
+          const result = await exec("sh", ["-c", REMOVE_WORKTREE, "sh", r.record.folder], { on: r.record.space.machine ?? null }).catch(error => ({ code: 1, stderr: String(error?.message ?? error) }));
+          if (result?.code === 0) removed++;
+          else failed.push(`${r.record.issue?.identifier ?? r.record.space.name}: ${String(result?.stderr ?? "").trim().split("\n").pop() || "git refused"}`);
+        }
+      } finally {
+        this.cleanupBusy = false;
+        this.cleanupOpen = false;
+        this.note = [`Closed ${closed} space${closed === 1 ? "" : "s"}`, removed ? `removed ${removed} worktree${removed === 1 ? "" : "s"}` : "",
+          failed.length ? `kept ${failed.join("; ")}` : ""].filter(Boolean).join(", ");
+        this.noteAt = Date.now();
+        cx.notify();
+      }
+    });
+  }
+
+  cleanupView() {
+    const t = theme(), rows = this.cleanupRows(), chosen = rows.filter(r => r.picked);
+    const removals = this.cleanupRemove ? chosen.filter(r => removable(r.git, r.kind)).length : 0;
+    const label = this.cleanupBusy ? "Closing…" : `Close ${chosen.length}${removals ? ` · remove ${removals} worktree${removals === 1 ? "" : "s"}` : ""}`;
+    return v_flex().id("cleanup").flex_1().min_h(0).min_w(0).gap(6)
+      .child(h_flex().h(28).flex_none().items_center().gap(8)
+        .child(div().text_size(11).font_semibold().text_color(t.done).child("CLEAN UP"))
+        .child(div().text_size(11).text_color(t.done).child(String(rows.length)))
+        .child(div().flex_1())
+        .child(this.button("cleanup-back", "Back", cx => { this.cleanupOpen = false; cx.notify(); })))
+      .child(div().flex_none().text_size(11).text_color(t.muted)
+        .child("Spaces whose ticket is Done or Canceled in Linear, or whose pull request merged. Closing a space leaves its ticket, files and branch alone."))
+      .child(v_flex().id("cleanup-rows").flex_1().min_h(0).min_w(0).overflow_y_scrollbar().gap(3)
+        .when(!rows.length, el => el.child(div().py(10).text_size(12).text_color(t.muted).child("Nothing finished is open.")))
+        .children(rows.map(r => h_flex().id(`cleanup-${r.id}`).min_w(0).h(40).flex_none().px(6).gap(8).items_center().rounded(6)
+          .bg(t.chrome).when(!r.keep, el => el.cursor_pointer().hover(s => s.bg(t.hover)))
+          .on_click((_e, cx) => {
+            if (r.keep) return;
+            this.cleanupPicked = { ...this.cleanupPicked, [r.id]: !r.picked };
+            cx.notify();
+          })
+          .child(div().w(14).h(14).flex_none().flex().items_center().justify_center().rounded(3).border_1().border_color(t.border)
+            .text_size(10).text_color(t.foreground).child(r.picked ? "✓" : ""))
+          .child(v_flex().flex_1().min_w(0).gap(2)
+            .child(div().truncate().text_size(12).text_color(r.keep ? t.dim : t.foreground)
+              .child(r.record.issue ? issueHeadline(r.record.issue) : r.record.space.name))
+            .child(div().truncate().text_size(10.5).text_color(r.keep && r.keep !== "checking git" ? t.blocked : t.muted)
+              .child(`${r.reason} · ${r.keep && r.keep !== "checking git" ? `stays open: ${r.keep}` : gitSummary(r.git, r.kind)}`))))))
+      .child(h_flex().id("cleanup-remove").flex_none().gap(8).items_center().cursor_pointer()
+        .on_click((_e, cx) => { this.cleanupRemove = !this.cleanupRemove; cx.notify(); })
+        .child(div().w(14).h(14).flex_none().flex().items_center().justify_center().rounded(3).border_1().border_color(t.border)
+          .text_size(10).text_color(t.foreground).child(this.cleanupRemove ? "✓" : ""))
+        .child(div().flex_1().min_w(0).text_size(11).text_color(t.muted).child("Also remove clean worktree checkouts (branches are kept)")))
+      .child(h_flex().flex_none().pb(4)
+        .child(this.button("cleanup-run", label, cx => this.runCleanup(cx), { primary: true, enabled: chosen.length > 0 && !this.cleanupBusy })));
+  }
+
+  /** A sidebar group header: click to collapse or expand the group. */
+  groupHeader(group, color, id) {
+    const t = theme();
+    return h_flex().id(id).h(HOME_ROWS.header).flex_none().gap(8).items_center().pt(6).cursor_pointer()
+      .tooltip(group.collapsed ? "Show this group" : "Collapse this group")
+      .on_click((_e, cx) => this.toggleGroup(group.key, cx))
+      .child(div().w(8).flex_none().text_size(10).text_color(color).child(group.collapsed ? "›" : "⌄"))
+      .child(div().text_size(11).font_semibold().text_color(color).child(group.name))
+      .child(div().text_size(11).text_color(color).child(String(group.count)))
+      .when(group.tone !== "blocked" && group.needs > 0, el => el.child(div().text_size(11).text_color(t.blocked).child(`${group.needs} need you`)));
+  }
+
   /** Linear's matches for the sidebar's words, without the tickets already shown as spaces. */
   linearMatches(records = this.visibleSpaces()) {
     const q = (this.filter ?? "").trim();
@@ -1032,17 +1203,15 @@ export default class LinearWorkspace extends LinearClient {
     const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
       `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
     // Pinned spaces (the Linear "Pinned" label) come first; each keeps its own state line.
-    const groups = [
-      { status: "pinned", name: "PINNED", color: t.accent ?? t.foreground },
-      { status: "blocked", name: "NEEDS YOU", color: t.blocked },
-      { status: "done", name: "DONE", color: t.done },
-      { status: "working", name: "WORKING", color: t.working },
-      { status: "idle", name: "IDLE", color: t.dim },
-    ].map(group => ({ ...group, records: records.filter(record => group.status === "pinned" ? record.pinned : !record.pinned && record.lane === group.status) }));
-    setAgentOrder(groups.flatMap(group => group.records).flatMap(record => record.agents.map(a => a.address)));
+    // The rest group by state, or by Linear project; any group collapses to its header.
+    const tones = { accent: t.accent ?? t.foreground, blocked: t.blocked, done: t.done, working: t.working, dim: t.dim };
+    const mode = this.groupMode ?? "status";
+    const shown = sidebarGroups(records, mode, this.collapsed ?? {}).map(group => ({ ...group, color: tones[group.tone] ?? t.dim }));
+    setAgentOrder(shown.flatMap(group => group.records).flatMap(record => record.agents.map(a => a.address)));
     this.publishNeeds();
-    const shown = groups.filter(group => group.records.length);
-    const stack = stackLayout(shown.map(group => ({ rows: group.records.length })), HOME_ROWS);
+    const finished = this.finishedSpaces().length;
+    const note = this.note && Date.now() - (this.noteAt ?? 0) < 120000 ? this.note : "";
+    const stack = stackLayout(shown.map(group => ({ rows: group.collapsed ? 0 : group.records.length })), HOME_ROWS);
     const viewport = this.homeViewport ?? 0;
     // The groups' height is known from their rows; anything after them is measured.
     const content = Math.max(stack.height, this.homeContent ?? 0);
@@ -1062,14 +1231,19 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().flex_none().items_center().flex_wrap().gap(7)
         .child(this.button("new-task", "+ New issue", () => dialog({ action: "new" }), { primary: true }))
         .child(this.button("home-filter-button", count ? `Filters (${count})` : "Filters", () => this.openFilters()))
+        .child(this.button("group-mode", mode === "project" ? "By project" : "By status", cx => this.setGroupMode(mode === "project" ? "status" : "project", cx))
+          .tooltip(mode === "project" ? "Grouped by Linear project. Click to group by status." : "Grouped by status. Click to group by Linear project."))
+        .when(finished > 0 && !this.cleanupOpen, el => el.child(this.button("open-cleanup", `Clean up (${finished})`, cx => this.openCleanup(cx))
+          .tooltip("Close spaces whose ticket is Done or Canceled, or whose pull request merged")))
         .child(div().flex_1())
         .child(div().text_size(11).text_color(t.muted).child(`${records.length} spaces`)))
       .when(count > 0, el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).tooltip(summary).child(summary))
         .child(this.button("clear-home-filters", "Clear", cx => this.applyFilter({}, cx)))))
+      .when(Boolean(this.cleanupOpen), el => el.child(this.cleanupView()))
       // The list scrolls itself so the current group's header can stay pinned on top:
       // GPUI's scroll areas never say how far they have scrolled.
-      .child(div().id("spaces-by-status").flex_1().min_h(0).min_w(0).relative().overflow_hidden()
+      .when(!this.cleanupOpen, el => el.child(div().id("spaces-by-status").flex_1().min_h(0).min_w(0).relative().overflow_hidden()
         .on_size_change((size, cx) => {
           const height = size.height / (settings()?.zoom || 1);
           if (height !== this.homeViewport) { this.homeViewport = height; cx.notify(); }
@@ -1087,8 +1261,8 @@ export default class LinearWorkspace extends LinearClient {
             if (height !== this.homeContent) { this.homeContent = height; cx.notify(); }
           })
           .children(shown.flatMap(group => [
-            this.section(group.name, group.records.length, group.color),
-            ...group.records.map(record => this.workRow(record, `home-${record.space.id}`, record.lane ?? group.status)),
+            this.groupHeader(group, group.color, `group-${group.key}`),
+            ...(group.collapsed ? [] : group.records.map(record => this.workRow(record, `home-${record.space.id}`, record.lane))),
           ]))
           .when(linear.issues.length > 0, el => el
             .child(this.section("LINEAR TICKETS", linear.issues.length))
@@ -1097,8 +1271,9 @@ export default class LinearWorkspace extends LinearClient {
           .when(Boolean(linear.error), el => el.child(div().py(6).text_size(11).text_color(t.blocked).truncate()
             .child(`Linear search: ${linear.error}`))))
         .when(Boolean(pin), el => el.child(div().id("pinned-group").absolute().left(0).right(0).top(pin.top).bg(t.chrome)
-          .child(this.section(shown[pin.group].name, shown[pin.group].records.length, shown[pin.group].color))))
-        .when(Boolean(bar), el => el.child(div().absolute().right(0).w(3).top(bar.top).h(bar.h).rounded(2).bg(t.border))))
+          .child(this.groupHeader(shown[pin.group], shown[pin.group].color, "pinned-group-header"))))
+        .when(Boolean(bar), el => el.child(div().absolute().right(0).w(3).top(bar.top).h(bar.h).rounded(2).bg(t.border)))))
+      .when(Boolean(note), el => el.child(div().py(3).text_size(11).text_color(t.muted).truncate().tooltip(note).child(note)))
       .when(Boolean(this.signedOut), el => el.child(this.button("sign-in", "Sign in to Linear", cx => this.signIn(cx))))
       .when(Boolean(this.err), el => el.child(div().py(3).text_size(11).text_color(t.blocked).truncate().child(this.err)));
   }

@@ -24,6 +24,10 @@ export function normalizeConfig(value = {}) {
   const input = object(value, "Layout config");
   const enrichment = object(input.enrichment, "enrichment");
   const attention = object(input.attention, "attention");
+  const cleanup = object(input.cleanup, "cleanup");
+  if (cleanup.autoClose !== undefined && typeof cleanup.autoClose !== "boolean") throw new Error("cleanup.autoClose must be boolean");
+  const grace = cleanup.graceMinutes ?? 10;
+  if (typeof grace !== "number" || !Number.isFinite(grace) || grace < 0) throw new Error("cleanup.graceMinutes must be a number of minutes, 0 or more");
   if (enrichment.enabled !== undefined && typeof enrichment.enabled !== "boolean") throw new Error("enrichment.enabled must be boolean");
   const envKey = enrichment.envKey ?? "LINEAR_API_KEY";
   if (typeof envKey !== "string" || !ENV_NAME.test(envKey)) throw new Error("enrichment.envKey must be an environment variable name");
@@ -46,5 +50,7 @@ export function normalizeConfig(value = {}) {
       labels: names(attention.labels, DEFAULT_ATTENTION_LABELS, "attention.labels"),
       states: names(attention.states, DEFAULT_ATTENTION_STATES, "attention.states"),
     },
+    // Spaces whose ticket is Done or Canceled close by themselves after the grace period.
+    cleanup: { autoClose: cleanup.autoClose ?? true, graceMinutes: grace },
   };
 }
