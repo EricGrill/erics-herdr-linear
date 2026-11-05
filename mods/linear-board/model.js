@@ -34,6 +34,18 @@ export function issueLabel(issue) {
   return `${issue.identifier}${project ? ` (${project})` : ""}`;
 }
 
+/** A sidebar row's first line: the key and the title, so the title is what survives truncation. */
+export function issueHeadline(issue) {
+  const title = issue?.title?.trim();
+  return `${issue.identifier}${title ? ` · ${title}` : ""}`;
+}
+
+/** The hover text for a sidebar row: the full title, then the project. */
+export function issueHover(issue) {
+  const project = issue?.project?.name?.trim();
+  return `${issueHeadline(issue)}${project ? ` (${project})` : ""}`;
+}
+
 export function workRecords({ allSpaces, allPanes, allAgents, issues, links, workspace }) {
   return allSpaces.map(space => {
     const ownAgents = allAgents.filter(a => a.space === space.id);
