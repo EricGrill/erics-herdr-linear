@@ -2,7 +2,8 @@
 // Modified for Eric's Herdr Linear: spaces-first layout, configurable enrichment and attention rules.
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState, Popup, TextView } from "gpui-base";
-import { spaces, panes, agents, machines, theme, settings, shared, setShared, setAgentOrder, run, props, openOverlay, closeOverlay, knownAgents, appHome, exec, window, keys } from "herdr";
+import { setAgentOrder, run, openOverlay, closeOverlay, knownAgents, appHome, exec } from "herdr";
+import { spaces, panes, agents, machines, theme, settings, shared, setShared, props, window, keys, inFrame } from "./host.js";
 import * as fs from "fs/promises";
 import LinearClient from "./client.js";
 import { computers, loadTarget, repositoryName, selectRepository as selectTargetRepository } from "./repository.js";
@@ -2162,6 +2163,11 @@ export default class LinearWorkspace extends LinearClient {
   }
 
   render(cx) {
+    // One frame: each Herdr read is copied in once, not once per row (see host.js).
+    return inFrame(() => this.renderFrame(cx));
+  }
+
+  renderFrame(cx) {
     if (this.role === "issue-menu") return this.issueMenuView();
     if (this.role === "issue-tags") return this.tagsView();
     if (this.role === "header") return this.header();

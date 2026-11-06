@@ -7,6 +7,7 @@ const source = await readFile(new URL("./main.js", import.meta.url), "utf8");
 const repositorySource = await readFile(new URL("./repository.js", import.meta.url), "utf8");
 const captureSource = await readFile(new URL("./capture.js", import.meta.url), "utf8");
 const clientSource = await readFile(new URL("./client.js", import.meta.url), "utf8");
+const hostSource = await readFile(new URL("./host.js", import.meta.url), "utf8");
 const project = { id: "project-one", name: "one", teams: ["TEAM"] };
 
 // Exercise real form, preferences and repository coordination. Only native
@@ -44,7 +45,8 @@ async function harness(options = {}) {
   async function link(specifier) {
     if (modules.has(specifier)) return modules.get(specifier);
     let module;
-    if (specifier === "./capture.js") module = new vm.SourceTextModule(captureSource, { context });
+    if (specifier === "./host.js") module = new vm.SourceTextModule(hostSource, { context });
+    else if (specifier === "./capture.js") module = new vm.SourceTextModule(captureSource, { context });
     else if (specifier === "./repository.js") module = new vm.SourceTextModule(repositorySource, { context });
     else if (specifier === "./client.js") module = new vm.SourceTextModule(clientSource, { context });
     else {
@@ -53,7 +55,9 @@ async function harness(options = {}) {
       else if (specifier === "gpui-kit") exports = { View: class {}, div: dummy, svg: dummy, image: dummy };
       else if (specifier === "herdr") {
         const names = [...(source + clientSource).matchAll(/import \{([^}]+)\} from "herdr"/g)].flatMap(m => m[1].split(",").map(n => n.trim()));
-        exports = Object.fromEntries([...new Set([...names, "exec"])].map(name => [name, api[name] ?? dummy]));
+        // host.js reads the rest through a namespace import.
+        const hosted = ["spaces", "agents", "panes", "machines", "theme", "settings", "window", "keys", "props", "shared", "setShared"];
+        exports = Object.fromEntries([...new Set([...names, ...hosted, "exec"])].map(name => [name, api[name] ?? dummy]));
       } else {
         const names = [...(source + clientSource).matchAll(/import \{([^}]+)\} from "([^\"]+)"/g)]
           .filter(m => m[2] === specifier).flatMap(m => m[1].split(",").map(n => n.trim()));
@@ -64,7 +68,7 @@ async function harness(options = {}) {
       }, { context });
     }
     modules.set(specifier, module);
-    if (["./repository.js", "./client.js", "./capture.js"].includes(specifier)) await module.link(link);
+    if (["./repository.js", "./client.js", "./capture.js", "./host.js"].includes(specifier)) await module.link(link);
     return module;
   }
   const main = new vm.SourceTextModule(source, { context });
