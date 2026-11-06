@@ -76,6 +76,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(before[relative], (self.home / relative).read_bytes())
         keys = json.loads((self.home / "keys.json").read_text())
         for section, bindings in self.before_keys.items():
+            if section == "terminal":
+                bindings = {**bindings, "cmd-f": "terminal.search"}
             self.assertEqual(bindings, keys[section])
         self.assertEqual(installer.MAC_KEYS, keys[installer.SCOPE])
 
@@ -159,6 +161,32 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "custom bindings"):
             self.run_install()
         self.assertEqual(before, self.snapshot())
+
+    def test_adds_herdr_find_in_terminal_binding_on_macos(self):
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual("terminal.search", keys["terminal"]["cmd-f"])
+        self.assertEqual("terminal", keys["terminal"]["ctrl-c"])
+
+    def test_adds_herdr_find_in_terminal_binding_on_linux(self):
+        installer.platform.system.return_value = "Linux"
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual("terminal.search", keys["terminal"]["ctrl-shift-f"])
+        self.assertNotIn("cmd-f", keys["terminal"])
+
+    def test_find_in_terminal_keeps_existing_search_or_custom_key(self):
+        self.before_keys["terminal"] = {"cmd-f": "send:x", "ctrl-g": "terminal.search"}
+        (self.home / "keys.json").write_text(json.dumps(self.before_keys))
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual({"cmd-f": "send:x", "ctrl-g": "terminal.search"}, keys["terminal"])
+
+    def test_find_in_terminal_added_when_keys_file_is_missing(self):
+        (self.home / "keys.json").unlink()
+        self.run_install()
+        keys = json.loads((self.home / "keys.json").read_text())
+        self.assertEqual({"cmd-f": "terminal.search"}, keys["terminal"])
 
     def test_terminal_shortcuts_are_not_overwritten_or_silently_shadowed(self):
         keys = {**self.before_keys, "terminal": {"cmd-alt-a": "terminal"}}

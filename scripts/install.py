@@ -34,6 +34,10 @@ LINUX_KEYS = {
     "alt-shift-e": "linear-board.panel", "alt-shift-x": "linear-board.clear",
     "alt-shift-a": "mod.open:erics-linear-agents",
 }
+# Herdr 0.1.13 added Find in terminal. It only reaches keys.json files nobody has
+# edited, and this installer edits keys.json, so add the default binding here.
+SEARCH_KEY = {"Darwin": "cmd-f"}
+SEARCH_KEY_DEFAULT = "ctrl-shift-f"
 
 
 def find_herdr():
@@ -195,6 +199,12 @@ def install(argv=None):
     if shadowed:
         raise ValueError("Terminal bindings take priority over layout shortcuts: " + ", ".join(shadowed))
     keys[SCOPE] = {**old, **desired}
+    terminal = keys.setdefault("terminal", {})
+    if not isinstance(terminal, dict):
+        raise ValueError("keys.json terminal section must be an object")
+    search_key = SEARCH_KEY.get(platform.system(), SEARCH_KEY_DEFAULT)
+    if "terminal.search" not in terminal.values() and search_key not in terminal:
+        terminal[search_key] = "terminal.search"
     # Retire the personal OAuth popup only when its exact legacy binding exists.
     # The board uses the configured API key; unrelated global shortcuts stay intact.
     # macOS installed the popup as "EricsLinear", Linux as "linear". Its worktree

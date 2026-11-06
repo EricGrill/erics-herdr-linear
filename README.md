@@ -156,7 +156,7 @@ new issue's details load.
 
 ## Install
 
-Install and open Herdr once first. This layout has been exercised with **Herdr 0.1.12** on
+Install and open Herdr once first. This layout has been exercised with **Herdr 0.1.13** on
 macOS and Linux. It uses Python 3.8+ for installation, Git for updates, and Node.js for the
 optional test suite. The Linear adapter uses `curl`, `tar`, and a SHA-256 utility to obtain
 its platform-specific backend if it is not already installed.
