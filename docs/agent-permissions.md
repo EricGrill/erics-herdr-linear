@@ -1,4 +1,6 @@
-# CHA-4235: agent permission modes
+# Agent permission modes
+
+*Design record for [CHA-4235](https://linear.app/chainbytes/issue/CHA-4235).*
 
 Both Linear mods prepare unattended launch arguments for new workspaces and additional
 agent tabs in existing workspaces. The selected computer still discovers its own agent

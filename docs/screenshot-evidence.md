@@ -1,4 +1,6 @@
-# CHA-4202: Screenshot evidence for idea capture
+# Screenshot evidence for idea capture
+
+*Design record for [CHA-4202](https://linear.app/chainbytes/issue/CHA-4202).*
 
 Discovery proposal, 2026-11-05. This is the follow-up to CHA-4200, idea 3 ("Screenshot plus one sentence"). It covers design only. Implementation should be a separate ticket once this is approved.
 

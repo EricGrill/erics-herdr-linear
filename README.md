@@ -1,394 +1,175 @@
-# Eric's Herdr Linear
+<h1 align="center">Eric's Herdr Linear</h1>
 
-A spaces-first [Herdr](https://herdr.dev/) layout for working through Linear issues. Your
-spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **Idle**.
-**Projects**, **Crew**, and **Agents** open from the top when you need them.
+<p align="center">
+  <strong>A spaces-first <a href="https://herdr.dev/">Herdr</a> layout for working through Linear issues.</strong><br>
+  Your spaces fill the sidebar, grouped by <strong>Needs you</strong>, <strong>Done</strong>,
+  <strong>Working</strong> and <strong>Idle</strong>, so whatever is waiting on you is the first thing you see.
+</p>
 
-![Eric's Herdr Linear](preview.png)
+<p align="center">
+  <a href="https://github.com/EricGrill/erics-herdr-linear/actions/workflows/verify.yml"><img alt="Verify layout" src="https://github.com/EricGrill/erics-herdr-linear/actions/workflows/verify.yml/badge.svg"></a>
+  <a href="https://github.com/EricGrill/erics-herdr-linear/releases/latest"><img alt="Latest layout version" src="https://img.shields.io/github/v/release/EricGrill/erics-herdr-linear?label=layout&color=2f81f7"></a>
+  <a href="https://herdr.dev/layouts/"><img alt="Herdr layout" src="https://img.shields.io/badge/herdr-layout-111111"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-The layout ID is `erics-linear`; its window header reads **Erics Linear**.
-The expanded sidebar shows **Layout v<version>** beside Settings, using this repository's
-`package.json` version. CI raises it with every deploy (see
-[Automatic updates](#automatic-updates-on-merge-to-main)); `npm run check` verifies that
-the sidebar-footer version in `layouts/erics-linear.json` matches.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="preview-dark.png">
+    <img alt="Erics Linear: spaces grouped by Needs you, Done, Working and Idle, with the active issue above its terminal tabs" src="preview.png">
+  </picture>
+</p>
 
-## What it does
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#what-it-does">What it does</a> ·
+  <a href="#shortcuts">Shortcuts</a> ·
+  <a href="#how-a-change-reaches-your-machines">Updates</a> ·
+  <a href="docs/">Docs</a> ·
+  <a href="RECIPE.md">Recipe</a>
+</p>
 
-- Puts work needing attention before finished, working, and idle spaces.
-- Shows each space's Linear ticket and machine. Click a space to return to its terminal.
-- Gives each machine its own colored dot, the same after every restart, and says when a
-  remote machine is offline or reconnecting, on its rows and under Add machine.
-- Keeps the current group's header (Needs you, Done, Working, Idle) pinned while you scroll.
-- **By status / By project** switches the sidebar between state groups and one group per
-  Linear project (projects that need you first, spaces without a project last). Click any
-  group header to collapse it; the choice and collapsed groups are remembered.
-- **Clean up (N)** appears when spaces are finished: their ticket is Done or Canceled in
-  Linear, or their pull request merged. It lists each with what its checkout holds and
-  closes the picked ones at once, optionally removing clean worktree checkouts with
-  `git worktree remove` (never forced, so uncommitted edits block it; the branch is kept).
-- Auto-close: a space whose ticket has been Done or Canceled for 10 minutes closes by
-  itself, unless it is the space you are in, pinned, has an agent working or waiting, or
-  has uncommitted edits. Only the space closes; its ticket, folder and branch stay.
-- Shows the Needs you count beside Erics Linear in the window header, even with the
-  sidebar collapsed. It hides at zero.
-- Right-click a space for its menu: with a Linear ticket, Open in Linear app, Open in
-  browser and Copy link come first, then Rename, New/Open worktree, Close. Without a ticket,
-  Herdr's own space menu. Right-click a tab for Rename, New tab, Close. Closing a space does
-  not change its Linear ticket.
-- Pin, tag and color spaces with Linear labels, so they are the same on every machine.
-  Right-click a space or issue for **Pin to top**/**Unpin** and **Tags…**. Pinning adds the
-  workspace label `Pinned` (made on first use); pinned spaces show under PINNED above the
-  other groups and keep their own state line. **Tags…** lists the workspace's and the
-  issue's team's labels, leaving out routing labels (`agent:`, `repo:`, …) and label
-  groups; typing a new name offers **Create tag**. A row shows up to two tags as chips in
-  their Linear colors, and a stripe in its first tag's color. Recolor a tag in Linear.
-  Each change adds or removes one label and is read back from Linear before it shows.
-- Right-click an issue (Projects rows, the issue panel, the task dialog's list and issue
-  screen, Crew) for Open in Linear app, Open in browser, Copy link. The app link is the
-  web link under `linear://`; it needs the Linear desktop app on this computer.
-- Keeps the full project tree in a separate popup, with search and task creation.
-- Shows live Herdr agents in a scrollable popup, including remote agents and subagents.
-- Shows each Linear agent's full open issue queue in Crew, with attention reasons, issue
-  inspection and verified reassignment, without treating a delegated ticket as a running agent.
-- Creates a ticket before starting a task in its worktree, or attaches an existing space
-  to a ticket without moving its files or changing its branch.
-- Lets you choose the execution computer, then an existing Git repository under that
-  computer's `~/code`, instead of using a local-only folder picker.
-- Retains Herdr's terminal tabs, pane controls, Files and Changes.
-- The issue header reads status · priority · delegate or assignee · pull request and
-  checks · lines added/removed. The status bar shows the machine, commits ahead/behind,
-  uncommitted changes and how long the agent has been working, for local and remote
-  worktrees alike; the branch is in its hover text. Fields with no value are left out.
+---
 
-The grouping is a view of work, not a workflow automation. Finishing an agent run does
-not mark a Linear ticket Done. Commands typed directly into a terminal can still start
-unlinked work; the issue header identifies spaces that have no ticket.
+## Quickstart
 
-## Create a task or capture an idea
-
-Choose **New issue** from the issue list, a project, or the launcher. Write the request in
-one multiline field, then **Create issue**. The first nonempty request line supplies
-the ticket title; the full request is retained as its description. The current task's project
-and repository, or your previous compatible choices, are prefilled and editable.
-Status, priority and assignment are remembered from the previous successful task and
-remain available under **Ticket details**. Repository choices stay scoped to the
-Linear workspace, project and computer. Existing capture commands and shortcuts open
-the same form.
-
-New task saves a local draft as you type, scoped to the selected Linear workspace in
-that mod, using a stable persisted app key across dialog instances.
-Closing the dialog or restarting Herdr restores it, including the selected
-repository. **Discard draft** removes it explicitly. Storage failures and conflicting
-revisions are shown instead of silently replacing another window's draft. Drafts remain
-local to this app and are not synced between computers or the two mods. Existing idea
-drafts open in this form with their original source preserved.
-
-**Improve with AI** is optional. It sends the source idea, or the entered request, to OpenAI for editable suggestions. It uses the existing `gpt-6-luna`
-Responses integration with tools disabled and `store: false`; this does not disable all
-provider retention. It requires `OPENAI_API_KEY` in the Herdr process environment and
-uses the account's API billing. Keys are not placed in preferences or command arguments.
-No agent session or worktree is started for shaping. Without a key or on failure, the
-local draft and direct creation remain available. Shaped tickets preserve their source
-idea; its **Edit source idea** control also offers the existing local **Shape ticket**
-template.
-
-**Create issue** validates and saves the selected repository with the ticket. A task can
-also be created without a repository, then assigned one later. **Create & start** requires
-an installed agent. Without a chosen repository it first makes a new one (see below); its
-validated target and submitted text are carried through to that launch. A failed or unconfirmed create retains the draft
-and asks you to check recent issues before retrying, since a lost response can follow a
-successful write. Finishing a task creation or agent run does not mark an issue Done.
-
-## Choose where a task runs
-
-In New task, write the request in **What needs doing?**. The title uses the first
-line, shortened to 100 characters; the full text is saved as the description.
-**Ticket details** lets you change the remembered status, priority and assignee.
-Team and project remain editable. These choices are remembered per Linear workspace;
-a removed or completed status falls back to an available open status.
-
-Select **Computer**. A matching repository is selected automatically from that
-computer's own `~/code`, using the project name first, then the focused repository's
-name (including Herdr worktrees). This also works after switching computers, without
-choosing a local storage path. Use **Repository** to override the default. It never
-clones. **New repository** is the fallback when no name matches:
-when no repository is chosen, **Start agent** and **Create & start** make a new Git
-repository in that computer's `~/code`, named from the ticket title (a taken name gets
-`-2`, `-3`, …), with an empty initial commit so the worktree can branch from it. That
-repository is also marked trusted in the computer's Claude Code config (`~/.claude.json`), so
-Claude doesn't ask to trust it. Claude's trust stops at each Git repository, so trusting `~/code`
-alone isn't enough. Without `python3` or a Claude config, this step is skipped. Plain
-**Create issue** makes nothing. A ticket whose saved computer cannot be resolved stays
-blocked rather than falling back to a new repository.
-Linear's **Start agent**, **Create & start**, and additional agent tabs use each supported
-agent's unattended permission mode on the selected computer. This includes Cursor's
-`--force` and current Kimi Code's `--auto`, alongside Codex and Claude Code.
-Pi, PiG, and current Amp already execute tools without built-in approval prompts.
-See [agent permission modes](docs/CHA-4235-agent-permissions.md) for the complete mapping,
-version assumptions, and policy limits. Existing sessions retain their launch settings.
-
-Installed-agent choices are refreshed for that computer. Changing computers clears
-stale repository and agent choices, and unavailable computers cannot be used.
-New tasks remember the last project selected or visited in each Linear workspace.
-An explicit repository choice overrides the name default and saves that project's
-computer and repository for future tasks
-(or the workspace's choice when no project is selected),
-with separate repository choices for each computer. Agent selections are also remembered
-for each computer. These preferences persist in this
-Herdr app and are shared by both Linear layouts. A missing saved repository stays
-unselected; choose one, or Start makes a new one.
-The pinned worktree backend trims path output, so paths containing newlines or ending
-in whitespace are rejected before any ticket or worktree mutation.
-
-Both **Create issue** and **Create & start** validate the existing repository. Queued
-issues retain their selected execution target. Starting work may create the issue's
-worktree inside that existing repository; the base repository must already exist.
-An owned JSON block in the issue description records the computer's stable Herdr
-identity and repository path, so another client can resolve the same physical target.
-It contains placement metadata, not credentials.
-
-Choosing **This computer** explicitly targets the local machine even while a remote
-space is focused. A saved target that cannot be resolved must be chosen explicitly;
-the launcher must not silently substitute a different computer.
-Launch actions, including keyboard shortcuts, are gated until the issue's saved
-placement is ready. Create & start retains its validated request target while the
-new issue's details load.
-
-## Install
-
-Install and open Herdr once first. This layout has been exercised with **Herdr 0.1.13** on
-macOS and Linux. It uses Python 3.8+ for installation, Git for updates, and Node.js for the
-optional test suite. The Linear adapter uses `curl`, `tar`, and a SHA-256 utility to obtain
-its platform-specific backend if it is not already installed.
+Install and open [Herdr](https://herdr.dev/) once first. Then:
 
 ```sh
 git clone https://github.com/EricGrill/erics-herdr-linear.git
 cd erics-herdr-linear
-python3 scripts/install.py
+python3 scripts/install.py --select
 ```
 
-Use `--dry-run` to inspect the plan, `--update` to replace a previous installation with a
-backup, or `--select` to select the layout and verify that Herdr confirms it. `--home PATH`
-targets another Herdr configuration folder. `--config PATH` explicitly replaces the
-machine-local non-secret preferences file before source updates; omitting it preserves
-that file. Shortcut conflicts are reported rather than silently overwritten.
+`--select` switches Herdr to the layout and verifies that Herdr confirms it. You can also
+pick **erics-linear** in **Herdr Settings → Look**.
 
-Select **erics-linear** in **Herdr Settings → Look**, or run this in a shell where Herdr's
-CLI is available:
+Review the [recipe](RECIPE.md) and the source before installing. These are trusted native
+mods: they run commands through Herdr, read machine-local configuration and Linear
+sign-in state, make Linear API requests, and can create worktrees or launch agents when
+you use those actions. They do not include your account credentials or another person's
+screen state.
 
-```sh
-herdr-app do layout.switch --name erics-linear
-```
+> **Requirements** — Herdr **0.1.13** (exercised on macOS and Linux), Python 3.8+ to
+> install, Git to update, Node.js for the optional test suite.
 
-Review the [recipe](RECIPE.md) and source before installing. These are trusted native mods:
-they run commands through Herdr, read machine-local configuration and Linear sign-in
-state, make Linear API requests, and can create worktrees or launch agents when you use
-those actions. They do not include your account credentials or another person's screen
-state.
+More: [install flags and what gets backed up](docs/install.md) ·
+[Linear API key and other settings](docs/configuration.md)
 
-The installer copies the custom layout and its five mods. It merges only this layout's
-shortcut section; it does not replace your global keyboard settings, terminal sessions,
-window geometry, or account state. Existing files are backed up before an update. A
-local `.erics-linear-install.json` receipt records the source checkout, Git commit,
-installed-file hashes, and check/selection results. If Herdr's CLI is unavailable, the
-installer reports that native checks did not run; it cannot claim selection. Keep
-your machine-local configuration outside this Git checkout.
+## What it does
 
-## Linear setup
+| | |
+| --- | --- |
+| **Waiting work comes first** | Spaces group into Needs you, Done, Working and Idle. The current group's header stays pinned while you scroll, and the Needs you count sits beside the window title even with the sidebar collapsed. |
+| **By status / By project** | Switch the sidebar between state groups and one group per Linear project. Click any group header to collapse it; the choice and collapsed groups are remembered. |
+| **Every space carries its ticket** | Each row shows its Linear issue and machine. Each machine keeps the same colored dot after every restart, and remote machines say when they are offline or reconnecting. |
+| **Pins, tags and colors live in Linear** | **Pin to top** and **Tags…** write workspace labels, so a space looks the same on every machine. Rows show up to two tags as chips in their Linear colors, with a stripe in the first tag's color. |
+| **Clean up (N)** | Appears when spaces are finished — ticket Done or Canceled, or pull request merged. It lists each with what its checkout holds and closes the picked ones at once, optionally removing clean worktrees with `git worktree remove` (never forced; the branch is kept). |
+| **Auto-close** | A space whose ticket has been Done or Canceled for 10 minutes closes itself — unless it is the space you are in, pinned, has an agent working or waiting, or has uncommitted edits. Only the space closes; its ticket, folder and branch stay. |
+| **Projects, Crew and Agents** | Three popups from the top: the full project tree with search and task creation; every Linear agent's open issue queue with attention reasons and verified reassignment; and live Herdr agents, including remote agents and subagents. |
+| **Create or attach a ticket** | Create a ticket before starting a task in its worktree, or attach an existing space to a ticket without moving its files or changing its branch. |
+| **Pick the execution computer** | Choose the machine, then an existing Git repository under that computer's `~/code`, instead of a local-only folder picker. |
+| **Still a Herdr terminal** | Terminal tabs, pane controls, Files and Changes are all retained. The issue header reads status · priority · delegate or assignee · pull request and checks · lines changed; the status bar shows the machine, commits ahead/behind, uncommitted changes, and how long the agent has been working. |
 
-Task dialogs and the sidebar use the configured Linear API key when available, including
-the Doppler fallback below. This lets projects, ticket creation, and Crew share access
-without a separate browser sign-in. Credential values remain inside the shell that sends
-the request; they are never stored in layout preferences.
+The grouping is a view of work, not workflow automation. **Finishing an agent run does not
+mark a Linear ticket Done.** Commands typed directly into a terminal can still start
+unlinked work; the issue header identifies spaces that have no ticket.
 
-When no API key is available, task dialogs can use the existing `herdr-linear` OAuth
-sign-in. Worktree operations use backend version **0.14.2**, with downloaded release
-archives checked against upstream checksums.
-
-The optional configuration file is:
-
-```text
-~/.config/herdr-app/erics-linear.config.json
-```
-
-For an environment variable with a different name:
-
-```json
-{
-  "enrichment": {
-    "envKey": "MY_LINEAR_API_KEY"
-  }
-}
-```
-
-For optional Doppler fallback:
-
-```json
-{
-  "enrichment": {
-    "enabled": true,
-    "envKey": "LINEAR_API_KEY",
-    "doppler": {
-      "project": "your-project",
-      "config": "dev",
-      "keyNames": ["LINEAR_API_KEY"]
-    }
-  }
-}
-```
-
-The environment variable is checked first. This file contains **key names**, never key
-values. Authenticate your secret manager separately on each machine. Do not commit API
-keys, OAuth tokens, or Herdr's `shared.json`, `view.json`, caches, and `data/` directory.
-
-To use Spaces and the basic Linear adapter without enrichment, set
-`"enrichment": { "enabled": false }`. Configuration is reread on Refresh and periodically;
-a malformed file reports an error and retains the last good configuration/display.
-
-## Attention rules
-
-Spaces enter Needs you when Herdr reports an agent needing input or their linked ticket
-has a configured attention state or label. Generic defaults include Needs Human, In
-Review, Blocked, Awaiting Review, and Ready for Review; labels include `needs-human`,
-`agent:review-needed`, `agent:check-result`, `agent:stalled`, and `reopened:not-done`.
-
-You can replace either list in the same machine-local configuration:
-
-```json
-{
-  "attention": {
-    "labels": ["needs-human", "needs-my-review"],
-    "states": ["needs human", "ready for review", "blocked"]
-  }
-}
-```
-
-These arrays replace their defaults. An empty array disables that category. Done rows
-distinguish **Agent finished** from **Done in Linear**, so the two sources remain clear.
-
-## Cleanup rules
-
-Auto-close is on by default. Turn it off, or change the grace period, in the same
-machine-local configuration:
-
-```json
-{
-  "cleanup": { "autoClose": false, "graceMinutes": 10 }
-}
-```
-
-A merged pull request alone never auto-closes a space; it only puts the space in Clean up.
-Pin a space to keep it open after its ticket is done.
+Full behaviour: [What the layout does](docs/features.md) ·
+[Create a task and choose where it runs](docs/tasks.md)
 
 ## Shortcuts
 
-All bindings are scoped to `erics-linear`.
+All bindings are scoped to `erics-linear`. Escape closes a dialog or popup, and the top
+buttons also open Projects, Crew and Agents.
 
 | Action | macOS | Linux |
 | --- | --- | --- |
-| Live Agents popup | Cmd+Option+A | Alt+Shift+A |
-| Crew delegates | Cmd+Shift+C | Alt+Shift+C |
-| Issue panel | Cmd+Shift+I | Alt+Shift+I |
-| Issue delegate panel | Cmd+Shift+A | Alt+Shift+D |
-| Files | Cmd+Shift+F | Alt+Shift+F |
-| Toggle side panel | Cmd+Shift+E | Alt+Shift+E |
-| Clear delegate filter | Cmd+Shift+X | Alt+Shift+X |
+| Live Agents popup | <kbd>Cmd</kbd>+<kbd>Option</kbd>+<kbd>A</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd> |
+| Crew delegates | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> |
+| Issue panel | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> |
+| Issue delegate panel | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> |
+| Files | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> |
+| Toggle side panel | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> |
+| Clear delegate filter | <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> |
 
-The top buttons also open Projects, Crew, and Agents. Escape closes a dialog or popup.
-The desktop/window manager may reserve a shortcut; adjust this layout's section in
-`keys.json` if your environment uses one of these combinations.
+Your desktop or window manager may reserve one of these; adjust this layout's section in
+`keys.json` if so.
 
-## Keep several machines in sync
+## How a change reaches your machines
 
-Treat this repository as the source of truth. Make changes in the checkout, test them,
-commit, and push. Installing copies files into Herdr; editing the installed copy does not
-automatically edit or push the repository.
+This repository is the source of truth. Installed copies under `~/.config/herdr-app` are
+deployment outputs — editing them does not edit or push the repository.
 
-On each machine, clone this repo once and install it. To receive a published update from
-that checkout:
-
-```sh
-bash scripts/update.sh
+```mermaid
+flowchart LR
+  A["Pull request"] --> B["main"]
+  B -->|"CI: npm test · test:installer · check"| C["Patch bump<br>tag + GitHub Release"]
+  C --> D["verified"]
+  D --> E["omarchy2"]
+  D --> F["snoke"]
+  D --> G["ventress"]
 ```
 
-The updater uses a fast-forward Git pull and then installs the checked-out version. A
-dirty or divergent checkout needs to be resolved rather than discarded.
+Every push to `main` that passes CI gets the next patch version (0.1.1 → 0.1.2) in
+`package.json` and the sidebar footer together, released as a tag and a
+[GitHub Release](https://github.com/EricGrill/erics-herdr-linear/releases), with the
+`verified` branch fast-forwarded to that commit. Each machine's updater polls `verified`
+every five minutes, installs exactly that commit, and reports back as a
+`deploy/<machine>` commit status, so GitHub shows which machines are actually running the
+release. Nothing is overwritten: a checkout with local changes, off `main`, or ahead of
+`verified` is skipped and reported.
 
-### Automatic updates on merge to main
-
-When a push to `main` passes CI (`npm test`, `npm run test:installer`, `npm run check`),
-CI raises the patch version (0.1.1 → 0.1.2) in `package.json` and the sidebar footer
-together, commits that to `main` as `chore: release v<version>`, fast-forwards the
-`verified` branch to the release commit and marks each machine as a pending
-`deploy/<machine>` commit status. Turn on the updater once per machine, from its checkout:
+Turn the updater on once per machine, or pull a published update by hand:
 
 ```sh
 python3 scripts/auto_update.py install --machine snoke   # omarchy2, snoke, ventress
+bash scripts/update.sh                                   # or just pull and install now
 ```
 
-This adds a launchd agent on macOS or a systemd user timer on Linux. Every five minutes
-(and after login or wake) it fetches `verified` and, when that moved, runs
-`scripts/update.sh --to <commit>`: a fast-forward to exactly the verified commit, then
-`install.py --update`, with `--select` only if the Herdr window is open. It then sets the
-commit's `deploy/<machine>` status to the installed sidebar version and commit, using
-the machine's existing `gh` sign-in, and shows a desktop notification.
-
-Nothing is overwritten. A checkout with local changes, not on `main`, or with commits
-that are not on `verified` is skipped and reported as a failed status and a notification,
-once per commit. A failed install is reported once and retried after 15 minutes, 1 hour,
-4 hours, then daily, without `--select` if it failed while selecting; a new `verified`
-commit is tried at once, and `python3 scripts/auto_update.py run --now` retries
-immediately. A sleeping or offline machine stays pending on GitHub and catches up on
-its next run; if it cannot reach GitHub for a day it says so. Check a machine with
-`python3 scripts/auto_update.py status`; turn it off with `... uninstall`. The log is in
-`~/.local/state/erics-herdr-linear/auto-update.log`. The machine list for pending
-statuses is `MACHINES` in `.github/workflows/verify.yml`.
-
-Every deploy gets the next patch version automatically, so don't bump it in a PR. For a
-minor or major release, set `version` in `package.json` and the `sidebar-footer` version
-in `layouts/erics-linear.json` together in the PR (`npm run check` enforces it); CI then
-releases that version as it is. `python3 scripts/bump_version.py` does the patch bump by hand.
-
-From a machine with SSH access to your other computers, explicitly sync named targets:
-
-```sh
-bash scripts/sync.sh linux-desktop mac-mini
-```
-
-Add `--select` before the host names to select and verify the layout remotely. Sync uses
-`~/code/erics-herdr-linear` on each target, verifies an existing checkout's origin, and
-refuses dirty or detached checkouts. SSH and Git authentication are handled by your own
-configuration. No credentials are copied.
-
-Each machine keeps its own credentials, settings, window/terminal state, and
-`erics-linear.config.json`. Updating the code does not share the workspaces themselves;
-Herdr's machine connections determine which remote spaces are visible.
+Don't bump the version in a PR — every deploy takes the next patch automatically. Details,
+including minor/major releases and SSH sync to named hosts:
+[Keeping machines in sync](docs/multi-machine.md).
 
 ## Verify a change
 
 ```sh
-node --experimental-default-type=module --experimental-vm-modules --test mods/linear-board/*.test.mjs mods/linear-workspace/*.test.mjs
-herdr-app check mods/linear-board
-herdr-app check mods/linear-workspace
-herdr-app check mods/linear-workspace-tabs
-herdr-app check mods/erics-linear-agents
-herdr-app check mods/erics-linear-chrome
-python3 -m unittest discover -s tests -v
+npm test                 # mod unit tests
+npm run test:installer   # installer tests
+npm run check            # release structure, layout IDs, imports, SVGs, version match
+```
+
+Then run a native check on each touched mod and look at the live window:
+
+```sh
+for mod in linear-board linear-workspace linear-workspace-tabs erics-linear-agents erics-linear-chrome; do
+  herdr-app check "mods/$mod"
+done
 ```
 
 A native check validates an initial render, not every later state. Also inspect the live
-Spaces view, Projects popup, Agents popup, and create/attach flows. Use demonstration data
-for public screenshots. Test fixtures do not create live tickets or launch agents.
+Spaces view, Projects popup, Agents popup, and the create/attach flows. Tests never call
+real Linear, read credentials, create live tickets, or start agents, and public
+screenshots use demonstration data. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Documentation
+
+| | |
+| --- | --- |
+| [`docs/`](docs/) | Guides for features, install, tasks, configuration, multi-machine sync and agent permissions — plus the design records behind them. |
+| [`RECIPE.md`](RECIPE.md) | The gallery recipe: what the window looks like, how it behaves, what it is built from. |
+| [`AGENTS.md`](AGENTS.md) | Working rules for agents making changes in this repository. |
 
 ## Gallery and licensing
 
 This repository is structured for [Herdr's layout gallery](https://herdr.dev/layouts/#share):
-the root contains `RECIPE.md`, `preview.png`, `layouts/`, and `mods/`. A public repository
+the root contains `RECIPE.md`, `preview.png`, `layouts/` and `mods/`. A public repository
 with the `herdr-layout` topic is discovered automatically. Herdr's stated discovery window
 is within an hour; a published GitHub repository alone is not proof of a gallery listing.
 Community preview images are screened, while layout code is not reviewed by Herdr.
 
 Original contributions are available under the [MIT license](LICENSE). Copied and adapted
-upstream portions retain their respective Apache-2.0, MIT, and ISC terms. See
+upstream portions retain their respective Apache-2.0, MIT and ISC terms. See
 [third-party notices](THIRD_PARTY_NOTICES.md) and the full texts in [`licenses/`](licenses/).
-This is an independent community layout, not an official Herdr or Linear product.
+
+> This is an independent community layout, not an official Herdr or Linear product.

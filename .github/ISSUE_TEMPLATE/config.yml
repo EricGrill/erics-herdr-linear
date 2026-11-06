@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Herdr itself
+    url: https://herdr.dev/
+    about: Bugs in the Herdr app, its native API or the layout gallery belong upstream, not here.
+  - name: Security report
+    url: https://github.com/EricGrill/erics-herdr-linear/security/advisories/new
+    about: Report anything that could expose credentials, reach a machine or execute code privately.

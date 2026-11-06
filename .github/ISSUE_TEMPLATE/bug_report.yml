@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in the layout behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please leave out API keys, tokens and real ticket contents. Redacted is fine.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the Projects popup
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: layout-version
+    attributes:
+      label: Layout version
+      description: The **Layout v…** shown beside Settings in the expanded sidebar.
+      placeholder: "0.1.13"
+    validations:
+      required: true
+  - type: input
+    id: herdr-version
+    attributes:
+      label: Herdr version
+      placeholder: "0.1.12"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [macOS, Linux, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happens
+      options:
+        - Sidebar and grouping
+        - New task / idea capture
+        - Projects popup
+        - Crew / delegates
+        - Agents popup
+        - Issue panel or status bar
+        - Install, update or sync
+        - Somewhere else
+    validations:
+      required: true
+  - type: checkboxes
+    id: remote
+    attributes:
+      label: Machines
+      options:
+        - label: This involves a remote machine or worktree
+        - label: This involves a running agent

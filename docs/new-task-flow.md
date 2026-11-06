@@ -1,4 +1,6 @@
-# CHA-4219: One New task flow
+# One New task flow
+
+*Design record for [CHA-4219](https://linear.app/chainbytes/issue/CHA-4219).*
 
 Replace the separate New task and Capture idea controls with New task. Open directly
 on one multiline request, deriving a short title while retaining the full text.

@@ -1,4 +1,6 @@
-# CHA-4248: Keep remote worktree preparation alive
+# Keep remote worktree preparation alive
+
+*Design record for [CHA-4248](https://linear.app/chainbytes/issue/CHA-4248).*
 
 Snoke could validate Ventress, read its core identity and repository, and discover
 its installed agents. Starting the worktree still failed with `it didn't start`.
