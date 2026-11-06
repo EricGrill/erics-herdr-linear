@@ -175,7 +175,16 @@ async function harness(options = {}) {
     "./look.js": Object.fromEntries(["tones", "tint", "countPill", "stateIcon", "projectIcon", "PRIORITIES", "priorityIcon", "hue", "icon", "chip", "words", "key", "MONO"].map(name => [name, dummy])),
   };
   const module = new vm.SourceTextModule(source, { context, identifier: new URL("./client.js", import.meta.url).href });
+  let hostModule;
   const link = async specifier => {
+    if (specifier === "./host.js") {
+      // One instance, as in Herdr, so main.js and client.js share its frame.
+      if (!hostModule) {
+        hostModule = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
+        await hostModule.link(link);
+      }
+      return hostModule;
+    }
     if (["./capture.js", "./api.js", "./auth.js", "./config.js", "./filters.js", "./board.js", "./machines.js", "./sticky.js", "./git.js", "./tags.js", "./cleanup.js", "./groups.js"].includes(specifier)) {
       const real = new vm.SourceTextModule(await readFile(new URL(specifier, import.meta.url), "utf8"), { context });
       await real.link(link);
