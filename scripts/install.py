@@ -25,6 +25,8 @@ MAC_KEYS = {
     "cmd-shift-c": "linear-board.crew", "cmd-shift-i": "linear-board.issue",
     "cmd-shift-a": "linear-board.agent", "cmd-shift-f": "linear-board.files",
     "cmd-shift-e": "linear-board.panel", "cmd-shift-x": "linear-board.clear",
+    # The sidebar's top buttons are gone (CHA-4365); Projects needs its own binding.
+    "cmd-shift-p": "linear-board.projects",
     "cmd-alt-a": "mod.open:erics-linear-agents",
     "cmd-w": "linear-workspace-tabs.close",
 }
@@ -32,6 +34,7 @@ LINUX_KEYS = {
     "alt-shift-c": "linear-board.crew", "alt-shift-i": "linear-board.issue",
     "alt-shift-d": "linear-board.agent", "alt-shift-f": "linear-board.files",
     "alt-shift-e": "linear-board.panel", "alt-shift-x": "linear-board.clear",
+    "alt-shift-p": "linear-board.projects",
     "alt-shift-a": "mod.open:erics-linear-agents",
 }
 # Herdr 0.1.13 added Find in terminal. It only reaches keys.json files nobody has

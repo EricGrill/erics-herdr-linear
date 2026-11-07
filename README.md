@@ -1,8 +1,9 @@
 # Eric's Herdr Linear
 
 A spaces-first [Herdr](https://herdr.dev/) layout for working through Linear issues. Your
-spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **Idle**.
-**Projects**, **Crew**, and **Agents** open from the top when you need them.
+spaces fill the sidebar, grouped by **Needs you**, **Done**, **Working**, and **Idle** —
+or by project, agent, or company, from the **Group** dropdown.
+**Projects**, **Crew**, and **Agents** open from their shortcuts when you need them.
 
 ![Eric's Herdr Linear](preview.png)
 
@@ -19,9 +20,11 @@ the sidebar-footer version in `layouts/erics-linear.json` matches.
 - Gives each machine its own colored dot, the same after every restart, and says when a
   remote machine is offline or reconnecting, on its rows and under Add machine.
 - Keeps the current group's header (Needs you, Done, Working, Idle) pinned while you scroll.
-- **By status / By project** switches the sidebar between state groups and one group per
-  Linear project (projects that need you first, spaces without a project last). Click any
-  group header to collapse it; the choice and collapsed groups are remembered.
+- **Group** is a dropdown with four choices. **Status** is the default (Needs you, Done,
+  Working, Idle). **Project**, **Agent** (the ticket's delegate) and **Company** (its Linear
+  team) each give one group per value, with the groups that need you first and the spaces
+  with no value last; every row keeps its own status line. Click any group header to
+  collapse it; the choice, and each group's collapsed state, are remembered.
 - **Clean up (N)** appears when spaces are finished: their ticket is Done or Canceled in
   Linear, or their pull request merged. It lists each with what its checkout holds and
   closes the picked ones at once, optionally removing clean worktree checkouts with
@@ -287,6 +290,7 @@ All bindings are scoped to `erics-linear`.
 | Action | macOS | Linux |
 | --- | --- | --- |
 | Live Agents popup | Cmd+Option+A | Alt+Shift+A |
+| Projects popup | Cmd+Shift+P | Alt+Shift+P |
 | Crew delegates | Cmd+Shift+C | Alt+Shift+C |
 | Issue panel | Cmd+Shift+I | Alt+Shift+I |
 | Issue delegate panel | Cmd+Shift+A | Alt+Shift+D |
@@ -294,7 +298,7 @@ All bindings are scoped to `erics-linear`.
 | Toggle side panel | Cmd+Shift+E | Alt+Shift+E |
 | Clear delegate filter | Cmd+Shift+X | Alt+Shift+X |
 
-The top buttons also open Projects, Crew, and Agents. Escape closes a dialog or popup.
+Escape closes a dialog or popup.
 The desktop/window manager may reserve a shortcut; adjust this layout's section in
 `keys.json` if your environment uses one of these combinations.
 

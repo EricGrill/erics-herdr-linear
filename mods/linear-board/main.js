@@ -18,7 +18,7 @@ import { machineColor, machineLabel, machineState, stateWord } from "./machines.
 import { stackLayout, clampScroll, pinnedHeader, thumb } from "./sticky.js";
 import { readGitState, readPr, headerParts, aheadBehind, uncommitted, workingSince, runningFor, branchHover } from "./git.js";
 import { finishedReason, ticketFinished, cleanupCandidates, keepOpenReason, autoCloseDue, gitSummary, removable, REMOVE_WORKTREE } from "./cleanup.js";
-import { sidebarGroups, toggleCollapsed } from "./groups.js";
+import { sidebarGroups, toggleCollapsed, GROUP_MODES, GROUP_LABELS, normalizeGroupMode } from "./groups.js";
 import { isPinned, rowTags, rowColor, tagMenuItems, fetchIssueTags, fetchCatalog, pickable, canCreate, tagName,
   setTag, setPinned, createTag, labelState, withLabels, fetchIssueLabels } from "./tags.js";
 import { FILTER_FIELDS, normalizeFilters, toggleFilter, filterCount, matchesFilters, filterOptions } from "./filters.js";
@@ -178,7 +178,7 @@ export default class LinearWorkspace extends LinearClient {
       // tick closes spaces whose ticket has been finished for the grace period.
       cx.timer.every(AGE_TICK_MS, cx => { cx.notify(); this.autoClose(cx); });
       try {
-        this.groupMode = localStorage.getItem("groupMode") === "project" ? "project" : "status";
+        this.groupMode = normalizeGroupMode(localStorage.getItem("groupMode"));
         this.collapsed = JSON.parse(localStorage.getItem("collapsedGroups") ?? "{}") ?? {};
       } catch { this.groupMode = "status"; this.collapsed = {}; }
       this.startEnrich(cx);
@@ -718,7 +718,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(div().text_size(11).font_semibold().text_color(color).child(label))
       .child(div().text_size(11).text_color(color).child(String(n)));
   }
-  workRow(record, id, lane = record.status) {
+  workRow(record, id, lane = record.status, { project = true } = {}) {
     const t = theme(), is = record.issue;
     const color = lane === "blocked" ? t.blocked : lane === "done" ? t.done : lane === "working" ? t.working : t.dim;
     const label = lane === "blocked" ? (record.status === "blocked" ? "Needs input" : "Needs your attention")
@@ -728,7 +728,9 @@ export default class LinearWorkspace extends LinearClient {
     const age = elapsed(since.at, now);
     const when = !age ? "" : lane === "done" ? ` ${age === "<1m" ? "just now" : `${age} ago`}` : ` ${age}`;
     const mismatch = is ? linearMismatch(lane, is, this.attentionRules()) : "";
-    const status = [`${label}${when}`, is?.project?.name?.trim(), mismatch || (!is ? "no ticket" : "")].filter(Boolean).join(" · ");
+    // Grouped by project the row's project name only repeats its own group header (CHA-4365).
+    const status = [`${label}${when}`, project ? is?.project?.name?.trim() : "",
+      mismatch || (!is ? "no ticket" : "")].filter(Boolean).join(" · ");
     const source = since.source === "herdr" ? `In this state since ${new Date(since.at).toLocaleString()} (Herdr)`
       : since.source === "linear" ? `Herdr has no state change for this space yet; age is from the ticket's last Linear update, ${new Date(since.at).toLocaleString()}`
       : "No state-change time yet";
@@ -1028,10 +1030,23 @@ export default class LinearWorkspace extends LinearClient {
   // ---- Grouping, Clean up and auto-close --------------------------------------------------
 
   setGroupMode(mode, cx) {
-    this.groupMode = mode === "project" ? "project" : "status";
+    this.groupMode = normalizeGroupMode(mode);
+    this.groupMenu = false;
     this.homeScroll = 0;
     try { localStorage.setItem("groupMode", this.groupMode); } catch { /* kept for this session only */ }
     cx.notify();
+  }
+  /** The group-by dropdown. Four modes, the current one marked; the same in-place Popup
+   *  the computer picker uses, so nothing new has to carry the choice between views. */
+  groupPicker(mode) {
+    const trigger = this.button("group-mode", `Group: ${GROUP_LABELS[mode]} ▾`,
+      cx => { this.groupMenu = !this.groupMenu; cx.notify(); })
+      .tooltip(`Grouped by ${GROUP_LABELS[mode].toLowerCase()}. Click to group by something else.`);
+    return Popup.new("group-mode-picker", trigger).anchor("bottom_left")
+      .when(Boolean(this.groupMenu), el => el.content(
+        v_flex().id("group-mode-list").p(6).gap(3).bg(theme().popover).children(GROUP_MODES.map(choice =>
+          this.button(`group-mode-${choice}`, GROUP_LABELS[choice], cx => this.setGroupMode(choice, cx),
+            { primary: choice === mode })))));
   }
   toggleGroup(key, cx) {
     this.collapsed = toggleCollapsed(this.collapsed, key);
@@ -1204,10 +1219,12 @@ export default class LinearWorkspace extends LinearClient {
     const summary = FILTER_FIELDS.filter(key => filters[key].length).map(key =>
       `${key[0].toUpperCase()}${key.slice(1)}: ${choices[key].filter(option => filters[key].includes(option.value)).map(option => option.label).join(", ")}`).join(" · ");
     // Pinned spaces (the Linear "Pinned" label) come first; each keeps its own state line.
-    // The rest group by state, or by Linear project; any group collapses to its header.
+    // The rest group by whatever the Group dropdown says -- state, Linear project, delegate
+    // or Linear team; any group collapses to its header.
     const tones = { accent: t.accent ?? t.foreground, blocked: t.blocked, done: t.done, working: t.working, dim: t.dim };
-    const mode = this.groupMode ?? "status";
-    const shown = sidebarGroups(records, mode, this.collapsed ?? {}).map(group => ({ ...group, color: tones[group.tone] ?? t.dim }));
+    const mode = normalizeGroupMode(this.groupMode);
+    const shown = sidebarGroups(records, mode, this.collapsed ?? {}, shared(TEAMS) ?? [])
+      .map(group => ({ ...group, color: tones[group.tone] ?? t.dim }));
     setAgentOrder(shown.flatMap(group => group.records).flatMap(record => record.agents.map(a => a.address)));
     this.publishNeeds();
     const finished = this.finishedSpaces().length;
@@ -1219,24 +1236,19 @@ export default class LinearWorkspace extends LinearClient {
     this.homeScroll = clampScroll(this.homeScroll, content, viewport);
     const pin = pinnedHeader(stack, this.homeScroll), bar = thumb(this.homeScroll, content, viewport);
     return v_flex().id("spaces-home").size_full().min_w(0).min_h(0).px(10).gap(7).bg(t.chrome)
-      .child(h_flex().h(32).flex_none().items_center().gap(5)
-        .child(this.button("open-projects", "Projects", () => this.openProjects()))
-        .child(this.button("crew", "Crew", () => this.openCrew()))
-        .child(this.button("live-agents", "Agents", () => run("mod.open", { name: "erics-linear-agents" })).tooltip("Show agents · ⌘⌥A"))
-        .child(div().flex_1())
-        .child(this.button("refresh", this.refreshing
-          ? h_flex().gap(5).child(div().frames(["◐", "◓", "◑", "◒"], 120)).child("Refreshing…")
-          : "↻", cx => this.refresh(cx), { enabled: !this.refreshing }).tooltip(this.refreshing ? "Refreshing Linear tickets" : "Refresh Linear tickets")))
       .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
         .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
       .child(h_flex().flex_none().items_center().flex_wrap().gap(7)
         .child(this.button("new-task", "+ New issue", () => dialog({ action: "new" }), { primary: true }))
         .child(this.button("home-filter-button", count ? `Filters (${count})` : "Filters", () => this.openFilters()))
-        .child(this.button("group-mode", mode === "project" ? "By project" : "By status", cx => this.setGroupMode(mode === "project" ? "status" : "project", cx))
-          .tooltip(mode === "project" ? "Grouped by Linear project. Click to group by status." : "Grouped by status. Click to group by Linear project."))
+        .child(this.groupPicker(mode))
         .when(finished > 0 && !this.cleanupOpen, el => el.child(this.button("open-cleanup", `Clean up (${finished})`, cx => this.openCleanup(cx))
           .tooltip("Close spaces whose ticket is Done or Canceled, or whose pull request merged")))
         .child(div().flex_1())
+        .child(this.button("refresh", this.refreshing
+          ? h_flex().gap(5).child(div().frames(["◐", "◓", "◑", "◒"], 120)).child("Refreshing…")
+          : "↻", cx => this.refresh(cx), { enabled: !this.refreshing })
+          .tooltip(this.refreshing ? "Refreshing Linear tickets" : "Refresh Linear tickets"))
         .child(div().text_size(11).text_color(t.muted).child(`${records.length} spaces`)))
       .when(count > 0, el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).tooltip(summary).child(summary))
@@ -1263,7 +1275,8 @@ export default class LinearWorkspace extends LinearClient {
           })
           .children(shown.flatMap(group => [
             this.groupHeader(group, group.color, `group-${group.key}`),
-            ...(group.collapsed ? [] : group.records.map(record => this.workRow(record, `home-${record.space.id}`, record.lane))),
+            ...(group.collapsed ? [] : group.records.map(record =>
+              this.workRow(record, `home-${record.space.id}`, record.lane, { project: mode !== "project" }))),
           ]))
           .when(linear.issues.length > 0, el => el
             .child(this.section("LINEAR TICKETS", linear.issues.length))
