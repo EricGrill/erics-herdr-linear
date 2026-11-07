@@ -692,6 +692,13 @@ export default class Linear extends View {
 
   repositoriesLoaded(cx) { this.inferLaunchRepository(cx); }
 
+  // Where Start runs, said on the button itself so a remote is never a silent default.
+  startSuffix() {
+    const t = this.launchTarget;
+    if (this.demo || !t || t.blocked) return "";
+    return ` on ${t.machine ?? "this computer"}`;
+  }
+
   blockLaunchTarget(message, cx, computerName = null) {
     const generation = this.targetGeneration = (this.targetGeneration ?? 0) + 1;
     this.agentGeneration = (this.agentGeneration ?? 0) + 1;
@@ -1987,10 +1994,10 @@ export default class Linear extends View {
           .child(div().flex_1().min_w(0).text_color(o.fg).child((d.startWhy ?? "").replace(/ \(w opens.*\)$/, ": w opens its worktree without starting it")))))
         .when(Boolean(canStart), (el) => el.child(h_flex().flex_none().gap(10).items_center().px(12).py(8).rounded(8).bg(tint(o.accent, 0.1))
           .child(icon("play", o.accent, 15))
-          .child(div().flex_1().min_w(0).text_color(o.fg).child(`Start: ${is.assignee ? "" : "yours, "}In Progress, and an agent in its worktree working on it`))
+          .child(div().flex_1().min_w(0).text_color(o.fg).child(`Start: ${is.assignee ? "" : "yours, "}In Progress, and an agent in its worktree working on it${this.startSuffix()}`))
           .child(h_flex().id("start-btn").flex_none().h(26).px(10).items_center().rounded(6).bg(o.accent).cursor_pointer().hover((s) => s.opacity(0.85))
             .on_click((_e, cx) => this.worktree(cx, true))
-            .child(div().text_size(12).font_semibold().text_color(o.surface).child("Start"))))))
+            .child(div().text_size(12).font_semibold().text_color(o.surface).child(`Start${this.startSuffix()}`))))))
       .when(ag.length > 0, (el) => el.child(
         v_flex().flex_none().gap(1)
           .child(div().px(2).pb(2).text_size(10.5).font_semibold().text_color(o.dim).child(`AGENTS ${ag.length}`))
