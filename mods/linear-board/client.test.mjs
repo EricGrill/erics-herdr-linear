@@ -260,6 +260,17 @@ async function harness(options = {}) {
   return { client, cx, flush, openCapture, storage, requests, commands, hcCalls, branchPreparations, agentChecks, links, modes, validations, routingChecks, creations, sharedStore, openIssue: module.namespace.default.prototype.openIssue, main: mainModule.namespace.default.prototype };
 }
 
+test("CHA-4289: Start names the selected computer, never a hidden remote", async () => {
+  const h = await harness();
+  h.client.launchTarget = { machine: "snoke", folder: "/repo" };
+  assert.equal(h.client.startSuffix(), " on snoke");
+  h.client.launchTarget = { machine: null, folder: "/repo" };
+  assert.equal(h.client.startSuffix(), " on this computer");
+  // A saved computer that failed to resolve is blocked: no target is claimed.
+  h.client.launchTarget = { machine: "snoke", folder: "", blocked: true };
+  assert.equal(h.client.startSuffix(), "");
+});
+
 test("blank Create & start does not make a subsequent ordinary Create start work", async () => {
   const h = await harness({ request: "   " });
   h.client.submit(h.cx, true);

@@ -1430,7 +1430,7 @@ export default class LinearWorkspace extends LinearClient {
   }
 
   createStartButton() {
-    return this.button("create-start", "Create & start", cx => this.submit(cx, true), {
+    return this.button("create-start", `Create & start${this.startSuffix()}`, cx => this.submit(cx, true), {
       primary: true, enabled: !this.busy && !this.form?.saveError && !this.form?.loadingStates && !this.form?.statesError &&
         Boolean(this.form?.capture ? this.captureDescription.value().trim() || this.title.value().trim() : this.desc.value().trim()) &&
         Boolean(this.form?.team) && Boolean(this.launchTarget && !this.launchTarget.blocked) && this.agentsChecked && this.agentChoices.some(a => a.key === this.agentKey),
@@ -1444,7 +1444,7 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().flex_none().gap(7).items_center().flex_wrap()
         .when(attaching, el => el.child(this.button("attach-selected", `Attach ${is.identifier}`, () => { this.attach(is); this.dismiss(); }, { primary: true })))
         .when(Boolean(record), el => el.child(this.button("open-linked", "Open workspace", () => { this.selectWork(record); this.dismiss(); }, { primary: true })))
-        .when(!attaching && !record, el => el.child(this.button("start-work", "Start agent", cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && Boolean(this.launchTarget && !this.launchTarget.blocked) && !this.repositoriesLoading && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
+        .when(!attaching && !record, el => el.child(this.button("start-work", `Start agent${this.startSuffix()}`, cx => this.worktree(cx, true), { primary: true, enabled: !this.busy && Boolean(this.launchTarget && !this.launchTarget.blocked) && !this.repositoriesLoading && this.agentsChecked && Boolean(this.detail) && !this.detail.startWhy && this.agentChoices.length > 0 })))
         .when(!attaching && Boolean(record) && Boolean(this.detail) && !this.detail.startWhy && !this.busy, el => el.children(this.agentChoices.map(a => this.button(`continue-${a.key}`, `+ ${a.name}`, cx => {
           this.continueAgent(record, is, a, cx);
         }))))
