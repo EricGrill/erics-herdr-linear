@@ -68,7 +68,7 @@ first matching space, or opens the first Linear ticket when no space matches. Cl
 branch, and pull requests. An unlinked workspace can attach to an existing issue without
 moving its directory or changing its branch.
 
-Projects (Cmd+Shift+P) opens a centered dialog with the complete team/project tree, search, issue
+Projects (Cmd+Opt+P) opens a centered dialog with the complete team/project tree, search, issue
 rows, New task, and Browse. Names containing `A · B` can fold under a synthetic group A
 with leaf B. Expanding a project fetches its issues; loaded open projects refresh. Choose
 a running issue to return to its space. Keep the project count inside this popup.

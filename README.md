@@ -290,7 +290,7 @@ All bindings are scoped to `erics-linear`.
 | Action | macOS | Linux |
 | --- | --- | --- |
 | Live Agents popup | Cmd+Option+A | Alt+Shift+A |
-| Projects popup | Cmd+Shift+P | Alt+Shift+P |
+| Projects popup | Cmd+Opt+P | Alt+Shift+P |
 | Crew delegates | Cmd+Shift+C | Alt+Shift+C |
 | Issue panel | Cmd+Shift+I | Alt+Shift+I |
 | Issue delegate panel | Cmd+Shift+A | Alt+Shift+D |
