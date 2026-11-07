@@ -81,6 +81,41 @@ export function crewRoster({ agents = [], rows = [], rules = {}, queues = {}, fe
   }).sort((a, b) => b.needs - a.needs || b.total - a.total || a.name.localeCompare(b.name));
 }
 
+/** The name of the bucket that holds open issues no agent has been given yet. It is not
+ *  an agent, so it never appears in the agent count and can never be a destination. */
+export const UNDELEGATED_NAME = "Not delegated";
+
+/**
+ * The handoff bucket: every open issue the enrichment shows with no Linear delegate,
+ * shaped like a roster entry so the Crew list can draw it beside the agents.
+ *
+ * Its rows come from the bulk enrichment rather than a per-agent queue read, because
+ * "no delegate" is not a delegate to query by. That makes the bucket exactly as complete
+ * as the enrichment is, which the caller already reports, so `countIncomplete` is set
+ * whenever the enrichment was partial or failed instead of implying an exact count.
+ */
+export function undelegatedEntry({ rows = [], rules = {}, complete = true } = {}) {
+  const issues = rows.filter(row => !delegateOf(row));
+  return {
+    id: null, name: UNDELEGATED_NAME, undelegated: true,
+    // Not an agent: never offered as a reassignment destination (see reassignChoices).
+    eligible: false, listed: true,
+    issues, total: issues.length, countIncomplete: complete !== true,
+    needs: issues.filter(row => attentionOf(row, rules).needs).length,
+  };
+}
+
+/**
+ * How to name the write, which differs by where the issues come from. Handing work to an
+ * agent that has none of it is a delegation; taking it off one agent and giving it to
+ * another is a reassignment. Both send the same single `delegateId`.
+ */
+export function handoffWords(source) {
+  return source?.id
+    ? { verb: "Reassign", gerund: "Reassigning", past: "Moved", first: false }
+    : { verb: "Delegate", gerund: "Delegating", past: "Delegated", first: true };
+}
+
 /** Where an issue is running in Herdr, if anywhere. `records` are workRecords(). No
  *  record is a normal state: the issue is delegated in Linear with nothing open here. */
 export function herdrActivity(identifier, records = []) {
@@ -123,6 +158,20 @@ export function queueStatus(queue) {
   return { kind: "complete", text: null };
 }
 
+/** The plain-language state of the handoff bucket. Separate from queueStatus() because
+ *  the bucket is filtered out of the bulk enrichment rather than read per agent, so its
+ *  caveats are the enrichment's. */
+export function undelegatedStatus(bucket) {
+  if (!bucket) return { kind: "loading", text: "Reading open issues from Linear…" };
+  if (bucket.countIncomplete) {
+    return { kind: "partial", text: bucket.total
+      ? `Incomplete: showing the ${bucket.total} found so far. The Linear read did not finish, so there may be more.`
+      : "The Linear read of open issues did not finish, so work with no agent cannot be listed yet." };
+  }
+  if (!bucket.total) return { kind: "empty", text: "Every open issue already has an agent." };
+  return { kind: "complete", text: null };
+}
+
 /**
  * Runs a reassignment over several issues one at a time. `write(issue)` resolves to
  * { ok, error }; a throw is caught and recorded as that issue's failure. Every issue gets
@@ -141,13 +190,15 @@ export async function reassignBatch(issues = [], write) {
   return { ok: failed.length === 0 && results.length > 0, results, succeeded: results.length - failed.length, failed };
 }
 
-/** One line for the result of a batch. */
-export function batchSummary(batch, destination) {
-  if (!batch?.results?.length) return "Nothing was reassigned.";
+/** One line for the result of a batch. `words` comes from handoffWords() so a first
+ *  delegation does not report itself as having moved work off another agent. */
+export function batchSummary(batch, destination, words = handoffWords({ id: "any" })) {
+  const past = words.past, lower = past.toLowerCase();
+  if (!batch?.results?.length) return `Nothing was ${words.first ? "delegated" : "reassigned"}.`;
   const n = batch.results.length;
-  if (batch.ok) return `Moved ${n} issue${n === 1 ? "" : "s"} to ${destination}; Linear confirmed each one.`;
-  if (!batch.succeeded) return `None of the ${n} moved to ${destination}. ${batch.failed.length} failed and stay selected for retry.`;
-  return `${batch.succeeded} of ${n} moved to ${destination}; ${batch.failed.length} failed and stay selected for retry.`;
+  if (batch.ok) return `${past} ${n} issue${n === 1 ? "" : "s"} to ${destination}; Linear confirmed each one.`;
+  if (!batch.succeeded) return `None of the ${n} ${lower} to ${destination}. ${batch.failed.length} failed and stay selected for retry.`;
+  return `${batch.succeeded} of ${n} ${lower} to ${destination}; ${batch.failed.length} failed and stay selected for retry.`;
 }
 
 /** The Linear connection Crew reads through: the layout config and the machine the

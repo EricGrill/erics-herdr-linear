@@ -12,7 +12,7 @@ import { issueKey, issueLabel, issueHeadline, issueHover, folderOf, matchIssue, 
 import { boardTree, machineGroups, issueNeedsYou, visibleLabels, delegateOf, laneSince, elapsed, linearMismatch } from "./board.js";
 import { fetchEnrichment, indexEnrichment, fetchQueue, fetchAgents, fetchIssueDetail, reassignIssue, fetchPullRequests, rowPullRequest } from "./enrich.js";
 import { attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
-  crewContext, reassignChoices, requestGate } from "./queue.js";
+  crewContext, reassignChoices, requestGate, undelegatedEntry, undelegatedStatus, handoffWords, UNDELEGATED_NAME } from "./queue.js";
 import { normalizeConfig } from "./config.js";
 import { machineColor, machineLabel, machineState, stateWord } from "./machines.js";
 import { stackLayout, clampScroll, pinnedHeader, thumb } from "./sticky.js";
@@ -1571,6 +1571,116 @@ export default class LinearWorkspace extends LinearClient {
         .child(div().text_size(11).font_family(MONO).text_color(t.muted).child(is.branch))));
   }
 
+  // ---- Handing one issue to a Linear agent, from the panel beside it -----------------
+  //
+  // The same single-field verified write Crew uses, reachable without opening Crew: the
+  // agent list is read on demand, because this role loads no Linear list of its own.
+
+  handoffState() {
+    this.handoff ??= {
+      open: false, issueId: null, target: null,
+      agents: { list: [], error: null, loading: false, complete: false, key: null },
+      busy: "", result: null, gate: requestGate(),
+    };
+    return this.handoff;
+  }
+
+  handoffToggle(issue, cx) {
+    const h = this.handoffState();
+    if (h.busy) return;
+    const open = !(h.open && h.issueId === issue?.id);
+    h.open = open;
+    h.issueId = issue?.id ?? null;
+    h.target = null;
+    h.result = null;
+    if (open) this.handoffLoadAgents(cx);
+    cx.notify();
+  }
+
+  handoffLoadAgents(cx) {
+    const h = this.handoffState(), linear = this.crewLinear();
+    if (!linear) { h.agents = { ...h.agents, loading: false, key: null }; return; }
+    const key = JSON.stringify(linear);
+    if (h.agents.key === key && (h.agents.loading || h.agents.complete)) return;
+    const current = h.gate.begin("agents");
+    h.agents = { ...h.agents, loading: true, key };
+    cx.spawn(async cx => {
+      const res = await fetchAgents(linear);
+      if (!current() || JSON.stringify(this.crewLinear()) !== key) return;
+      h.agents = { list: res.agents, error: res.error, loading: false, complete: res.complete, key };
+      cx.notify();
+    });
+  }
+
+  /** Who this issue can go to: Linear agent identities only, never its current delegate. */
+  handoffChoices(issue) {
+    const h = this.handoffState();
+    const roster = crewRoster({ agents: h.agents.list, rows: this.enrichment().rows });
+    return reassignChoices(roster, { sourceId: issue?.delegate?.id ?? null, listFailed: Boolean(h.agents.error) });
+  }
+
+  /** Writes the delegate, proves it from Linear, then republishes the enrichment so the
+   *  chip, the groups and Crew all show the new agent. Starts no terminal. */
+  handoffApply(issue, cx) {
+    const h = this.handoffState(), target = h.target, linear = this.crewLinear();
+    if (h.busy || !target?.id || !issue?.id || !linear) return;
+    if (!this.handoffChoices(issue).some(e => e.id === target.id)) return;
+    const words = handoffWords(issue.delegate);
+    h.busy = `${words.gerund} ${issue.identifier} to ${target.name}…`;
+    h.result = null;
+    cx.notify();
+    cx.spawn(async cx => {
+      let outcome;
+      try { outcome = await reassignIssue({ ...linear, id: issue.id, delegateId: target.id }); }
+      catch (e) { outcome = { ok: false, error: String(e?.message ?? e) }; }
+      h.busy = "";
+      h.result = outcome?.ok === true
+        ? { ok: true, text: `${issue.identifier} is delegated to ${target.name}; Linear confirmed it.` }
+        : { ok: false, text: `${issue.identifier} was not delegated: ${outcome?.error ?? "Unknown failure"}` };
+      if (outcome?.ok === true) { h.open = false; h.target = null; }
+      // Counts and chips come back from Linear, not from what was sent.
+      await this.refreshEnrichment(linear, cx);
+    });
+  }
+
+  handoffPanel(issue) {
+    const t = theme(), h = this.handoffState(), words = handoffWords(issue?.delegate);
+    const linear = this.crewLinear(), choices = this.handoffChoices(issue);
+    return v_flex().id("agent-panel-handoff").flex_none().p(8).gap(6).rounded(6).bg(t.raised)
+      .child(div().text_size(11.5).font_semibold().text_color(t.foreground)
+        .child(`${words.verb} ${issue.identifier}${h.target ? ` to ${h.target.name}` : " to a Linear agent"}`))
+      .when(!linear, el => el.child(div().text_size(10.5).text_color(t.muted).line_height(1.4)
+        .child("Waiting for the Herdr sidebar to connect to Linear; the agent list loads as soon as it does.")))
+      .when(Boolean(linear) && h.agents.loading && !choices.length, el => el.child(div().text_size(10.5).text_color(t.muted)
+        .child("Reading agents from Linear…")))
+      .when(Boolean(h.agents.error), el => el.child(div().text_size(10.5).text_color(t.blocked).line_height(1.4)
+        .child(`Agent list unavailable: ${h.agents.error}. Only agents confirmed assignable on the available data are offered.`)))
+      .when(Boolean(linear) && !h.agents.loading && !choices.length, el => el.child(div().text_size(11).text_color(t.muted)
+        .child(words.first ? "No Linear agent is available." : "No other Linear agent is available.")))
+      .child(h_flex().gap(5).flex_wrap()
+        .children(choices.map((e, i) => this.button(`agent-panel-agent-${i}`, `${e.name} · ${e.total}`,
+          cx => { h.target = { id: e.id, name: e.name }; cx.notify(); },
+          { primary: h.target?.id === e.id, enabled: !h.busy }))))
+      .child(div().text_size(10.5).text_color(t.muted).line_height(1.4)
+        .child(`${words.first ? "Sets" : "Changes"} only the Linear delegate. The human assignee, project, priority and workflow state are kept, and the issue is checked in Linear after saving.`))
+      .child(div().text_size(10.5).text_color(t.muted).line_height(1.4)
+        .child("Linear runs the agent; Herdr starts no terminal and sends no commands. Any session already open here keeps running."))
+      .when(Boolean(h.busy), el => el.child(div().text_size(11).text_color(t.muted).child(h.busy)))
+      .child(h_flex().gap(6)
+        .child(this.button("agent-panel-apply", h.target ? `${words.verb} to ${h.target.name}` : "Choose an agent",
+          cx => this.handoffApply(issue, cx),
+          { primary: true, enabled: choices.some(e => e.id === h.target?.id) && !h.busy && Boolean(linear) }))
+        .child(this.button("agent-panel-cancel", "Cancel",
+          cx => { h.open = false; h.target = null; cx.notify(); }, { enabled: !h.busy })));
+  }
+
+  handoffResult() {
+    const t = theme(), r = this.handoffState().result;
+    return div().id("agent-panel-handoff-result").flex_none().px(8).py(6).rounded(6)
+      .bg(tint(r.ok ? t.done : t.blocked, 0.1)).text_size(11).line_height(1.4)
+      .text_color(r.ok ? t.done : t.blocked).child(r.text);
+  }
+
   /** What the delegate on the active issue is doing, across every machine. Linear says who
    *  owns the ticket; Herdr says what is actually running. Both are shown separately so a
    *  delegated ticket with nothing running does not read as work in progress. */
@@ -1578,6 +1688,9 @@ export default class LinearWorkspace extends LinearClient {
     const t = theme(), record = this.activeRecord(), enrichment = this.enrichment();
     const is = record?.issue ? this.enrich(record.issue, enrichment) : null;
     const delegate = delegateOf(is) ?? this.delegateFilter();
+    // The ticket's own agent, which is not the same as `delegate`: that falls back to the
+    // Spaces delegate filter, and a filter must never read as this ticket having an agent.
+    const own = is ? delegateOf(is) : null;
     const rows = delegate ? enrichment.rows.filter(r => r.delegate?.name === delegate) : [];
     const records = sharedRecords();
     const live = delegate
@@ -1587,9 +1700,17 @@ export default class LinearWorkspace extends LinearClient {
       .child(h_flex().gap(7).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground)
           .child(delegate ?? "No agent"))
-        .when(Boolean(delegate), el => el.child(this.button("agent-panel-filter", "Show only this", cx => this.setDelegateFilter(delegate, cx)))))
-      .when(!delegate, el => el.child(div().text_size(11).text_color(t.muted).line_height(1.5)
-        .child("This issue has no Linear delegate. Delegate it in Linear, or reassign it from the Crew window, and its work shows here.")))
+        .when(Boolean(delegate), el => el.child(this.button("agent-panel-filter", "Show only this", cx => this.setDelegateFilter(delegate, cx))))
+        .when(Boolean(is?.id), el => el.child(this.button("agent-panel-delegate", own ? "Change agent…" : "Delegate…",
+          cx => this.handoffToggle(is, cx), { primary: !own, enabled: !this.handoffState().busy }))))
+      .when(!delegate && !is?.id, el => el.child(div().text_size(11).text_color(t.muted).line_height(1.5)
+        .child("No ticket is open here and no agent is filtered. Open a ticket's workspace, or choose an agent in Crew.")))
+      .when(!own && Boolean(is?.id), el => el.child(div().text_size(11).text_color(t.muted).line_height(1.5)
+        .child("No Linear agent has this ticket yet. Delegate… hands it to one; Linear runs the agent and its work shows here.")))
+      .when(Boolean(is?.id) && this.handoffState().open && this.handoffState().issueId === is.id,
+        el => el.child(this.handoffPanel(is)))
+      .when(Boolean(this.handoffState().result) && this.handoffState().issueId === (is?.id ?? null),
+        el => el.child(this.handoffResult()))
       .when(Boolean(delegate), el => el
         .child(v_flex().gap(4)
           .child(div().text_size(10).font_semibold().text_color(t.dim).child(`DELEGATED IN LINEAR · ${rows.length}`))
@@ -1681,9 +1802,10 @@ export default class LinearWorkspace extends LinearClient {
       crew.result = null;
       crew.retryRows = [];
     }
-    crew.agent = { id: entry.id, name: entry.name };
+    crew.agent = { id: entry.id, name: entry.name, undelegated: entry.undelegated === true };
     crew.issueId = null;
-    this.crewLoadQueue(entry.id, cx);
+    // The handoff bucket has no delegate to query by: its rows come from the enrichment.
+    if (!entry.undelegated) this.crewLoadQueue(entry.id, cx);
     cx.notify();
   }
 
@@ -1753,7 +1875,8 @@ export default class LinearWorkspace extends LinearClient {
     if (crew.busy || !target?.id || !rows.length || !linear) return;
     const roster = crewRoster({ agents: crew.agents.list, rows: sharedEnrich().rows });
     if (!reassignChoices(roster, { sourceId: source?.id, listFailed: Boolean(crew.agents.error) }).some(e => e.id === target.id)) return;
-    crew.busy = `Reassigning ${rows.length} issue${rows.length === 1 ? "" : "s"} to ${target.name}…`;
+    const words = handoffWords(source);
+    crew.busy = `${words.gerund} ${rows.length} issue${rows.length === 1 ? "" : "s"} to ${target.name}…`;
     crew.result = null;
     cx.notify();
     cx.spawn(async cx => {
@@ -1761,7 +1884,7 @@ export default class LinearWorkspace extends LinearClient {
       crew.picked = new Set(batch.failed.map(f => f.id));
       crew.retryRows = rows.filter(row => crew.picked.has(row.id));
       crew.result = {
-        ok: batch.ok, text: batchSummary(batch, target.name),
+        ok: batch.ok, text: batchSummary(batch, target.name, words),
         failed: batch.failed.map(f => ({ identifier: f.identifier, error: f.error })),
       };
       if (!crew.picked.size) crew.reassign = null;
@@ -1773,13 +1896,20 @@ export default class LinearWorkspace extends LinearClient {
         const d = crew.details[crew.issueId];
         if (d?.row) this.crewInspect(d.row, cx);
       }
-      const current = enrichmentRequest();
-      const enriched = await fetchEnrichment(linear);
-      if (current() && JSON.stringify(this.crewLinear()) === JSON.stringify(linear) && (!enriched.error || enriched.rows.length)) {
-        setShared(ENRICH, { rows: enriched.rows, error: enriched.error, fetchedAt: enriched.fetchedAt, partial: enriched.partial, on: linear.on });
-      }
-      cx.notify();
+      await this.refreshEnrichment(linear, cx);
     });
+  }
+
+  /** Re-reads the bulk enrichment and republishes it, so a delegation made here shows on
+   *  every row, chip and group at once instead of waiting for the sidebar's next tick.
+   *  A read started before this one is dropped rather than published. */
+  async refreshEnrichment(linear, cx) {
+    const current = enrichmentRequest();
+    const enriched = await fetchEnrichment(linear);
+    if (current() && JSON.stringify(this.crewLinear()) === JSON.stringify(linear) && (!enriched.error || enriched.rows.length)) {
+      setShared(ENRICH, { rows: enriched.rows, error: enriched.error, fetchedAt: enriched.fetchedAt, partial: enriched.partial, on: linear.on });
+    }
+    cx.notify();
   }
 
   crewWindow() {
@@ -1787,6 +1917,10 @@ export default class LinearWorkspace extends LinearClient {
     const roster = crewRoster({ agents: crew.agents.list, rows: enrichment.rows, rules, queues: crew.queues,
       fetchedAt: enrichment.error || enrichment.partial ? null : enrichment.fetchedAt });
     const records = sharedRecords([...enrichment.rows, ...Object.values(crew.queues).flatMap(q => q.rows)]);
+    // Open work no agent has yet, so it can be handed out from the same window. Not an
+    // agent, so it stays out of the agent count and out of the destination list.
+    const bucket = undelegatedEntry({ rows: enrichment.rows, rules,
+      complete: Boolean(enrichment.fetchedAt) && !enrichment.error && !enrichment.partial });
     const withWork = roster.filter(e => e.total).length;
     const caveat = enrichment.error ? `Counts may be stale: ${enrichment.error}`
       : enrichment.partial ? "Counts are from a partial read of Linear (at least these many)."
@@ -1805,10 +1939,10 @@ export default class LinearWorkspace extends LinearClient {
         .child(this.button("crew-close", "✕", () => closeOverlay(props().overlay))))
       .when(Boolean(caveat), el => el.child(div().flex_none().text_size(10.5).text_color(enrichment.error ? t.blocked : t.muted).truncate().child(caveat)))
       .child(h_flex().flex_1().min_h(0).min_w(0).gap(10).items_start()
-        .child(this.crewAgentList(roster, records, enrichment))
+        .child(this.crewAgentList(roster, records, enrichment, bucket))
         .child(div().w(1).h_full().flex_none().bg(t.border))
         .child(v_flex().flex_1().h_full().min_h(0).min_w(0)
-          .child(crew.issueId ? this.crewInspector(records) : crew.agent ? this.crewQueue(roster, records, rules) : this.crewHint())));
+          .child(crew.issueId ? this.crewInspector(records) : crew.agent ? this.crewQueue(roster, records, rules, bucket) : this.crewHint())));
   }
 
   crewHint() {
@@ -1816,10 +1950,33 @@ export default class LinearWorkspace extends LinearClient {
     return v_flex().flex_1().min_h(0).p(12).gap(6)
       .child(div().text_size(12).font_semibold().text_color(t.foreground).child("Choose an agent"))
       .child(div().text_size(11.5).text_color(t.muted).line_height(1.5)
-        .child("Its full open Linear queue appears here, with or without Herdr spaces. Selecting an agent does not change the Spaces list."));
+        .child("Its full open Linear queue appears here, with or without Herdr spaces. Selecting an agent does not change the Spaces list."))
+      .child(div().text_size(11.5).text_color(t.muted).line_height(1.5)
+        .child(`Choose ${UNDELEGATED_NAME} to see open work no agent has yet, and hand it to one.`));
   }
 
-  crewAgentList(roster, records, enrichment) {
+  /** The handoff bucket's row: open issues with no agent, above the crew it can go to.
+   *  Drawn even when empty, so "nothing waiting to be handed out" is visible. */
+  crewBucketRow(bucket) {
+    const t = theme(), crew = this.crew, active = crew.agent?.undelegated === true;
+    const color = bucket.needs ? t.blocked : bucket.total ? t.muted : t.dim;
+    return v_flex().id("crew-undelegated").flex_none().min_w(0).px(7).py(5).gap(3).rounded(6)
+      .bg(active ? t.selected : t.popover).hover(s => s.bg(t.hover)).cursor_pointer()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => this.crewSelectAgent(bucket, cx))
+      .child(h_flex().gap(7).items_center().min_w(0)
+        .child(div().size(7).rounded(7).flex_none().border_1().border_color(color))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(bucket.name))
+        .child(div().flex_none().text_size(10).text_color(t.dim).child(`${bucket.total}${bucket.countIncomplete ? "+" : ""} open`)))
+      .child(h_flex().gap(4).pl(14).flex_wrap().items_center()
+        .when(bucket.needs > 0, el => el.child(this.chip("crew-undelegated-needs", `${bucket.needs} of ${bucket.total} need attention`, t.blocked)))
+        // An unfinished read means zero is unknown, not "none": never claim the latter.
+        .when(!bucket.total, el => el.child(div().text_size(10).text_color(t.dim)
+          .child(bucket.countIncomplete ? "not read yet" : "nothing waiting for an agent")))
+        .when(bucket.total > 0, el => el.child(div().text_size(10).text_color(t.dim).child("no agent yet"))));
+  }
+
+  crewAgentList(roster, records, enrichment, bucket) {
     const t = theme(), crew = this.crew;
     return v_flex().id("crew-agents").w(230).flex_none().h_full().min_h(0).overflow_y_scrollbar().gap(2)
       .when(crew.agents.waiting, el => el.child(div().py(8).text_size(11).text_color(t.muted).line_height(1.4)
@@ -1831,6 +1988,8 @@ export default class LinearWorkspace extends LinearClient {
         .child("Agent list is incomplete; Linear has more.")))
       .when(!crew.agents.loading && !crew.agents.waiting && !roster.length, el => el.child(div().py(8).text_size(11).text_color(t.muted)
         .child(enrichment.fetchedAt || crew.agents.error ? "No Linear agents found." : "Reading delegates from Linear…")))
+      .when(Boolean(bucket), el => el.child(this.crewBucketRow(bucket)))
+      .when(Boolean(bucket) && roster.length > 0, el => el.child(div().h(1).flex_none().my(3).bg(t.border)))
       .children(roster.map((entry, i) => {
         const running = entry.issues.filter(r => herdrActivity(r.identifier, records).records.length).length;
         const active = crew.agent && (crew.agent.id ? crew.agent.id === entry.id : crew.agent.name === entry.name);
@@ -1862,13 +2021,17 @@ export default class LinearWorkspace extends LinearClient {
       .child(on ? "✓" : "");
   }
 
-  crewQueue(roster, records, rules) {
-    const t = theme(), crew = this.crew, agent = crew.agent;
-    const queue = agent?.id ? crew.queues[agent.id] : { rows: [], complete: false, error: "This agent has no Linear identity", loading: false };
+  crewQueue(roster, records, rules, bucket = null) {
+    const t = theme(), crew = this.crew, agent = crew.agent, handoff = agent?.undelegated === true;
+    const words = handoffWords(agent);
+    const queue = handoff
+      ? { rows: bucket?.issues ?? [], complete: !bucket?.countIncomplete, error: null, loading: false }
+      : agent?.id ? crew.queues[agent.id]
+      : { rows: [], complete: false, error: "This agent has no Linear identity", loading: false };
     const queueRows = queue?.rows ?? [];
     const rows = sortQueue([...new Map([...(crew.retryRows ?? []), ...queueRows].map(row => [row.id, row])).values()], rules);
     const counts = queueCounts(queueRows, rules);
-    const status = queueStatus(queue);
+    const status = handoff ? undelegatedStatus(bucket) : queueStatus(queue);
     const picked = rows.filter(r => crew.picked.has(r.id));
     const label = ["complete", "empty", "refreshing"].includes(status.kind) ? "" : " so far";
     return v_flex().flex_1().min_h(0).min_w(0).gap(7)
@@ -1877,7 +2040,9 @@ export default class LinearWorkspace extends LinearClient {
         .child(div().text_size(11).text_color(t.muted).child(`${counts.total} open${label}`))
         .when(counts.needs > 0, el => el.child(div().text_size(11).text_color(t.blocked).child(`${counts.needs} need${counts.needs === 1 ? "s" : ""} attention`)))
         .child(div().flex_1())
-        .child(this.button("crew-queue-refresh", "↻", cx => this.crewLoadQueue(agent.id, cx), { enabled: Boolean(agent.id) && !queue?.loading && !crew.busy })))
+        .child(this.button("crew-queue-refresh", "↻",
+          cx => { const linear = this.crewLinear(); if (handoff) { if (linear) cx.spawn(cx => this.refreshEnrichment(linear, cx)); } else this.crewLoadQueue(agent.id, cx); },
+          { enabled: (handoff ? Boolean(this.crewLinear()) : Boolean(agent.id)) && !queue?.loading && !crew.busy })))
       .when(Boolean(status.text), el => el.child(div().flex_none().text_size(11).line_height(1.4)
         .text_color(status.kind === "error" ? t.blocked : status.kind === "partial" ? t.blocked : t.muted).child(status.text)))
       .when(queueRows.some(row => row.contextIncomplete?.includes("labels")), el => el.child(div().flex_none().text_size(11).text_color(t.blocked)
@@ -1888,9 +2053,9 @@ export default class LinearWorkspace extends LinearClient {
           crew.picked = picked.length === rows.length ? new Set() : new Set(rows.map(r => r.id));
           cx.notify();
         }))
-        .child(div().text_size(11).text_color(t.muted).child(picked.length ? `${picked.length} selected` : "Select issues to reassign"))
+        .child(div().text_size(11).text_color(t.muted).child(picked.length ? `${picked.length} selected` : `Select issues to ${words.verb.toLowerCase()}`))
         .child(div().flex_1())
-        .child(this.button("crew-reassign-open", picked.length > 1 ? `Reassign ${picked.length}…` : "Reassign…",
+        .child(this.button("crew-reassign-open", picked.length > 1 ? `${words.verb} ${picked.length}…` : `${words.verb}…`,
           cx => this.crewOpenReassign(picked.map(r => r.id), cx), { enabled: picked.length > 0 && !crew.busy }))))
       .when(Boolean(crew.reassign) && picked.length > 0, el => el.child(this.crewReassignPanel(picked, records, roster)))
       .when(Boolean(crew.busy), el => el.child(div().flex_none().text_size(11).text_color(t.muted).child(crew.busy)))
@@ -1923,33 +2088,39 @@ export default class LinearWorkspace extends LinearClient {
         .when(Boolean(a.blockedBy), el => el.child(div().truncate().text_size(10.5).text_color(a.needs ? t.blocked : t.muted).child(a.blockedBy))))
       .child(v_flex().flex_none().gap(3).items_end()
         .child(this.chip(`${id}-herdr`, live.records.length ? `Herdr: ${live.summary}` : "No Herdr space", live.running ? t.working : t.dim, { faded: !live.records.length }))
-        .child(this.button(`${id}-move`, "Reassign…", cx => this.crewOpenReassign([row.id], cx), { enabled: !crew.busy })));
+        .child(this.button(`${id}-move`, `${handoffWords(this.crew.agent).verb}…`, cx => this.crewOpenReassign([row.id], cx), { enabled: !crew.busy })));
   }
 
   /** Destination choice and the confirmation, in one place: how many, from whom, to whom,
    *  and what is running so nobody mistakes a ticket move for stopping an agent. */
   crewReassignPanel(picked, records, roster) {
     const t = theme(), crew = this.crew, source = crew.agent, target = crew.reassign.target;
+    const words = handoffWords(source);
     // Only Linear agent identities with an id can be delegated to; local program names never.
     const choices = reassignChoices(roster, { sourceId: source?.id ?? null, listFailed: Boolean(crew.agents.error) });
     const running = picked.map(r => ({ row: r, live: herdrActivity(r.identifier, records) })).filter(x => x.live.records.length);
     const n = picked.length;
     return v_flex().id("crew-reassign").flex_none().max_h(260).min_h(0).overflow_y_scrollbar().p(8).gap(6).rounded(6).bg(t.raised)
       .child(div().text_size(11.5).font_semibold().text_color(t.foreground)
-        .child(`Reassign ${n} issue${n === 1 ? "" : "s"} from ${source?.name ?? "?"}${target ? ` to ${target.name}` : ""}`))
+        .child(words.first
+          ? `${words.verb} ${n} issue${n === 1 ? "" : "s"}${target ? ` to ${target.name}` : " to a Linear agent"}`
+          : `${words.verb} ${n} issue${n === 1 ? "" : "s"} from ${source?.name ?? "?"}${target ? ` to ${target.name}` : ""}`))
       .when(n <= 6, el => el.child(div().text_size(10.5).font_family(MONO).text_color(t.muted).child(picked.map(r => r.identifier).join(", "))))
       .when(Boolean(crew.agents.error), el => el.child(div().text_size(10.5).text_color(t.blocked)
         .child("Linear's agent list could not be read. Only agents confirmed assignable on the available data are offered.")))
-      .when(!choices.length, el => el.child(div().text_size(11).text_color(t.muted).child(crew.agents.loading || crew.agents.waiting ? "Reading agents from Linear…" : "No other Linear agent is available.")))
+      .when(!choices.length, el => el.child(div().text_size(11).text_color(t.muted).child(crew.agents.loading || crew.agents.waiting
+        ? "Reading agents from Linear…" : words.first ? "No Linear agent is available." : "No other Linear agent is available.")))
       .child(h_flex().gap(5).flex_wrap()
         .children(choices.map((e, i) => this.button(`crew-dest-${i}`, `${e.name} · ${e.total}`, cx => { crew.reassign = { target: { id: e.id, name: e.name } }; cx.notify(); },
           { primary: target?.id === e.id, enabled: !crew.busy }))))
       .child(div().text_size(10.5).text_color(t.muted).line_height(1.4)
-        .child("Changes only the Linear delegate. The human assignee, project, priority and workflow state are kept, and each issue is checked in Linear after saving."))
+        .child(`${words.first ? "Sets" : "Changes"} only the Linear delegate. The human assignee, project, priority and workflow state are kept, and each issue is checked in Linear after saving.`))
+      .when(words.first, el => el.child(div().text_size(10.5).text_color(t.muted).line_height(1.4)
+        .child("Linear runs the agent; Herdr starts no terminal and sends no commands. Each issue moves under that agent here once Linear confirms it.")))
       .when(running.length > 0, el => el.child(div().text_size(10.5).text_color(t.working).line_height(1.4)
         .child(`Running in Herdr / open workspaces: ${running.map(x => `${x.row.identifier} (${x.live.summary})`).join("; ")}. Reassignment sends no Herdr commands; running sessions continue.`)))
       .child(h_flex().gap(6)
-        .child(this.button("crew-apply", target ? `Move ${n} to ${target.name}` : "Choose an agent", cx => this.crewApplyReassign(picked, cx),
+        .child(this.button("crew-apply", target ? `${words.verb} ${n} to ${target.name}` : "Choose an agent", cx => this.crewApplyReassign(picked, cx),
           { primary: true, enabled: choices.some(e => e.id === target?.id) && !crew.busy && Boolean(this.crewLinear()) }))
         .child(this.button("crew-cancel", "Cancel", cx => { crew.reassign = null; cx.notify(); }, { enabled: !crew.busy })));
   }

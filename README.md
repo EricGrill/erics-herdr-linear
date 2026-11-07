@@ -53,11 +53,19 @@ the sidebar-footer version in `layouts/erics-linear.json` matches.
 - Shows live Herdr agents in a scrollable popup, including remote agents and subagents.
 - Shows each Linear agent's full open issue queue in Crew, with attention reasons, issue
   inspection and verified reassignment, without treating a delegated ticket as a running agent.
+- Delegates a ticket to a Linear agent without leaving the layout. The issue's agent panel
+  offers **Delegate…**, or **Change agent…** when an agent already has it. Crew lists open
+  work with no agent under **Not delegated**, one at a time or in bulk. Both write only the
+  Linear delegate and read it back, keeping the human assignee, status, project and
+  priority. Linear runs the agent: Herdr starts no terminal and stops nothing that is
+  already running. See [delegating to Linear agents](docs/CHA-4370-delegate-to-agents.md).
 - Creates a ticket before starting a task in its worktree, or attaches an existing space
   to a ticket without moving its files or changing its branch.
 - Lets you choose the execution computer, then an existing Git repository under that
   computer's `~/code`, instead of using a local-only folder picker.
 - Retains Herdr's terminal tabs, pane controls, Files and Changes.
+- Keeps the delegate visible after a handoff: the chip on the row, the **Agent** grouping
+  and the agent's Crew queue all update as soon as Linear confirms the write.
 - The issue header reads status · priority · delegate or assignee · pull request and
   checks · lines added/removed. The status bar shows the machine, commits ahead/behind,
   uncommitted changes and how long the agent has been working, for local and remote
@@ -293,7 +301,7 @@ All bindings are scoped to `erics-linear`.
 | Projects popup | Cmd+Opt+P | Alt+Shift+P |
 | Crew delegates | Cmd+Shift+C | Alt+Shift+C |
 | Issue panel | Cmd+Shift+I | Alt+Shift+I |
-| Issue delegate panel | Cmd+Shift+A | Alt+Shift+D |
+| Issue delegate panel (and Delegate…) | Cmd+Shift+A | Alt+Shift+D |
 | Files | Cmd+Shift+F | Alt+Shift+F |
 | Toggle side panel | Cmd+Shift+E | Alt+Shift+E |
 | Clear delegate filter | Cmd+Shift+X | Alt+Shift+X |
