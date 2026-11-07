@@ -53,6 +53,8 @@ const answer = (nodes, pageInfo = { hasNextPage: false, endCursor: null }) =>
 
 const node = (identifier, over = {}) => ({
   id: `uuid-${identifier}`, identifier, updatedAt: "2026-11-01T12:00:00.000Z",
+  title: `Issue ${identifier}`, url: `https://linear.app/demo/issue/${identifier}`,
+  priorityLabel: "No priority",
   delegate: null, assignee: { displayName: "sample-user" },
   state: { name: "Todo", type: "unstarted" },
   project: { id: "p1", name: "Helper Project" }, team: { key: "DEMO" },
@@ -89,6 +91,9 @@ test("the query body survives a $ sequence intact", async () => {
   const parsed = JSON.parse(body.trim());
   assert.match(parsed.query, /query BoardEnrichment\(\$after: String\)/);
   assert.match(parsed.query, /delegate \{ id name displayName avatarUrl active app isAssignable \}/);
+  // CHA-4370: the handoff bucket lists issues with no delegate, so the bulk read must
+  // carry enough to draw and open one without a second query.
+  for (const field of ["title", "url", "priorityLabel"]) assert.match(parsed.query, new RegExp(`^\\s*${field}$`, "m"));
   assert.match(parsed.query, /nin: \["completed", "canceled"\]/);
   same(parsed.variables, { after: null });
 });
@@ -107,7 +112,10 @@ test("a delegated issue parses into usable rows", async () => {
   same(parsed.rows, [{
     id: "uuid-DEMO-3589",
     identifier: "DEMO-3589",
+    title: "Issue DEMO-3589",
+    url: "https://linear.app/demo/issue/DEMO-3589",
     priority: 0,
+    priorityLabel: "No priority",
     updatedAt: "2026-11-01T12:00:00.000Z",
     delegate: { id: "agent-spock", name: "Spock", avatarUrl: "https://public.linear.app/a.png", eligible: false },
     contextIncomplete: ["labels"],

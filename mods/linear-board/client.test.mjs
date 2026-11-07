@@ -7,6 +7,9 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { taskContext } from "./model.js";
+// Stubbed by the module's own export list, so adding an export to queue.js cannot
+// silently break every main.js harness here. Constants keep their real values.
+import * as queueExports from "./queue.js";
 
 const source = await readFile(new URL("./client.js", import.meta.url), "utf8");
 const targetSource = await readFile(new URL("./execution-target.js", import.meta.url), "utf8");
@@ -207,7 +210,8 @@ async function harness(options = {}) {
     "./model.js": Object.fromEntries(["issueKey", "issueLabel", "issueHeadline", "issueHover", "folderOf", "matchIssue", "workRecords", "projectGroups", "taskContext", "issueNeedsYou", "issueMenuItems", "spaceMenuItems"].map(name => [name, name === "taskContext" ? taskContext : noop])),
     "./board.js": Object.fromEntries(["boardTree", "machineGroups", "issueNeedsYou", "visibleLabels", "delegateOf", "laneSince", "elapsed", "linearMismatch"].map(name => [name, noop])),
     "./enrich.js": Object.fromEntries(["fetchEnrichment", "indexEnrichment", "fetchQueue", "fetchAgents", "fetchIssueDetail", "reassignIssue", "fetchPullRequests", "rowPullRequest"].map(name => [name, noop])),
-    "./queue.js": Object.fromEntries(["attentionOf", "sortQueue", "queueCounts", "crewRoster", "herdrActivity", "age", "queueStatus", "reassignBatch", "batchSummary", "crewContext", "reassignChoices", "requestGate"].map(name => [name, noop])),
+    "./queue.js": Object.fromEntries(Object.entries(queueExports)
+      .map(([name, value]) => [name, typeof value === "function" ? noop : value])),
     "./config.js": { normalizeConfig: noop },
   };
   const mainModule = new vm.SourceTextModule(mainSource, { context });

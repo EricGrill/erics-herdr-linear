@@ -4,7 +4,7 @@ import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import {
   attentionOf, sortQueue, queueCounts, crewRoster, herdrActivity, age, queueStatus, reassignBatch, batchSummary,
-  crewContext, reassignChoices, requestGate,
+  crewContext, reassignChoices, requestGate, undelegatedEntry, undelegatedStatus, handoffWords, UNDELEGATED_NAME,
 } from "./queue.js";
 import { normalizeConfig } from "./config.js";
 
@@ -289,6 +289,63 @@ test("the roster lists every Linear agent, idle ones included, with separate cou
   assert.deepEqual([by.Stray.total, by.Stray.id, by.Stray.eligible], [1, "agent-x", false], "a delegate missing from the agent list stays reachable");
   assert.equal(roster[0].name, "Yoda");
   assert.equal(roster.length, 3);
+});
+
+// ---- CHA-4370: handing work to an agent that has none of it yet -----------------------
+
+test("the handoff bucket holds every open issue with no delegate, and is never an agent", () => {
+  const rows = [row(1), row(2, { delegate: null }), row(3, { delegate: null, labels: ["needs-human"] }),
+    row(4, { delegate: { name: "local-codex" } })];
+  const bucket = undelegatedEntry({ rows, rules });
+  assert.equal(bucket.name, UNDELEGATED_NAME);
+  assert.equal(bucket.undelegated, true);
+  assert.deepEqual(bucket.issues.map(r => r.identifier), ["DEMO-2", "DEMO-3"], "a named local program is a delegate; null is not");
+  assert.deepEqual([bucket.total, bucket.needs], [2, 1]);
+  assert.equal(bucket.id, null);
+  assert.equal(bucket.eligible, false);
+  // The bucket must never be offered as somewhere to send work.
+  assert.deepEqual(reassignChoices([bucket], { sourceId: null, listFailed: true }), []);
+  const roster = crewRoster({ agents: [{ id: "agent-yoda", name: "Yoda", eligible: true }], rows, rules });
+  assert.ok(!roster.some(e => e.undelegated), "the bucket stays out of the agent roster and its count");
+});
+
+test("an incomplete Linear read makes the bucket count a lower bound, never an exact one", () => {
+  const rows = [row(1, { delegate: null })];
+  assert.equal(undelegatedEntry({ rows, rules }).countIncomplete, false);
+  assert.equal(undelegatedEntry({ rows, rules, complete: false }).countIncomplete, true);
+  assert.match(undelegatedStatus(undelegatedEntry({ rows, rules, complete: false })).text, /did not finish/);
+  assert.match(undelegatedStatus(undelegatedEntry({ rows: [], rules, complete: false })).text, /cannot be listed yet/);
+  assert.equal(undelegatedStatus(undelegatedEntry({ rows: [], rules })).kind, "empty");
+  assert.match(undelegatedStatus(undelegatedEntry({ rows: [], rules })).text, /already has an agent/);
+  assert.equal(undelegatedStatus(undelegatedEntry({ rows, rules })).text, null);
+  assert.equal(undelegatedStatus(null).kind, "loading");
+});
+
+test("with no source agent every eligible agent is a destination, the current one excluded", () => {
+  const roster = crewRoster({ agents: [
+    { id: "agent-yoda", name: "Yoda", eligible: true },
+    { id: "agent-leia", name: "Leia", eligible: true },
+    { id: "agent-off", name: "Retired", eligible: false },
+  ], rows: [] });
+  assert.deepEqual(reassignChoices(roster, { sourceId: null }).map(e => e.name), ["Leia", "Yoda"],
+    "an issue with no agent can go to any eligible agent; an ineligible one is never offered");
+  assert.deepEqual(reassignChoices(roster, { sourceId: "agent-yoda" }).map(e => e.name), ["Leia"],
+    "an issue already delegated is only offered the others");
+});
+
+test("a first delegation and a reassignment read differently, from the same single-field write", () => {
+  const first = handoffWords({ id: null }), move = handoffWords({ id: "agent-yoda" });
+  assert.deepEqual([first.verb, first.gerund, first.past, first.first], ["Delegate", "Delegating", "Delegated", true]);
+  assert.deepEqual([move.verb, move.gerund, move.past, move.first], ["Reassign", "Reassigning", "Moved", false]);
+  assert.deepEqual(handoffWords(undefined), first, "no delegate at all is a first delegation");
+  const ok = { ok: true, results: [{ ok: true }, { ok: true }], succeeded: 2, failed: [] };
+  assert.equal(batchSummary(ok, "Leia", first), "Delegated 2 issues to Leia; Linear confirmed each one.");
+  assert.equal(batchSummary(ok, "Leia", move), "Moved 2 issues to Leia; Linear confirmed each one.");
+  assert.equal(batchSummary(ok, "Leia"), "Moved 2 issues to Leia; Linear confirmed each one.", "the default stays a move");
+  const mixed = { ok: false, results: [{ ok: true }, { ok: false }], succeeded: 1, failed: [{ identifier: "DEMO-2", error: "denied" }] };
+  assert.equal(batchSummary(mixed, "Leia", first), "1 of 2 delegated to Leia; 1 failed and stay selected for retry.");
+  assert.equal(batchSummary({ results: [] }, "Leia", first), "Nothing was delegated.");
+  assert.equal(batchSummary({ results: [] }, "Leia", move), "Nothing was reassigned.");
 });
 
 test("Herdr activity is separate from Linear: no space is a valid state", () => {

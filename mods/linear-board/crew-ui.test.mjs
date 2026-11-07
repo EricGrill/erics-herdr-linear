@@ -27,13 +27,15 @@ const issue = n => ({ id: `issue-${n}`, identifier: `DEMO-${n}`, title: `Issue $
 const complete = rows => ({ rows, complete: true, error: null, fetchedAt: 200 });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
-async function harness({ rows = [], queue = async () => complete(rows), detail = async ({ id }) => ({ issue: rows.find(r => r.id === id), error: null }), write = async () => ({ ok: true }), enrichment } = {}) {
+async function harness({ rows = [], queue = async () => complete(rows), detail = async ({ id }) => ({ issue: rows.find(r => r.id === id), error: null }), write = async () => ({ ok: true }), enrichment, role = "crew", spaces: spaceList = [], issues = [] } = {}) {
   const effects = [], writes = [], tasks = [];
   const state = new Map([
     ["erics-linear.config", { attention: { states: ["Blocked"], labels: ["needs-human"] } }],
     ["linear-board.enrich", { rows, on: null, fetchedAt: 100, partial: false, error: null }],
     ["linear-workspace.workspace", "workspace-one"],
     ["linear-board.filters", { "workspace-one": { team: ["DEMO"], crew: ["Existing filter"] } }],
+    ["linear-workspace.data", { "workspace-one": { issues } }],
+    ["linear-workspace.links", []],
   ]);
   const context = vm.createContext({ console });
   const effect = name => (...args) => { effects.push({ name, args }); };
@@ -46,9 +48,9 @@ async function harness({ rows = [], queue = async () => complete(rows), detail =
     } },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": {
-      spaces: () => [], panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
+      spaces: () => spaceList, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],
       shared: key => state.get(key), setShared: (key, value) => { effects.push({ name: "setShared", key }); state.set(key, value); },
-      theme: () => new Proxy({}, { get: () => "#777777" }), props: () => ({ role: "crew" }),
+      theme: () => new Proxy({}, { get: () => "#777777" }), props: () => ({ role }),
       setAgentOrder: effect("setAgentOrder"), run: effect("run"), exec: effect("exec"),
       openOverlay: effect("openOverlay"), closeOverlay: effect("closeOverlay"), knownAgents: () => [], settings: () => ({ zoom: 1 }), appHome: () => "/fake",
     },
@@ -274,4 +276,168 @@ test("a queue response from the previous Linear connection is ignored", async ()
   pending.resolve(complete([issue(1)])); await h.flush();
   assert.equal(h.board.crew.queues.yoda.rows.length, 0);
   assert.equal(byId(h.board.crewWindow(), "crew-row-issue-1"), undefined);
+});
+
+// ---- CHA-4370: delegating from inside the layout --------------------------------------
+
+const free = n => ({ ...issue(n), delegate: null });
+
+test("Crew lists open work with no agent and hands it to one, verified, with no terminal effects", async () => {
+  const rows = [issue(1), free(2), free(3)];
+  rows[2].labels = ["needs-human"];
+  let delegated = false;
+  const h = await harness({ rows,
+    queue: async ({ delegateId }) => complete(delegateId === leia.id && delegated ? [{ ...rows[1], delegate: leia }] : delegateId === yoda.id ? [rows[0]] : []),
+    write: async () => { delegated = true; return { ok: true }; },
+    enrichment: async () => ({ error: null, fetchedAt: 300, partial: false,
+      rows: delegated ? [rows[0], { ...rows[1], delegate: leia }, rows[2]] : rows }),
+  });
+
+  // The bucket is visible before anything is selected, and is not counted as an agent.
+  const before = h.board.crewWindow();
+  const bucket = byId(before, "crew-undelegated");
+  assert.ok(bucket, "the handoff bucket has its own row");
+  assert.match(text(bucket), /Not delegated/);
+  assert.match(text(bucket), /2 open/);
+  assert.match(text(bucket), /1 of 2 need attention/);
+  assert.match(text(before), /2 agents · 1 with open work/, "the bucket is not an agent");
+
+  h.click(before, "crew-undelegated");
+  await h.flush();
+  const queue = h.board.crewWindow();
+  assert.deepEqual(byId(queue, "crew-queue").nodes.map(n => n.attributes.id[0]),
+    ["crew-row-issue-3", "crew-row-issue-2"], "needs attention first, and only undelegated issues");
+  assert.doesNotMatch(text(queue), /This agent has no Linear identity/);
+  assert.match(text(queue), /Select issues to delegate/);
+
+  h.click(queue, "crew-row-issue-2-pick");
+  const picked = h.board.crewWindow();
+  assert.match(text(byId(picked, "crew-reassign-open")), /Delegate…/);
+  h.click(picked, "crew-reassign-open");
+  const panel = h.board.crewWindow();
+  assert.match(text(panel), /Delegate 1 issue to a Linear agent/);
+  assert.doesNotMatch(text(panel), /from \?/, "a first delegation has no agent to take it from");
+  assert.match(text(panel), /Linear runs the agent; Herdr starts no terminal/);
+  const dest = nodes(panel).find(n => n.attributes.id?.[0]?.startsWith("crew-dest-") && text(n).includes("Leia"));
+  dest.attributes.on_click[0]({}, h.cx);
+  assert.match(text(byId(h.board.crewWindow(), "crew-apply")), /Delegate 1 to Leia/);
+
+  h.click(h.board.crewWindow(), "crew-apply");
+  await h.flush();
+  assert.deepEqual(h.writes.map(w => [w.id, w.delegateId]), [[rows[1].id, leia.id]]);
+  for (const w of h.writes) assert.deepEqual(Object.keys(w).sort(), ["config", "delegateId", "id", "on"]);
+  const after = h.board.crewWindow();
+  assert.match(text(after), /Delegated 1 issue to Leia; Linear confirmed each one\./);
+  assert.match(text(byId(after, "crew-undelegated")), /1 open/, "the delegated issue left the bucket");
+  assert.equal(h.effects.filter(e => ["run", "exec", "setAgentOrder"].includes(e.name)).length, 0);
+});
+
+test("an incomplete Linear read makes the bucket a lower bound rather than a claim", async () => {
+  const h = await harness({ rows: [free(1)] });
+  h.state.set("linear-board.enrich", { rows: [free(1)], on: null, fetchedAt: 100, error: "offline", partial: false });
+  h.board.crewSelectAgent({ id: null, name: "Not delegated", undelegated: true }, h.cx);
+  const tree = h.board.crewWindow();
+  assert.match(text(byId(tree, "crew-undelegated")), /1\+ open/);
+  assert.match(text(tree), /did not finish, so there may be more/);
+});
+
+test("an unread workspace shows the bucket as unknown, never as empty", async () => {
+  const h = await harness({ rows: [] });
+  h.state.set("linear-board.enrich", { rows: [], on: null, fetchedAt: null, error: null, partial: false });
+  const row = byId(h.board.crewWindow(), "crew-undelegated");
+  assert.match(text(row), /0\+ open/);
+  assert.match(text(row), /not read yet/);
+  assert.doesNotMatch(text(row), /nothing waiting for an agent/, "zero from an unfinished read is unknown, not none");
+  h.state.set("linear-board.enrich", { rows: [], on: null, fetchedAt: 100, error: null, partial: false });
+  const read = byId(h.board.crewWindow(), "crew-undelegated");
+  assert.match(text(read), /nothing waiting for an agent/);
+  assert.doesNotMatch(text(read), /0\+ open/);
+});
+
+const space = { id: "space-1", name: "DEMO-1 work", active: true, machine: null, tabs: [], status: "idle" };
+const panelIssue = n => ({ id: `issue-${n}`, identifier: `DEMO-${n}`, title: `Issue ${n}`,
+  branch: `demo-${n}`, state: { name: "In Progress", type: "started" }, project: { id: "p", name: "Project" },
+  url: `https://example.test/DEMO-${n}` });
+
+test("the issue panel delegates the open ticket to a Linear agent and reports what Linear confirmed", async () => {
+  const rows = [free(1)];
+  let delegated = false;
+  const h = await harness({ rows, role: "agent", spaces: [space], issues: [panelIssue(1)],
+    write: async () => { delegated = true; return { ok: true }; },
+    enrichment: async () => ({ rows: delegated ? [{ ...rows[0], delegate: leia }] : rows, error: null, fetchedAt: 300, partial: false }),
+  });
+
+  const closed = h.board.agentPanel();
+  assert.match(text(closed), /No Linear agent has this ticket yet/);
+  // An active Spaces delegate filter ("Existing filter" in this harness) must not read as
+  // this ticket having an agent: the control follows the ticket, not the filter.
+  assert.match(text(closed), /Existing filter/);
+  assert.match(text(byId(closed, "agent-panel-delegate")), /Delegate…/);
+  assert.equal(byId(closed, "agent-panel-handoff"), undefined);
+
+  h.click(closed, "agent-panel-delegate");
+  await h.flush();
+  const open = h.board.agentPanel();
+  assert.match(text(open), /Delegate DEMO-1 to a Linear agent/);
+  assert.match(text(open), /Sets only the Linear delegate/);
+  assert.match(text(open), /human assignee, project, priority and workflow state are kept/);
+  const pick = nodes(open).find(n => n.attributes.id?.[0]?.startsWith("agent-panel-agent-") && text(n).includes("Leia"));
+  assert.ok(pick, "every eligible Linear agent is offered");
+  pick.attributes.on_click[0]({}, h.cx);
+  assert.match(text(byId(h.board.agentPanel(), "agent-panel-apply")), /Delegate to Leia/);
+
+  h.click(h.board.agentPanel(), "agent-panel-apply");
+  await h.flush();
+  assert.deepEqual(h.writes.map(w => [w.id, w.delegateId]), [["issue-1", leia.id]]);
+  for (const w of h.writes) assert.deepEqual(Object.keys(w).sort(), ["config", "delegateId", "id", "on"]);
+  const done = h.board.agentPanel();
+  assert.match(text(done), /DEMO-1 is delegated to Leia; Linear confirmed it\./);
+  assert.equal(byId(done, "agent-panel-handoff"), undefined, "the chooser closes once Linear confirms");
+  assert.match(text(done), /Leia/, "the panel now shows the agent that has it");
+  assert.match(text(byId(done, "agent-panel-delegate")), /Change agent…/);
+  assert.equal(h.effects.filter(e => ["run", "exec", "setAgentOrder"].includes(e.name)).length, 0,
+    "delegating starts no terminal here; Linear runs the agent");
+});
+
+test("a refused delegation says so and leaves the ticket where it was", async () => {
+  const h = await harness({ rows: [free(1)], role: "agent", spaces: [space], issues: [panelIssue(1)],
+    write: async () => ({ ok: false, error: "Linear still shows no agent as the delegate" }) });
+  h.board.handoffToggle({ id: "issue-1", identifier: "DEMO-1", delegate: null }, h.cx);
+  await h.flush();
+  h.board.handoff.target = { id: leia.id, name: "Leia" };
+  h.click(h.board.agentPanel(), "agent-panel-apply");
+  await h.flush();
+  const tree = h.board.agentPanel();
+  assert.match(text(tree), /DEMO-1 was not delegated: Linear still shows no agent as the delegate/);
+  assert.match(text(tree), /No Linear agent has this ticket yet/, "the panel keeps telling the truth about the ticket");
+  assert.match(text(byId(tree, "agent-panel-apply")), /Delegate to Leia/, "the choice is kept so the same button retries");
+});
+
+test("a ticket that already has an agent offers the others, as a reassignment", async () => {
+  const rows = [issue(1)];
+  const h = await harness({ rows, role: "agent", spaces: [space], issues: [panelIssue(1)] });
+  const tree = h.board.agentPanel();
+  assert.match(text(byId(tree, "agent-panel-delegate")), /Change agent…/);
+  assert.doesNotMatch(text(tree), /No Linear agent has this ticket yet/);
+  h.click(tree, "agent-panel-delegate");
+  await h.flush();
+  const open = h.board.agentPanel();
+  assert.match(text(open), /Reassign DEMO-1 to a Linear agent/);
+  assert.match(text(open), /Changes only the Linear delegate/);
+  const names = nodes(open).filter(n => n.attributes.id?.[0]?.startsWith("agent-panel-agent-")).map(n => text(n));
+  assert.ok(names.some(n => n.includes("Leia")), "the other agents are offered");
+  assert.ok(!names.some(n => n.includes("Yoda")), "the agent that already has it is not");
+});
+
+test("the panel waits for the sidebar's Linear connection instead of writing without one", async () => {
+  const h = await harness({ rows: [free(1)], role: "agent", spaces: [space], issues: [panelIssue(1)] });
+  h.state.delete("erics-linear.config");
+  h.board.handoffToggle({ id: "issue-1", identifier: "DEMO-1", delegate: null }, h.cx);
+  await h.flush();
+  const tree = h.board.agentPanel();
+  assert.match(text(tree), /Waiting for the Herdr sidebar to connect to Linear/);
+  h.board.handoff.target = { id: leia.id, name: "Leia" };
+  h.click(tree, "agent-panel-apply");
+  await h.flush();
+  assert.equal(h.writes.length, 0, "no Linear connection means no write");
 });
