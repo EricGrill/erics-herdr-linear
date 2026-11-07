@@ -8,6 +8,8 @@ here, verify, commit and push, then install to each machine. Installed copies un
 - `mods/linear-board`: Spaces-first sidebar, Projects popup, Crew and issue/delegate panels.
 - Other `mods/` folders are required adapted interface components; preserve upstream notices.
 - `scripts/`: dependency-free local install, explicit update and named-host sync.
+- `scripts/preview/`: optional Chrome-based renderer for the committed preview images.
+- `docs/`: guides plus design records; `docs/README.md` is the index.
 - `erics-linear.config.json` belongs in the machine's Herdr home and is deliberately ignored.
 
 Do not change shipped Herdr mods or generated type files. Native API authority is the

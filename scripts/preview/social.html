@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Eric's Herdr Linear</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1280px; height: 640px; }
+  body {
+    background: #141517; color: #e9e9e7; display: flex; align-items: center;
+    font: 16px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; overflow: hidden;
+  }
+  .glow {
+    position: absolute; width: 760px; height: 760px; left: -230px; top: -290px;
+    background: radial-gradient(circle, rgba(79,143,212,0.17), rgba(79,143,212,0) 68%);
+  }
+  .left { width: 760px; padding: 0 0 0 76px; position: relative; }
+  .kicker {
+    font-size: 15px; letter-spacing: 2.6px; text-transform: uppercase;
+    color: #7f8084; font-weight: 600;
+  }
+  h1 { font-size: 72px; line-height: 1.04; letter-spacing: -2.2px; margin: 20px 0 0; }
+  h1 em { font-style: normal; color: #6ba8e8; }
+  p.tag { font-size: 24px; line-height: 1.45; color: #abacb0; margin-top: 24px; max-width: 610px; }
+  .chips { display: flex; gap: 10px; margin-top: 38px; }
+  .chips span {
+    font-size: 15px; font-weight: 600; padding: 8px 15px; border-radius: 999px;
+    border: 1px solid #303238; color: #c6c7ca;
+  }
+  .repo {
+    position: absolute; bottom: -108px; font-size: 16px; color: #6c6d71;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  /* abstract sidebar */
+  .card {
+    width: 372px; height: 470px; margin-left: 20px; background: #1b1c1e;
+    border: 1px solid #2b2d31; border-radius: 16px; padding: 26px 24px;
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  .g {
+    font-size: 11.5px; font-weight: 700; letter-spacing: 1.2px;
+    margin-top: 16px; margin-bottom: 6px; display: flex;
+  }
+  .g:first-child { margin-top: 0; }
+  .g b { margin-left: auto; font-weight: 500; color: #6c6d71; }
+  .r { display: flex; align-items: center; gap: 11px; padding: 7px 0; }
+  .r .d { width: 10px; height: 10px; border-radius: 50%; border: 2px solid currentColor; flex: none; }
+  .r .b { height: 9px; border-radius: 5px; background: #313338; }
+  .r.on { background: #26282c; margin: 0 -14px; padding: 7px 14px; border-radius: 8px; }
+  .needs { color: #ef7360; } .done { color: #6ba8e8; }
+  .working { color: #e0a84a; } .idle { color: #86878b; }
+</style>
+</head>
+<body>
+  <div class="glow"></div>
+  <div class="left">
+    <div class="kicker">Herdr layout</div>
+    <h1>Eric's<br>Herdr <em>Linear</em></h1>
+    <p class="tag">A spaces-first workspace for Linear issues. Whatever needs you is the first thing you see.</p>
+    <div class="chips"><span>Needs you</span><span>Done</span><span>Working</span><span>Idle</span></div>
+    <div class="repo">github.com/EricGrill/erics-herdr-linear</div>
+  </div>
+  <div class="card">
+    <div class="g needs">NEEDS YOU <b>2</b></div>
+    <div class="r needs"><span class="d"></span><span class="b" style="width:196px"></span></div>
+    <div class="r needs"><span class="d"></span><span class="b" style="width:158px"></span></div>
+    <div class="g done">DONE <b>2</b></div>
+    <div class="r done"><span class="d"></span><span class="b" style="width:174px"></span></div>
+    <div class="r done"><span class="d"></span><span class="b" style="width:208px"></span></div>
+    <div class="g working">WORKING <b>1</b></div>
+    <div class="r working on"><span class="d"></span><span class="b" style="width:186px"></span></div>
+    <div class="g idle">IDLE <b>2</b></div>
+    <div class="r idle"><span class="d"></span><span class="b" style="width:166px"></span></div>
+    <div class="r idle"><span class="d"></span><span class="b" style="width:142px"></span></div>
+  </div>
+</body>
+</html>

@@ -109,6 +109,27 @@ jobs:
           TARGET: ${{ steps.release.outputs.target }}
         # No --force: verified only ever fast-forwards along main.
         run: git push origin "$TARGET:refs/heads/verified"
+      # Cosmetic: a tag and release notes for the version the machines are installing.
+      # continue-on-error so a failure here can never mark a deployed commit as failed.
+      - name: Tag the release and publish its notes
+        if: steps.move.outputs.moved == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.release.outputs.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "v$VERSION is already released."
+            exit 0
+          fi
+          gh release create "v$VERSION" --target "$TARGET" --title "v$VERSION" \
+            --generate-notes --latest
+          {
+            echo
+            echo "Released [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION)."
+          } >> "$GITHUB_STEP_SUMMARY"
       # If the branch did not move, no machine will install this commit; say so.
       - name: Clear the pending statuses if the branch did not move
         if: failure() && steps.release.outputs.target != ''

@@ -1,6 +1,8 @@
-# CHA-4203: Capture an idea from outside Herdr
+# Capture an idea from outside Herdr
 
-Discovery, 2026-11-05. Follow-up to [CHA-4200](CHA-4200-idea-capture.md), idea 4 ("Capture
+*Design record for [CHA-4203](https://linear.app/chainbytes/issue/CHA-4203).*
+
+Discovery, 2026-11-05. Follow-up to [CHA-4200](idea-capture.md), idea 4 ("Capture
 from anywhere"). This is a recommendation, not approved work. No shortcut is assigned, and
 no code, key binding or dependency changes are part of this document.
 
