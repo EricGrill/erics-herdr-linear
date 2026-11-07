@@ -1236,8 +1236,15 @@ export default class LinearWorkspace extends LinearClient {
     this.homeScroll = clampScroll(this.homeScroll, content, viewport);
     const pin = pinnedHeader(stack, this.homeScroll), bar = thumb(this.homeScroll, content, viewport);
     return v_flex().id("spaces-home").size_full().min_w(0).min_h(0).px(10).gap(7).bg(t.chrome)
-      .child(h_flex().h(32).flex_none().items_center().px(8).gap(7).bg(t.background).rounded(6)
-        .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
+      // Refresh sits beside the search box rather than with the buttons below, which wrap
+      // at this sidebar's width and would push it onto a line of its own (CHA-4365).
+      .child(h_flex().h(32).flex_none().items_center().gap(7)
+        .child(h_flex().h_full().flex_1().min_w(0).items_center().px(8).gap(7).bg(t.background).rounded(6)
+          .child(icon("search", t.dim, 13)).child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground)))
+        .child(this.button("refresh", this.refreshing
+          ? h_flex().gap(5).child(div().frames(["◐", "◓", "◑", "◒"], 120)).child("Refreshing…")
+          : "↻", cx => this.refresh(cx), { enabled: !this.refreshing })
+          .tooltip(this.refreshing ? "Refreshing Linear tickets" : "Refresh Linear tickets")))
       .child(h_flex().flex_none().items_center().flex_wrap().gap(7)
         .child(this.button("new-task", "+ New issue", () => dialog({ action: "new" }), { primary: true }))
         .child(this.button("home-filter-button", count ? `Filters (${count})` : "Filters", () => this.openFilters()))
@@ -1245,10 +1252,6 @@ export default class LinearWorkspace extends LinearClient {
         .when(finished > 0 && !this.cleanupOpen, el => el.child(this.button("open-cleanup", `Clean up (${finished})`, cx => this.openCleanup(cx))
           .tooltip("Close spaces whose ticket is Done or Canceled, or whose pull request merged")))
         .child(div().flex_1())
-        .child(this.button("refresh", this.refreshing
-          ? h_flex().gap(5).child(div().frames(["◐", "◓", "◑", "◒"], 120)).child("Refreshing…")
-          : "↻", cx => this.refresh(cx), { enabled: !this.refreshing })
-          .tooltip(this.refreshing ? "Refreshing Linear tickets" : "Refresh Linear tickets"))
         .child(div().text_size(11).text_color(t.muted).child(`${records.length} spaces`)))
       .when(count > 0, el => el.child(h_flex().h(26).flex_none().items_center().gap(6).px(7).rounded(6).bg(tint(t.accent, 0.12))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.accent).tooltip(summary).child(summary))
