@@ -25,6 +25,11 @@ MAC_KEYS = {
     "cmd-shift-c": "linear-board.crew", "cmd-shift-i": "linear-board.issue",
     "cmd-shift-a": "linear-board.agent", "cmd-shift-f": "linear-board.files",
     "cmd-shift-e": "linear-board.panel", "cmd-shift-x": "linear-board.clear",
+    # The sidebar's top buttons are gone (CHA-4365); Projects needs its own binding.
+    # Not cmd-shift-p: that is Herdr's own command palette, and the layout section
+    # wins over global, so binding it here would hide the palette. cmd-alt-p pairs
+    # with the cmd-alt-a that opens Agents.
+    "cmd-alt-p": "linear-board.projects",
     "cmd-alt-a": "mod.open:erics-linear-agents",
     "cmd-w": "linear-workspace-tabs.close",
 }
@@ -32,6 +37,7 @@ LINUX_KEYS = {
     "alt-shift-c": "linear-board.crew", "alt-shift-i": "linear-board.issue",
     "alt-shift-d": "linear-board.agent", "alt-shift-f": "linear-board.files",
     "alt-shift-e": "linear-board.panel", "alt-shift-x": "linear-board.clear",
+    "alt-shift-p": "linear-board.projects",
     "alt-shift-a": "mod.open:erics-linear-agents",
 }
 # Herdr 0.1.13 added Find in terminal. It only reaches keys.json files nobody has
@@ -198,6 +204,13 @@ def install(argv=None):
     shadowed = [key for key in desired if key in keys.get("terminal", {})]
     if shadowed:
         raise ValueError("Terminal bindings take priority over layout shortcuts: " + ", ".join(shadowed))
+    # A layout section wins over global, so a shared key hides the app's own binding.
+    # cmd-w is deliberate: the layout closes its tab instead of Herdr's. Anything else
+    # is worth saying out loud rather than discovering it as a missing shortcut.
+    hidden = sorted(key for key, action in desired.items()
+                    if keys.get("global", {}).get(key) not in (None, action) and key != "cmd-w")
+    for key in hidden:
+        print(f"Note: {key} now runs {desired[key]} in this layout, hiding {keys['global'][key]}.")
     keys[SCOPE] = {**old, **desired}
     terminal = keys.setdefault("terminal", {})
     if not isinstance(terminal, dict):

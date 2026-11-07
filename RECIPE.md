@@ -1,8 +1,8 @@
 # Eric's Herdr Linear
 
 A Herdr window whose sidebar is a queue of spaces, grouped by Needs you, Done, Working,
-and Idle. Three buttons at the top open Projects, Crew, and Agents so optional browsing
-does not displace the work. The main area stays a normal Herdr terminal workspace, with
+and Idle, or by project, agent or company from a Group dropdown. Projects, Crew, and
+Agents open from their shortcuts, so optional browsing does not displace the work. The main area stays a normal Herdr terminal workspace, with
 the active issue shown above its tabs.
 
 ![Eric's Herdr Linear](preview.png)
@@ -14,12 +14,13 @@ between **44 and 480 px**, and uses the current theme's chrome surface. It has a
 brand row, a space list that takes the remaining height, and a **69 px** Settings/Add
 machine footer. The header reads **Erics Linear**.
 
-At the top of the list, Projects, Crew, and Agents are content-width buttons. A search
+A search
 field filters spaces by name, ticket, machine, or agent title, and also searches Linear: tickets
 from any team that match (by words or an issue key) appear under LINEAR TICKETS, leaving out
 those already shown as spaces. Word search uses the configured Linear API key; the herdr-linear
 sign-in only finds issues by key. New task sits beside the
-number of matching spaces. Below it, non-empty groups appear in this order:
+number of matching spaces, with Group and Refresh in the same row. Grouped by status,
+non-empty groups appear in this order:
 
 0. Pinned, for spaces whose Linear issue has the `Pinned` label. Each keeps its own
    state icon and line, and is not repeated in the groups below.
@@ -55,12 +56,19 @@ working spaces appear in Working, followed by Idle. Looking at an unseen finishe
 can change Herdr's report from done to idle; the UI reflects that live state. Grouping
 does not change Linear workflow state.
 
+Group is a dropdown of four modes: Status (the above), Project, Agent (the ticket's
+delegate) and Company (its Linear team). The three field modes give one group per value,
+ordered groups-that-need-you first, then by name, with the rows that have no value last;
+Pinned still leads. Each row keeps its state line, and drops its project name only when
+the group header above it already says the project. Group keys carry their mode, so each
+mode remembers which of its own groups are collapsed.
+
 Click a space to select it and focus its most relevant agent. Search Enter selects the
 first matching space, or opens the first Linear ticket when no space matches. Clicking an ellipsis opens the issue's state, description, labels,
 branch, and pull requests. An unlinked workspace can attach to an existing issue without
 moving its directory or changing its branch.
 
-Projects opens a centered dialog with the complete team/project tree, search, issue
+Projects (Cmd+Opt+P) opens a centered dialog with the complete team/project tree, search, issue
 rows, New task, and Browse. Names containing `A · B` can fold under a synthetic group A
 with leaf B. Expanding a project fetches its issues; loaded open projects refresh. Choose
 a running issue to return to its space. Keep the project count inside this popup.
@@ -179,8 +187,10 @@ display and report the error.
   tree taking its place or another cramped list underneath it.
 - Needs you, Done, Working, and Idle groups display their actual source states; clicking
   a row returns to its terminal and the issue header follows the selected space.
-- Projects, Crew, and Agents open from the top; the full project tree remains searchable
-  in its popup and the Agents list scrolls without clipping its rows.
+- Group switches the list between status, project, agent and company without losing the
+  search, the filters or each mode's collapsed groups.
+- Projects, Crew, and Agents open from their shortcuts; the full project tree remains
+  searchable in its popup and the Agents list scrolls without clipping its rows.
 - Creation, attach, and explicit agent continuation preserve ticket context, avoid
   duplicate prompts to an existing agent, and fail visibly when eligibility or agent
   checks fail.

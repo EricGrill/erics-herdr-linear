@@ -7,7 +7,7 @@ function native() {
   const node = { nodes: [], attributes: {} };
   const proxy = new Proxy(node, { get(target, key) {
     if (key in target) return target[key];
-    if (key === "child") return child => { target.nodes.push(child); return proxy; };
+    if (key === "child" || key === "content") return child => { target.nodes.push(child); return proxy; };
     if (key === "children") return children => { target.nodes.push(...children); return proxy; };
     if (key === "when") return (condition, fn) => { if (condition) fn(proxy); return proxy; };
     return (...args) => { target.attributes[key] = args; return proxy; };
@@ -33,7 +33,7 @@ async function harness(count = 1) {
   const dummy = () => {};
   const boundaries = {
     "gpui-kit": { div: native, svg: native, image: native },
-    "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, InputState: {}, Popup: {}, TextView: {} },
+    "gpui-base": { v_flex: native, h_flex: native, Input: { new: native }, InputState: {}, Popup: { new: (_id, trigger) => native().child(trigger) }, TextView: {} },
     "./client.js": { default: Client },
     "fs/promises": { readFile: async () => "{}" },
     "herdr": { spaces: () => spaces, panes: () => [], agents: () => [], machines: () => [], window: () => null, keys: () => [],

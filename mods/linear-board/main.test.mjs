@@ -284,7 +284,7 @@ function element(kind = "div") {
   proxy = new Proxy(node, { get(target, key) {
     if (key in target) return target[key];
     if (key === "then") return undefined;
-    if (key === "child") return child => { target.items.push(child); return proxy; };
+    if (key === "child" || key === "content") return child => { target.items.push(child); return proxy; };
     if (key === "children") return children => { target.items.push(...children); return proxy; };
     if (key === "when") return (condition, draw) => { if (condition) draw(proxy); return proxy; };
     if (key === "on_click") return handler => { target.handlers.click = handler; return proxy; };
@@ -344,7 +344,7 @@ async function harness(options = {}) {
   }
   const native = {
     "gpui-kit": { div: () => element(), svg: () => element(), image: () => element() },
-    "gpui-base": { v_flex: () => element("column"), h_flex: () => element("row"), Input: { new: () => element("input") }, InputState: {}, Popup: {}, TextView: {} },
+    "gpui-base": { v_flex: () => element("column"), h_flex: () => element("row"), Input: { new: () => element("input") }, InputState: {}, Popup: { new: (id, trigger) => element("popup").id(id).child(trigger) }, TextView: {} },
     "herdr": {
       spaces: () => allSpaces, panes: () => [], agents: () => allAgents, machines: () => [],
       window: () => ({ platform: "macos" }), keys: () => [],
@@ -505,12 +505,15 @@ test("grouped report launchers preserve home filters and Projects includes every
   h.view.applyFilter({ team: ["DEMO"], crew: ["Spock"] });
   const before = plain(h.state.get(FILTER));
   const home = h.view.render(h.cx);
-  h.click(home, "open-projects");
-  h.click(home, "crew");
-  h.click(home, "live-agents");
+  // CHA-4365 took the Projects/Crew/Agents buttons off the sidebar; both still open from
+  // their shortcuts, and neither touches the home filters.
+  assert.equal(find(home, "open-projects"), undefined);
+  assert.equal(find(home, "crew"), undefined);
+  assert.equal(find(home, "live-agents"), undefined);
+  h.view.onCommand("projects", h.cx);
+  h.view.onCommand("crew", h.cx);
   assert.equal(h.overlays[0].props.role, "projects");
   assert.equal(h.overlays[1].props.role, "crew");
-  assert.deepEqual(plain(h.commands), [{ name: "mod.open", args: { name: "erics-linear-agents" } }]);
   assert.deepEqual(plain(h.state.get(FILTER)), before);
   const projects = h.view.tree(h.view.enrichment()).flatMap(team => team.children.map(project => project.project.id));
   assert.deepEqual(plain(projects).sort(), ["alpha", "beta"]);

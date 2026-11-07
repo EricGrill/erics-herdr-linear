@@ -9,7 +9,7 @@ function native(type, asset) {
   const node = { type, asset, nodes: [], attributes: {} };
   const proxy = new Proxy(node, { get(target, key) {
     if (key in target) return target[key];
-    if (key === "child") return child => { target.nodes.push(child); return proxy; };
+    if (key === "child" || key === "content") return child => { target.nodes.push(child); return proxy; };
     if (key === "children") return children => { target.nodes.push(...children); return proxy; };
     if (key === "when") return (condition, callback) => { if (condition) callback(proxy); return proxy; };
     return (...args) => { target.attributes[key] = args; return proxy; };
@@ -32,7 +32,7 @@ const boundaries = {
   "gpui-base": { v_flex: () => native("column"), h_flex: () => native("row"), Input: { new: () => native("input") },
     InputState: { new: options => { const state = { options, text: "", handlers: {}, focused: false, on(name, fn) { state.handlers[name] = fn; },
       value: () => state.text, set_value(v) { state.text = v; }, focus() { state.focused = true; } }; inputs.push(state); return state; } },
-    Popup: {}, TextView: {} },
+    Popup: { new: (id, trigger) => native("popup").id(id).child(trigger) }, TextView: {} },
   "./client.js": { default: class {} },
   "fs/promises": {},
   "herdr": {
@@ -404,7 +404,7 @@ test("sidebar rows show time in state, hide a matching Linear status and list th
 
 // ---- CHA-4318: pins, tags and colors are Linear labels ---------------------------------
 
-const TAGS = "linear-board.tags";
+const TAGS = "linear-board.tags", TEAMS = "linear-board.teams";
 const same = (actual, expected, message) => assert.deepStrictEqual(JSON.parse(JSON.stringify(actual)), expected, message);
 const graphql = args => JSON.parse(String(args[1]).split("<<'HERDR_BOARD_QUERY'\n")[1].split("\nHERDR_BOARD_QUERY")[0]);
 const reply = data => ({ code: 0, stdout: JSON.stringify({ data }), stderr: "" });
@@ -557,4 +557,51 @@ test("CHA-4318: Tags… lists Linear labels, toggles one at a time and can creat
     assert.equal(search.text, "", "the field clears after creating");
     assert.equal(picker.tagError, "");
   } finally { currentProps = {}; delete sharedState[TAGS]; delete sharedState["linear-board.enrich"]; execImpl = async () => ({ code: 1, stdout: "", stderr: "" }); }
+});
+
+test("CHA-4365: the group-by dropdown groups the sidebar by status, project, agent or company", () => {
+  const space = (id, name) => ({ id, name, machine: null, tabs: [] });
+  const one = { ...record, agents: [], status: "working", space: space("a", "Alpha"),
+    issue: { id: "a", identifier: "DEMO-1", title: "One", project: { id: "p1", name: "Herdr" }, delegate: "Spock", teamKey: "CHA" } };
+  const two = { ...record, agents: [], status: "idle", space: space("b", "Beta"),
+    issue: { id: "b", identifier: "DEMO-2", title: "Two", project: null, delegate: null, teamKey: "PKX" } };
+  const saved = board.records, savedEnrich = board.enrichment, savedMode = board.groupMode;
+  board.records = () => [one, two];
+  board.enrichment = () => ({ byIdentifier: new Map() });
+  board.input = {};
+  sharedState[TEAMS] = [{ key: "CHA", name: "Chainbytes" }, { key: "PKX", name: "PointsKash" }];
+  const cx = { notify() {}, stop_propagation() {} };
+  const headers = () => text(board.sidebar());
+  const click = (view, id) => nodes(view).find(n => n.attributes.id?.[0] === id).attributes.on_click[0]({}, cx);
+  try {
+    board.groupMode = "status";
+    assert.match(headers(), /Group: Status/);
+    assert.match(headers(), /WORKING\|1.*DEMO-1.*IDLE\|1.*DEMO-2/);
+
+    // The dropdown is closed until its trigger is clicked, and then lists all four modes.
+    assert.equal(nodes(board.sidebar()).find(n => n.attributes.id?.[0] === "group-mode-project"), undefined);
+    click(board.sidebar(), "group-mode");
+    const open = board.sidebar();
+    assert.deepEqual(["status", "project", "crew", "team"].map(mode =>
+      text(nodes(open).find(n => n.attributes.id?.[0] === `group-mode-${mode}`))), ["Status", "Project", "Agent", "Company"]);
+
+    click(open, "group-mode-project");
+    assert.equal(board.groupMode, "project");
+    assert.equal(board.groupMenu, false, "picking a mode closes the dropdown");
+    assert.match(headers(), /Group: Project/);
+    assert.match(headers(), /HERDR\|1.*DEMO-1.*NO PROJECT\|1.*DEMO-2/);
+    assert.doesNotMatch(headers(), /Working.*· Herdr/, "the row drops the project name its header already shows");
+
+    board.setGroupMode("crew", cx);
+    assert.match(headers(), /Group: Agent/);
+    assert.match(headers(), /SPOCK\|1.*DEMO-1.*NO AGENT\|1.*DEMO-2/);
+    assert.match(headers(), /Working.*Herdr/, "but keeps it in every other mode");
+
+    board.setGroupMode("team", cx);
+    assert.match(headers(), /Group: Company/);
+    assert.match(headers(), /CHAINBYTES\|1.*DEMO-1.*POINTSKASH\|1.*DEMO-2/);
+  } finally {
+    board.records = saved; board.enrichment = savedEnrich; board.groupMode = savedMode;
+    board.groupMenu = false; delete sharedState[TEAMS];
+  }
 });
